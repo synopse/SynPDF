@@ -1,17 +1,13 @@
 SynPDF
-
 ======
 
-
-
-Synopse PDF engine is a fully featured *Open Source* PDF document creation library for Delphi, embedded in one unit
-.
+Synopse PDF engine is a fully featured *Open Source* PDF document creation library for Delphi, embedded in one unit.
 
 It's used e.g. in our [*mORMot* framework](https://github.com/synopse/mORMot), for creating PDF files from generated reports. 
 But you can use it stand-alone, without our main ORM/SOA framework.
 
 Features
-========
+--------
 
   * Pure Delphi code, with no external .dll, and adding very small code size to your executable;
   * Targets Delphi 5 up to XE6, for Win32 and Win64 platforms, with full source code provided;
@@ -29,7 +25,7 @@ Features
   * Licensed under a [MPL/GPL/LGPL tri-license](http://synopse.info/forum/viewtopic.php?id=27).
 
 Sample code
-===========
+-----------
 
 In fact, you have at least three ways of generating pdfs using the library:
   * [Directly call](http://synopse.info/forum/viewtopic.php?pid=370#p370) of a `TPdfCanvas` as published by a `TPdfDocument` instance - this is the most direct but also more difficult way of rendering;
@@ -39,14 +35,14 @@ In fact, you have at least three ways of generating pdfs using the library:
 The 2nd and 3rd ways are preferred, for most applications.
 
 Documentation
-=============
+-------------
 
 For detailed documentation of the unit, see the corresponding pages in the "[Software Architecture Document](http://synopse.info/fossil/wiki?name=Downloads)" of *mORMot* official documentation, or directly in the interface part of the unit, as methods comments. 
 
 Including the report generation pages within the "*SynFile Main Demo*" description.
 
 Dedicated blog and forum
-========================
+------------------------
 
 A blog is available at http://blog.synopse.info, and will notify any evolution of this component.
 
