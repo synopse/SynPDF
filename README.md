@@ -10,7 +10,7 @@ Features
 --------
 
   * Pure Delphi code, with no external .dll, and adding very small code size to your executable;
-  * Targets Delphi 5 up to XE6, for Win32 and Win64 platforms, with full source code provided;
+  * Targets Delphi 5 up to XE7, for Win32 and Win64 platforms, with full source code provided;
   * Includes most vectorial drawing commands, including text,lines or curves;
   * Renders bitmaps, and metafiles (even most .emf files with clipping and regioning);
   * Introduce metadata, bookmarks and outline information;
