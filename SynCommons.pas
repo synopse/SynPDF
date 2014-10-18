@@ -446,6 +446,7 @@ unit SynCommons;
     (with corresponding boolean property FlushShouldNotAutoResize)
   - fixed ticket [5bd9df5979] about TTextWriter.CancelAll issue
   - added optional internal buffer size for TTextWriter.CreateOwnedStream()
+  - added new constructor TTextWriter.CreateOwnedFileStream()
   - added TTextWriter.LastChar and TTextWriter.AddStrings() methods
   - added TTextWriter.ForceContent() method
   - added faster TTextWriter.SetText() method in conjuction to Text function
@@ -1066,7 +1067,10 @@ type
     function AnsiToRawUnicode(Source: PAnsiChar; SourceChars: Cardinal): RawUnicode; overload; virtual;
     /// convert any Ansi buffer into an Unicode String
     // - returns a SynUnicode, i.e. Delphi 2009+ UnicodeString or a WideString
-    function AnsiToUnicodeString(Source: PAnsiChar; SourceChars: Cardinal): SynUnicode;
+    function AnsiToUnicodeString(Source: PAnsiChar; SourceChars: Cardinal): SynUnicode; overload;
+    /// convert any Ansi buffer into an Unicode String
+    // - returns a SynUnicode, i.e. Delphi 2009+ UnicodeString or a WideString
+    function AnsiToUnicodeString(const Source: RawByteString): SynUnicode; overload;
     /// convert any Ansi Text into an UTF-8 encoded String
     // - internaly calls AnsiBufferToUTF8 virtual method
     function AnsiToUTF8(const AnsiText: RawByteString): RawUTF8; virtual;
@@ -5096,6 +5100,9 @@ type
     // to retrieve directly the content without any data move nor allocation
     // - default internal buffer size if 4096 (enough for most JSON objects)
     constructor CreateOwnedStream(aBufSize: integer=4096);
+    /// the data will be written to an external file
+    // - you should call explicitly Flush to write any pending data to the file
+    constructor CreateOwnedFileStream(const aFileName: TFileName; aBufSize: integer=8192);
     /// release all internal structures
     // - e.g. free fStream if the instance was owned by this class
     destructor Destroy; override;
@@ -9630,7 +9637,11 @@ type
     procedure SetValueOrItem(const aNameOrIndex, aValue: variant);
     procedure InternalAddValue(const aName: RawUTF8; const aValue: variant);
     procedure SetCapacity(aValue: integer);
-    function GetCapacity: integer; 
+    function GetCapacity: integer;
+    /// add some properties to a TDocVariantData dvObject
+    // - data is supplied two by two, as Name,Value pairs
+    // - caller should ensure that VKind=dvObject
+    procedure AddNameValuesToObject(const NameValuePairs: array of const);
   public
     /// initialize a TDocVariantData to store some document-based content
     // - can be used with a stack-allocated TDocVariantData variable:
@@ -9962,6 +9973,14 @@ function DocVariantDataSafe(const DocVariant: variant): PDocVariantData;
 // or using _ObjFast() will increase the process speed a lot
 function _Obj(const NameValuePairs: array of const;
   Options: TDocVariantOptions=[]): variant;
+
+/// add some property values to a document-based object content
+// - if the Obj is a TDocVariant object, will add the Name/Value pairs
+// - if the Obj is not a TDocVariant, will create a new fast document,
+// initialized with the Name/Value pairs
+// - this function will also ensure that ensure Obj is not stored by reference,
+// but as a true TDocVariantData
+procedure _ObjAddProps(const NameValuePairs: array of const; var Obj: variant);
 
 /// initialize a variant instance to store some document-based array content
 // - array will be initialized with data supplied as parameters, e.g.
@@ -11870,6 +11889,15 @@ begin
   end;
 end;
 
+function TSynAnsiConvert.AnsiToUnicodeString(const Source: RawByteString): SynUnicode;
+begin
+  result := '';
+  if Source<>'' then begin
+    SetLength(result,length(Source));
+    SetLength(result,AnsiBufferToUnicode(pointer(result),pointer(Source),length(Source))-pointer(result));
+  end;
+end;
+
 function TSynAnsiConvert.AnsiToUTF8(const AnsiText: RawByteString): RawUTF8;
 begin
   result := AnsiBufferToRawUTF8(pointer(AnsiText),length(AnsiText));
@@ -12192,9 +12220,11 @@ begin
     move(U256[0],fAnsiToWide[0],512);
   end;
   SetLength(fWideToAnsi,65536);
-  fillchar(fWideToAnsi[1],65535,ord('?')); // '?' for unknown char
-  for i := 1 to 255 do
-    if fAnsiToWide[i]<>0 then
+  for i := 1 to 126 do
+    fWideToAnsi[i] := i;
+  fillchar(fWideToAnsi[127],65536-127,ord('?')); // '?' for unknown char
+  for i := 127 to 255 do
+    if (fAnsiToWide[i]<>0) and (fAnsiToWide[i]<>ord('?')) then
       fWideToAnsi[fAnsiToWide[i]] := i;
   // fixed width Ansi will never be bigger than UTF-8
   fAnsiCharShift := 0;
@@ -14359,7 +14389,7 @@ begin
     ExtendedToStr(VDouble,DOUBLE_PRECISION,result);
   varCurrency:
     Curr64ToStr(VInt64,result);
-  varDate:     begin
+  varDate: begin
     wasString := true;
     DateTimeToIso8601TextVar(VDate,'T',result);
   end;
@@ -26682,8 +26712,8 @@ begin
       if PTypeKind(fCustomTypeInfo)^=tkEnumeration then
         fKnownType := ktEnumeration else begin
         fKnownType := ktSet;
-        inc(PByte(fTypeData)); // jump over TOrdType
-        fTypeData := PPointer(fTypeData)^;
+        inc(PByte(fTypeData)); // jump over TOrdType (see TTypeInfo.SetEnumType)
+        fTypeData := PPointer(PPointer(fTypeData)^)^;
       end;
       {$endif}
     end;
@@ -26742,8 +26772,11 @@ begin
     for i := 0 to max do begin
       aWriter.AddPropName(item^);
       aWriter.AddString(JSON_BOOLEAN[GetBit(aValue,i)]);
+      aWriter.Add(',');
       inc(PByte(item),ord(item^[0])+1); // next short string
     end;
+    aWriter.CancelLastComma;
+    aWriter.Add('}');
   end;
   {$endif}
   else begin // encoded as JSON strings
@@ -28511,9 +28544,11 @@ end;
 
 function TSynInvokeableVariantType.IsOfType(const V: variant): boolean;
 begin
-  if TVarData(V).VType=varByRef or varVariant then
-    result := IsOfType(PVariant(TVarData(V).VPointer)^) else
-    result := (self<>nil) and (TVarData(V).VType=VarType);
+  if self=nil then
+    result := false else
+    if TVarData(V).VType=varByRef or varVariant then
+      result := IsOfType(PVariant(TVarData(V).VPointer)^) else
+      result := (self<>nil) and (TVarData(V).VType=VarType);
 end;  
 
 
@@ -28929,19 +28964,25 @@ end;
 
 procedure TDocVariantData.InitObject(const NameValuePairs: array of const;
   aOptions: TDocVariantOptions=[]);
-var A: integer;
 begin
   Init(aOptions);
   VKind := dvObject;
-  VCount := length(NameValuePairs) shr 1;
-  if VCount>0 then begin
-    SetLength(VValue,VCount);
-    SetLength(VName,VCount);
-    for A := 0 to VCount-1 do begin
-      VarRecToUTF8(NameValuePairs[A*2],VName[A]);
-      VarRecToVariant(NameValuePairs[A*2+1],VValue[A]);
-    end;
+  AddNameValuesToObject(NameValuePairs);
+end;
+
+procedure TDocVariantData.AddNameValuesToObject(const NameValuePairs: array of const);
+var n,A: integer;
+begin
+  n := length(NameValuePairs) shr 1;
+  if n=0 then
+    exit; // nothing to add
+  SetLength(VValue,VCount+n);
+  SetLength(VName,VCount+n);
+  for A := 0 to n-1 do begin
+    VarRecToUTF8(NameValuePairs[A*2],VName[A+VCount]);
+    VarRecToVariant(NameValuePairs[A*2+1],VValue[A+VCount]);
   end;
+  inc(VCount,n);
 end;
 
 procedure TDocVariantData.InitArray(const Items: array of const;
@@ -29785,6 +29826,24 @@ begin
   if not(TVarData(result).VType in VTYPE_STATIC) then
     VarClear(result);
   TDocVariantData(result).InitArray(Items,Options);
+end;
+
+procedure _ObjAddProps(const NameValuePairs: array of const; var Obj: variant);
+begin
+  // ensure Obj is not by reference
+  while TVarData(Obj).VType=varByRef or varVariant do
+    TVarData(Obj) := PVarData(TVarData(Obj).VPointer)^;
+  // add name,value pairs
+  if (DocVariantType=nil) or
+     (TVarData(Obj).VType<>DocVariantType.VarType) or
+     (TDocVariantData(Obj).Kind<>dvObject) then begin
+    // Obj is not a valid TDocVariant object -> create new
+    if not(TVarData(Obj).VType in VTYPE_STATIC) then
+      VarClear(Obj);
+    TDocVariantData(Obj).InitObject(NameValuePairs,JSON_OPTIONS[true]);
+  end else
+    // add name,value pairs to the TDocVariant object
+    TDocVariantData(Obj).AddNameValuesToObject(NameValuePairs);
 end;
 
 function _ObjFast(const NameValuePairs: array of const): variant;
@@ -34037,6 +34096,14 @@ end;
 constructor TTextWriter.CreateOwnedStream(aBufSize: integer);
 begin
   Create(TRawByteStringStream.Create,aBufSize);
+  fStreamIsOwned := true;
+end;
+
+constructor TTextWriter.CreateOwnedFileStream(const aFileName: TFileName;
+  aBufSize: integer);
+begin
+  DeleteFile(aFileName);
+  Create(TFileStream.Create(aFileName,fmCreate),aBufSize);
   fStreamIsOwned := true;
 end;
 
