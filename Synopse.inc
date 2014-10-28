@@ -144,9 +144,10 @@
   - FTS3 is an SQLite module implementing full-text search
   - will include also FTS4 extension module since 3.7.4
   - see http://www.sqlite.org/fts3.html for documentation
-  - is defined by default, but can be unset by definine EXCLUDE_FTS3 conditional
+  - is defined by default, but can be unset by defining EXCLUDE_FTS3 conditional
     to save about 50 KB of code size (is it worth it nowdays?)
-  - should be defined for SynSQLite3, SynSQLite3Static and mORMotSQLite3 units }
+  - should be defined for SynSQLite3, SynSQLite3Static and mORMotSQLite3 units,
+    so a global condition in this Synopse.inc does make sense }
 
 {$ifdef EXCLUDE_FTS3}
   {$undef INCLUDE_FTS3}
@@ -171,7 +172,7 @@
 
 {$ifdef FPC}
 
-  {$MODE DELPHI} // e.g. for asm syntax
+  {$MODE DELPHI} // e.g. for asm syntax - disabled for FPC 2.6 compatibility
   {$INLINE ON}
   {$MINENUMSIZE 1}
   {$PACKSET 1}
@@ -202,7 +203,6 @@
     {$define CPU64DELPHI}
     {$undef CPU32}
     {$define PUREPASCAL}   // no x86 32 bit asm to be used
-    {$define USETYPEINFO}  // in x64 we rely on official typeinfo structures
     {$warn DUPLICATE_CTOR_DTOR OFF} // avoid W1029 unneeded hints
   {$else CPUX64}
     {$define CPU32} // Delphi compiler for 32 bit CPU
@@ -338,11 +338,8 @@
   {.$define SQLITE3_FASTCALL}
 {$endif}
 
-// Only Win32 supports SQLite3 static linked library by now 
+// Only Win32+Linux32 do support our SQLite3 static linked library  
 {$ifdef CPU64}  
-  {$define NOSQLITE3STATIC}
-{$endif}
-{$ifndef MSWINDOWS}  
   {$define NOSQLITE3STATIC}
 {$endif}
 
@@ -350,8 +347,5 @@
   // our proprietary crypto expects a patched SQlite3.c statically linked
   {$define NOSQLITE3ENCRYPT}
 {$endif}
-{$ifdef FPC}
-  // statically linked FPC as computed by c-fpcmingw.bat not yet working
-  {$define NOSQLITE3ENCRYPT}
-{$endif}
+
 

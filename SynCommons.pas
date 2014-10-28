@@ -491,6 +491,8 @@ unit SynCommons;
   - added TRawUTF8List.CaseSensitive property as requested by [806332d296]
   - added TRawUTF8MethodList class (based on TRawUTF8ListHashed)
   - added TRawUTF8ListHashedLocked class (based on TRawUTF8ListHashed)
+  - added TAutoLocker/IAutoLocker and TLockedDocVariant/ILockedDocVariant types
+  - added TAutoFree class, for automatic local variable lifetime management
   - added JSON_CONTENT_TYPE_HEADER and XML_CONTENT_TYPE[_HEADER] constants
   - new DateToSQL() overloaded function with direct Year/Month/Day parameters
   - added Base64MagicDecode(), Base64MagicCheckAndDecode() and SQLToDateTime()
@@ -641,6 +643,7 @@ unit SynCommons;
   - added GetTickCount64() function, native since Vista, emulated e.g. for XP
   - fixed TTextWriter.RegisterCustomJSONSerializer() method when unregistering
   - fixed TTextWriter.AddFloatStr() method when processing '-.5' input
+  - fixed potential random GPF in TTextWriter after Flush - see [577ad95cfd0]
   - added TTextWriter.Add(const Values: array of const) method
   - added JSONToXML() JSONBufferToXML() and TTextWriter.JSONBufferToXML()
     for direct and fast conversion of any JSON into the corresponding <XML>
@@ -1628,13 +1631,16 @@ procedure VariantDynArrayClear(var Value: TVariantDynArray);
 // - it will expect true numerical Variant and won't convert any string nor
 // floating-pointer Variant, which will return FALSE and won't change the
 // Value variable content
-function VariantToInteger(const V: Variant; var Value: integer): boolean; 
+function VariantToInteger(const V: Variant; var Value: integer): boolean;
 
 /// convert any numerical Variant into a 64 bit integer
 // - it will expect true numerical Variant and won't convert any string nor
 // floating-pointer Variant, which will return FALSE and won't change the
 // Value variable content
 function VariantToInt64(const V: Variant; var Value: Int64): boolean;
+
+/// convert any numerical Variant into a floating point value
+function VariantToDouble(const V: Variant; var Value: double): boolean;
 
 /// convert any numerical Variant into an integer
 // - it will expect true numerical Variant and won't convert any string nor
@@ -2028,14 +2034,17 @@ var
 function GetInteger(P: PUTF8Char): PtrInt; overload;
 
 /// get the signed 32 bits integer value stored in P^
+// - if P if nil or not start with a valid numerical value, returns Default
+function GetIntegerDef(P: PUTF8Char; Default: PtrInt): PtrInt;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// get the signed 32 bits integer value stored in P^
 // - this version return 0 in err if no error occured, and 1 if an invalid
 // character was found, not its exact index as for the val() function
-// - we use the PtrInt result type, even if expected to be 32 bits, to use
-// native CPU register size (don't want any 32 bits overflow here)
 function GetInteger(P: PUTF8Char; var err: integer): PtrInt; overload;
 
 /// get the unsigned 32 bits integer value stored in P^
-// - we use the PtrInt result type, even if expected to be 32 bits, to use
+// - we use the PtrUInt result type, even if expected to be 32 bits, to use
 // native CPU register size (don't want any 32 bits overflow here)
 function GetCardinal(P: PUTF8Char): PtrUInt;
 
@@ -2532,6 +2541,9 @@ function GotoNextNotSpace(P: PUTF8Char): PUTF8Char;
 /// go to the beginning of the SQL statement, ignoring all blanks and comments
 // - used to check the SQL statement command (e.g. is it a SELECT?)
 function SQLBegin(P: PUTF8Char): PUTF8Char;
+
+/// add a condition to a SQL WHERE clause, with an ' and ' if where is not void
+procedure SQLAddWhereAnd(var where: RawUTF8; const condition: RawUTF8);
 
 /// return true if the parameter is void or begin with a 'SELECT' SQL statement
 // - used to avoid code injection and to check if the cache must be flushed
@@ -3173,15 +3185,23 @@ procedure QuickSortInteger(ID: PIntegerArray; L, R: PtrInt); overload;
 /// sort an Integer array, low values first
 procedure QuickSortInteger(ID,CoValues: PIntegerArray; L, R: PtrInt); overload;
 
+/// sort an Integer array, low values first
+procedure QuickSortInteger(var ID: TIntegerDynArray); overload;
+
 /// copy an integer array, then sort it, low values first
 procedure CopyAndSortInteger(Values: PIntegerArray; ValuesCount: integer;
   var Dest: TIntegerDynArray);
 
 /// fast binary search of an integer value in a sorted integer array
 // - R is the last index of available integer entries in P^ (i.e. Count-1)
-// - return index of P^[index]=Value
+// - return index of P^[result]=Value
 // - return -1 if Value was not found
-function FastFindIntegerSorted(P: PIntegerArray; R: PtrInt; Value: integer): PtrInt;
+function FastFindIntegerSorted(P: PIntegerArray; R: PtrInt; Value: integer): PtrInt; overload;
+
+/// fast binary search of an integer value in a sorted integer array
+// - return index of Values[result]=Value
+// - return -1 if Value was not found
+function FastFindIntegerSorted(const Values: TIntegerDynArray; Value: integer): PtrInt; overload;
 
 /// retrieve the index where to insert an integer value in a sorted integer array
 // - R is the last index of available integer entries in P^ (i.e. Count-1)
@@ -3195,7 +3215,12 @@ function FastLocateIntegerSorted(P: PIntegerArray; R: PtrInt; Value: integer): P
 // - if CoValues is set, its content will be moved to allow inserting a new
 // value at CoValues[result] position
 function AddSortedInteger(var Values: TIntegerDynArray; var ValuesCount: integer;
-  Value: integer; CoValues: PIntegerDynArray=nil): PtrInt;
+  Value: integer; CoValues: PIntegerDynArray=nil): PtrInt; overload;
+
+/// add an integer value in a sorted dynamic array of integers
+// - overloaded function which do not expect an external Count variable
+function AddSortedInteger(var Values: TIntegerDynArray;
+  Value: integer; CoValues: PIntegerDynArray=nil): PtrInt; overload;
 
 /// insert an integer value at the specified index position of a dynamic array
 // of integers
@@ -9773,6 +9798,9 @@ type
     // !end;
     // - implemented as just a wrapper around DocVariantType.Clear()
     procedure Clear;
+    /// delete all internal stored values
+    // - like Clear + Init() with the same options
+    procedure Reset;
 
     /// save a document as UTF-8 encoded JSON
     // - will write either a JSON object or array, depending of the internal
@@ -9804,16 +9832,26 @@ type
     // is not a TDocVariant
     function GetValueOrDefault(const aName: RawUTF8; const aDefault: variant): variant;
     /// find an item in this document, and returns its value as TVarData
-    // - return false if aName is not found, or if the instance is not
-    // a TDocVariant
+    // - return false if aName is not found, or if the instance is not a TDocVariant
     // - return true if the name has been found, and aValue stores the value
     function GetVarData(const aName: RawUTF8; var aValue: TVarData): boolean; overload;
     /// find an item in this document, and returns its value as TVarData pointer
-    // - return nil if aName is not found, or if the instance is not
-    // a TDocVariant
+    // - return nil if aName is not found, or if the instance is not a TDocVariant
     // - return a pointer to the value if the name has been found
     function GetVarData(const aName: RawUTF8): PVarData; overload;
       {$ifdef HASINLINE}inline;{$endif}
+    /// find an item in this document, and returns its value as integer
+    // - return false if aName is not found, or if the instance is not a TDocVariant
+    // - return true if the name has been found, and aValue stores the value
+    function GetAsInteger(const aName: RawUTF8; out aValue: integer): Boolean;
+    /// find an item in this document, and returns its value as floating point
+    // - return false if aName is not found, or if the instance is not a TDocVariant
+    // - return true if the name has been found, and aValue stores the value
+    function GetAsDouble(const aName: RawUTF8; out aValue: double): Boolean;
+    /// find an item in this document, and returns its value as RawUTF8
+    // - return false if aName is not found, or if the instance is not a TDocVariant
+    // - return true if the name has been found, and aValue stores the value
+    function GetAsRawUTF8(const aName: RawUTF8; out aValue: RawUTF8): Boolean;
     /// retrieve a value, given its path
     // - path is defined as a dotted name-space, e.g. 'doc.glossary.title'
     // - it will return Unassigned if the path does not match the data
@@ -9844,7 +9882,7 @@ type
       var Dest: RawUTF8);
     /// set an item in this document from its index
     // - raise an EDocVariant if the supplied Index is not in 0..Count-1 range
-    procedure SetValueOrRaiseException(Index: integer; const NewValue: variant);
+    procedure SetValueOrRaiseException(Index: integer; const NewValue: variant); 
 
     /// add a value in this document
     // - if aName is set, if dvoCheckForDuplicatedNames option is set, any
@@ -9968,7 +10006,7 @@ type
   end;
   {$A+} { packet object not allowed since Delphi 2009 :( }
 
-
+  
 /// direct access to a TDocVariantData from a given variant instance
 // - return a pointer to the TDocVariantData corresponding to the variant
 // instance, which may be of kind varByRef (e.g. when retrieved by late binding)
@@ -10343,6 +10381,164 @@ type
 
 {$endif DELPHI5OROLDER}
 {$endif MSWINDOWS}
+
+  /// interface for TAutoFree to register another TObject instance
+  // to an existing IAutoFree local variable
+  IAutoFree = interface
+    procedure Another(var objVar; obj: TObject);
+  end;
+
+  /// simple reference-counted storage for local objects
+  // - be aware that it won't implement a full ARC memory model, but may be
+  // just used to avoid writing some try ... finally blocks on local variables
+  // - use with caution, only on well defined local scope
+  TAutoFree = class(TInterfacedObject,IAutoFree)
+  protected
+    fObject: TObject;
+    fObjectList: array of TObject;
+  public
+    /// initialize the TAutoFree class for one local variable
+    // - do not call this constructor, but class function One() instead
+    constructor Create(var localVariable; obj: TObject); reintroduce; overload;
+    /// initialize the TAutoFree class for several local variables
+    // - do not call this constructor, but class function Several() instead
+    constructor Create(const varObjPairs: array of pointer); reintroduce; overload;
+    /// protect one local TObject variable instance life time
+    // - for instance, instead of writing:
+    // !var myVar: TMyClass;
+    // !begin
+    // !  myVar := TMyClass.Create;
+    // !  try
+    // !    ... use myVar
+    // !  finally
+    // !    myVar.Free;
+    // !  end;
+    // !end;
+    // - you may write:
+    // !var myVar: TMyClass;
+    // !begin
+    // !  TAutoFree.One(myVar,TMyClass.Create);
+    // !  ... use myVar
+    // !end; // here myVar will be released
+    class function One(var localVariable; obj: TObject): IAutoFree;
+    /// protect several local TObject variable instances life time
+    // - specified as localVariable/objectInstance pairs
+    // - you may write:
+    // !var var1,var2: TMyClass;
+    // !begin
+    // !  TAutoFree.Several([
+    // !    @var1,TMyClass.Create,
+    // !    @var2,TMyClass.Create]);
+    // !  ... use var1 and var2
+    // !end; // here var1 and var2 will be released
+     class function Several(const varObjPairs: array of pointer): IAutoFree;
+    /// protect another TObject variable to an existing IAutoFree instance life time
+    // - you may write:
+    // !var var1,var2: TMyClass;
+    // !    auto: TAutoFree;
+    // !begin
+    // !  auto := TAutoFree.One(var1,TMyClass.Create);,
+    // !  .... do something
+    // !  auto.Another(var2,TMyClass.Create);
+    // !  ... use var1 and var2
+    // !end; // here var1 and var2 will be released
+    procedure Another(var localVariable; obj: TObject);
+    /// will finalize the associated TObject instances
+    // - note that releasing the TObject instances won't be protected, so
+    // any exception here may induce a memory leak: use only with "safe"
+    // simple objects, e.g. mORMot's TSQLRecord
+    destructor Destroy; override;
+  end;
+
+  /// an interface used by TAutoLocker to protect multi-thread execution
+  IAutoLocker = interface
+    /// will enter the mutex until the IUnknown reference is released
+    // - i.e. until you left the method block
+    // - using an IUnknown interface to let the compiler auto-generate a
+    // try..finally block statement to release the lock
+    function ProtectMethod: IUnknown;
+    /// enter the mutex
+    // - any call to Enter should be ended with a call to Leave
+    procedure Enter;
+    /// leave the mutex
+    // - any call to Leave should be preceded with a call to Enter
+    procedure Leave;
+  end;
+
+  /// reference counted block code locker
+  // - you can use one instance of this to protect multi-thread execution
+  // - the main class may initialize a IAutoLocker property in Create, then call
+  // IAutoLocker.ProtectMethod in any method to make its execution thread safe
+  TAutoLocker = class(TInterfacedObject,IAutoLocker)
+  protected
+    fLock: TRTLCriticalSection;
+    fLocked: boolean;
+  public
+    /// initialize the mutex
+    constructor Create;
+    /// will enter the mutex until the IUnknown reference is released
+    function ProtectMethod: IUnknown;
+    /// enter the mutex
+    procedure Enter;
+    /// leave the mutex
+    procedure Leave;
+    /// finalize the mutex
+    destructor Destroy; override;
+  end;
+
+{$ifndef NOVARIANTS}
+  /// ref-counted interface for thread-safe access to a TDocVariant document
+  ILockedDocVariant = interface
+    function GetValue(const Name: RawUTF8): Variant;
+    procedure SetValue(const Name: RawUTF8; const Value: Variant);
+    /// check and return a given property by name
+    function Exists(const Name: RawUTF8; out Value: Variant): boolean;
+    /// set a value by property name, and set a local copy
+    // - could be used as such, for implementing a thread-safe cache:
+    // ! if not cache.Exists('prop',local) then
+    // !   cache.Replace('prop',newValue,local);
+    procedure Replace(const Name: RawUTF8; const Value: Variant; out LocalValue: Variant);
+    /// add an existing property value to the given TDocVariant document object
+    // - could be used as such, for implementing a thread-safe cache:
+    // ! if not cache.AddExistingProp('Articles',Scope) then
+    // !   cache.AddNewProp('Articles',GetArticlesFromDB,Scope);
+    function AddExistingProp(const Name: RawUTF8; var Obj: variant): boolean;
+    /// add a property value to the given TDocVariant document object
+    procedure AddNewProp(const Name: RawUTF8; const Value: variant; var Obj: variant);
+    /// delete all stored properties
+    procedure Clear;
+    /// the document fields would be safely accessed via this property
+    property Value[const Name: RawUTF8]: Variant read GetValue write SetValue; default;
+  end;
+
+  /// allows thread-safe access to a TDocVariant document
+  TLockedDocVariant = class(TInterfacedObject,ILockedDocVariant)
+  protected
+    fValue: TDocVariantData;
+    fLock: IAutoLocker;
+    function GetValue(const Name: RawUTF8): Variant;
+    procedure SetValue(const Name: RawUTF8; const Value: Variant);
+  public
+    /// initialize the thread-safe document storage
+    constructor Create(FastStorage: boolean=True); overload;
+    /// initialize the thread-safe document storage with the corresponding options
+    constructor Create(options: TDocVariantOptions); overload;
+    /// check and return a given property by name
+    function Exists(const Name: RawUTF8; out Value: Variant): boolean;
+    /// set a value by property name, and set a local copy
+    procedure Replace(const Name: RawUTF8; const Value: Variant; out LocalValue: Variant);
+    /// add an existing property value to the given TDocVariant document object
+    function AddExistingProp(const Name: RawUTF8; var Obj: variant): boolean;
+    /// add a property value to the given TDocVariant document object
+    procedure AddNewProp(const Name: RawUTF8; const Value: variant; var Obj: variant);
+    /// delete all stored properties
+    procedure Clear;
+    /// the document fields would be safely accessed via this property
+    // - result variant is returned as a copy, not as varByRef, since a copy
+    // will definitively be more thread safe
+    property Value[const Name: RawUTF8]: Variant read GetValue write SetValue; default;
+  end;
+{$endif}
 
   /// the prototype of an individual test
   // - to be used with TSynTest descendants
@@ -14360,6 +14556,33 @@ begin
   result := true;
 end;
 
+function VariantToDouble(const V: Variant; var Value: double): boolean;
+var i64: Int64;
+begin
+  with TVarData(V) do
+  if VType=varVariant or varByRef then
+    result := VariantToDouble(PVariant(VPointer)^,Value) else
+  if VariantToInt64(V,i64) then begin
+    Value := i64;
+    result := true;
+  end else
+  case VType of
+  varDouble,varDate: begin
+    Value := VDouble;
+    result := true;
+  end;
+  varSingle: begin
+    Value := VSingle;
+    result := true;
+  end;
+  varCurrency: begin
+    Value := VCurrency;
+    result := true;
+  end else
+    result := false;
+  end;
+end;
+
 function VariantToInt64(const V: Variant; var Value: Int64): boolean;
 begin
   with TVarData(V) do
@@ -15652,6 +15875,13 @@ begin
     else break;
  until false;
  result := P;
+end;
+
+procedure SQLAddWhereAnd(var where: RawUTF8; const condition: RawUTF8);
+begin
+  if where='' then
+    where := condition else
+    where := where+' and '+condition;
 end;
 
 procedure Base64MagicDecode(var ParamValue: RawUTF8);
@@ -19451,6 +19681,11 @@ begin
   until I >= R;
 end;
 
+procedure QuickSortInteger(var ID: TIntegerDynArray);
+begin
+  QuickSortInteger(pointer(ID),0,high(ID));
+end;
+
 procedure QuickSortInteger(ID,CoValues: PIntegerArray; L,R: PtrInt);
 var I, J, P: PtrInt;
     pivot, Tmp: integer;
@@ -19503,6 +19738,11 @@ begin
   result := -1
 end;
 
+function FastFindIntegerSorted(const Values: TIntegerDynArray; Value: integer): PtrInt;
+begin
+  result := FastFindIntegerSorted(pointer(Values),length(Values)-1,Value);
+end;
+
 function FastLocateIntegerSorted(P: PIntegerArray; R: PtrInt; Value: integer): PtrInt;
 var L,i: PtrInt;
    cmp: integer;
@@ -19531,6 +19771,18 @@ begin
   result := FastLocateIntegerSorted(pointer(Values),ValuesCount-1,Value);
   if result>=0 then // if Value exists -> fails
     result := InsertInteger(Values,ValuesCount,Value,result,CoValues);
+end;
+
+function AddSortedInteger(var Values: TIntegerDynArray;
+  Value: integer; CoValues: PIntegerDynArray=nil): PtrInt;
+var ValuesCount: integer;
+begin
+  ValuesCount := length(Values);
+  result := FastLocateIntegerSorted(pointer(Values),ValuesCount-1,Value);
+  if result>=0 then begin // if Value exists -> fails
+    SetLength(Values,ValuesCount+1); // manual size increase
+    result := InsertInteger(Values,ValuesCount,Value,result,CoValues);
+  end;
 end;
 
 function InsertInteger(var Values: TIntegerDynArray; var ValuesCount: integer;
@@ -19631,6 +19883,14 @@ begin
   end;
   if minus then
     result := -result;
+end;
+
+function GetIntegerDef(P: PUTF8Char; Default: PtrInt): PtrInt;
+var err: integer;
+begin
+  result := GetInteger(P,err);
+  if err<>0 then
+    result := Default;
 end;
 
 function GetCardinalDef(P: PUTF8Char; Default: PtrUInt): PtrUInt;
@@ -28772,7 +29032,7 @@ var Dot: PUTF8Char;
 begin
   // first handle any strict-JSON syntax objects or arrays into custom variants
   // (e.g. when called directly from TSQLPropInfoRTTIVariant.SetValue)
-  if (TryCustomVariants<>nil) and (JSON<>nil) and (JSON^ in ['{',']']) then begin
+  if (TryCustomVariants<>nil) and (JSON<>nil) and (JSON^ in ['{','[']) then begin
     GetJSONToAnyVariant(Value,JSON,nil,TryCustomVariants);
     exit;
   end;
@@ -29303,6 +29563,15 @@ begin
   DocVariantType.Clear(TVarData(self));
 end;
 
+procedure TDocVariantData.Reset;
+var opt: TDocVariantOptions;
+begin
+  opt := VOptions;
+  DocVariantType.Clear(TVarData(self));
+  VType := DocVariantType.VarType;
+  VOptions := opt;
+end;
+
 procedure TDocVariantData.InternalAddValue(const aName: RawUTF8; const aValue: variant);
 var len: integer;
 begin
@@ -29439,6 +29708,35 @@ begin
   end;
 end;
 
+function TDocVariantData.GetAsInteger(const aName: RawUTF8; out aValue: integer): Boolean;
+var found: PVarData;
+begin
+  found := GetVarData(aName);
+  if found=nil then
+    result := false else
+    result := VariantToInteger(PVariant(found)^,aValue)
+end;
+
+function TDocVariantData.GetAsDouble(const aName: RawUTF8; out aValue: double): Boolean;
+var found: PVarData;
+begin
+  found := GetVarData(aName);
+  if found=nil then
+    result := false else
+    result := VariantToDouble(PVariant(found)^,aValue);
+end;
+
+function TDocVariantData.GetAsRawUTF8(const aName: RawUTF8; out aValue: RawUTF8): Boolean;
+var found: PVarData;
+begin
+  found := GetVarData(aName);
+  if found=nil then
+    result := false else begin
+    aValue := VariantToUTF8(PVariant(found)^);
+    result := true;
+  end;
+end;
+
 function TDocVariantData.GetVarData(const aName: RawUTF8;
   var aValue: TVarData): boolean;
 var found: PVarData;
@@ -29567,9 +29865,7 @@ begin
     if wasString then
       RetrieveValueOrRaiseException(pointer(Name),length(Name),
         dvoNameCaseSensitive in VOptions,result,true) else
-      if dvoReturnNullForUnknownProperty in VOptions then
-        SetVariantNull(result) else
-        raise EDocVariant.CreateUTF8('Unexpected "%" property',[Name]);
+      RetrieveValueOrRaiseException(GetIntegerDef(pointer(Name),-1),result,true);
   end;
 end;
 
@@ -31373,7 +31669,7 @@ begin
   fTypeInfo := aTypeInfo;
   Value := @aValue;
   if Typ^.Kind<>tkDynArray then
-    raise ESynException.CreateUTF8('% is not a dynamic array',[PShortString(@Typ^.NameLen)^]);
+    raise ESynException.CreateUTF8('Not a dynamic array: %',[PShortString(@Typ^.NameLen)^]);
   {$ifdef FPC_REQUIRES_PROPER_ALIGNMENT}
   Typ := GetFPCAlignPtr(Typ);
   {$else}
@@ -33535,8 +33831,10 @@ procedure TTextWriter.AddQuotedStr(Text: PUTF8Char; Quote: AnsiChar);
 var BMax: PUTF8Char;
 begin
   BMax := BEnd-2;
-  if B>=BMax then
+  if B>=BMax then begin
     Flush;
+    BMax := BEnd-2;
+  end;
   B[1] := Quote;
   inc(B);
   if Text<>nil then
@@ -33554,8 +33852,11 @@ begin
           inc(B,2);
           inc(Text);
         end;
-      end else
+      end else begin
         Flush;
+        BMax := BEnd-2;
+      end;
+  end;
     until false;
   B[1] := Quote;
   inc(B);
@@ -33803,8 +34104,10 @@ begin
   BMax := BEnd-7; // ensure enough space for biggest Unicode glyph as UTF-8 
   if WideCharCount=0 then
     repeat
-      if B>=BMax then
+      if B>=BMax then begin
         Flush;
+        BMax := BEnd-7;
+      end;
       if WideChar^=0 then
         break;
       if WideChar^<=126 then begin
@@ -33816,8 +34119,10 @@ begin
     until false else begin
     PEnd := PtrUInt(WideChar)+PtrUInt(WideCharCount)*sizeof(WideChar^);
     repeat
-      if B>=BMax then
+      if B>=BMax then begin
         Flush;
+        BMax := BEnd-7;
+      end;
       if WideChar^=0 then
         break;
       if WideChar^<=126 then begin
@@ -36088,10 +36393,9 @@ constructor TLocalPrecisionTimer.CreateAndStart;
 begin
   inherited;
   fTimer.Start;
-end;  
+end;
 
 {$ifdef MSWINDOWS}
-
 {$ifndef DELPHI5OROLDER}
 
 { TSynFPUException }
@@ -36161,9 +36465,214 @@ begin
 end;
 
 {$endif DELPHI5OROLDER}
-
-
 {$endif MSWINDOWS}
+
+
+{ TAutoFree }
+
+constructor TAutoFree.Create(var localVariable; obj: TObject);
+begin
+  fObject := obj;
+  TObject(localVariable) := obj;
+end;
+
+class function TAutoFree.One(var localVariable; obj: TObject): IAutoFree;
+begin
+  result := Create(localVariable,obj);
+end;
+
+class function TAutoFree.Several(const varObjPairs: array of pointer): IAutoFree;
+begin
+  result := Create(varObjPairs);
+end;
+
+constructor TAutoFree.Create(const varObjPairs: array of pointer);
+var n,i: integer;
+begin
+  n := length(varObjPairs);
+  if (n=0) or (n and 1=1) then
+    exit;
+  n := n shr 1;
+  if n=0 then
+    exit;
+  SetLength(fObjectList,n);
+  for i := 0 to n-1 do begin
+    fObjectList[i] := varObjPairs[i*2+1];
+    PPointer(varObjPairs[i*2])^ := fObjectList[i];
+  end;
+end;
+
+procedure TAutoFree.Another(var localVariable; obj: TObject);
+var n: integer;
+begin
+  n := length(fObjectList);
+  SetLength(fObjectList,n+1);
+  fObjectList[n] := obj;
+  TObject(localVariable) := obj;
+end;
+
+destructor TAutoFree.Destroy;
+var i: integer;
+begin
+  if fObjectList<>nil then
+    for i := high(fObjectList) downto 0 do // release FILO
+      fObjectList[i].Free;
+  fObject.Free;
+  inherited;
+end;
+
+
+type
+  /// used by TAutoLocker
+  TAutoLock = class(TInterfacedObject)
+  protected
+    fLock: TAutoLocker;
+  public
+    constructor Create(aLock: TAutoLocker);
+    destructor Destroy; override;
+  end;
+
+{ TAutoLock }
+
+constructor TAutoLock.Create(aLock: TAutoLocker);
+begin
+  fLock := aLock;
+  fLock.Enter;
+end;
+
+destructor TAutoLock.Destroy;
+begin
+  fLock.Leave;
+end;
+
+
+{ TAutoLocker }
+
+constructor TAutoLocker.Create;
+begin
+  InitializeCriticalSection(fLock);
+end;
+
+destructor TAutoLocker.Destroy;
+begin
+  DeleteCriticalSection(fLock);
+  inherited;
+end;
+
+function TAutoLocker.ProtectMethod: IUnknown;
+begin
+  result := TAutoLock.Create(self);
+end;
+
+procedure TAutoLocker.Enter;
+begin
+  EnterCriticalSection(fLock);
+end;
+
+procedure TAutoLocker.Leave;
+begin
+  LeaveCriticalSection(fLock);
+end;
+
+
+{$ifndef NOVARIANTS}
+
+{ TLockedDocVariant }
+
+constructor TLockedDocVariant.Create(FastStorage: boolean);
+begin
+  Create(JSON_OPTIONS[FastStorage]);
+end;
+
+constructor TLockedDocVariant.Create(options: TDocVariantOptions);
+begin
+  fLock := TAutoLocker.Create;
+  fValue.Init(options);
+end;
+
+function TLockedDocVariant.Exists(const Name: RawUTF8; out Value: Variant): boolean;
+var i: integer;
+begin
+  fLock.Enter;
+  try
+    i := fValue.GetValueIndex(Name);
+    if i<0 then begin
+      result := false;
+      exit;
+    end;
+    Value := fValue.Values[i];
+    result := true;
+  finally
+    fLock.Leave;
+  end;
+end;
+
+procedure TLockedDocVariant.Replace(
+  const Name: RawUTF8; const Value: Variant; out LocalValue: Variant);
+begin
+  SetValue(Name,Value);
+  LocalValue := Value;
+end;
+
+function TLockedDocVariant.AddExistingProp(const Name: RawUTF8; var Obj: variant): boolean;
+var i: integer;
+begin
+  fLock.Enter;
+  try
+    i := fValue.GetValueIndex(Name);
+    if i<0 then begin
+      result := false;
+      exit;
+    end;
+    _ObjAddProps([Name,fValue.Values[i]],Obj);
+    result := true;
+  finally
+    fLock.Leave;
+  end;
+end;
+
+procedure TLockedDocVariant.AddNewProp(const Name: RawUTF8; const Value: variant;
+  var Obj: variant);
+begin
+  SetValue(Name,Value);
+  _ObjAddProps([Name,Value],Obj);
+end;
+
+function TLockedDocVariant.GetValue(const Name: RawUTF8): Variant;
+begin
+  fLock.Enter;
+  try
+    fValue.RetrieveValueOrRaiseException(pointer(Name),length(Name),
+      dvoNameCaseSensitive in fValue.Options,result,false);
+  finally
+    fLock.Leave;
+  end;
+end;
+
+procedure TLockedDocVariant.SetValue(const Name: RawUTF8;
+  const Value: Variant);
+begin
+  fLock.Enter;
+  try
+    fValue.AddValue(Name,Value);
+  finally
+    fLock.Leave;
+  end;
+end;
+
+procedure TLockedDocVariant.Clear;
+begin
+  fLock.Enter;
+  try
+    fValue.Clear;
+    fValue.Init();
+  finally
+    fLock.Leave;
+  end;
+end;
+
+{$endif NOVARIANTS}
+
 
 function GetDelphiCompilerVersion: RawUTF8;
 begin
