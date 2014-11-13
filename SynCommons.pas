@@ -700,7 +700,7 @@ uses
   Windows,
   Messages,
 {$endif}
-{$ifdef KYLIX}
+{$ifdef KYLIX3}
   Types,
 {$endif}
   Classes,
@@ -2479,7 +2479,7 @@ function Pos(const substr, str: RawUTF8): Integer; overload; inline;
 {$endif UNICODE}
 
 /// faster RawUTF8 Equivalent of standard StrUtils.PosEx
-function PosEx(const SubStr, S: RawUTF8; Offset: cardinal=1): Integer;
+function PosEx(const SubStr, S: RawUTF8; Offset: PtrUInt=1): Integer;
 
 /// split a RawUTF8 string into two strings, according to SepStr separator
 // - if SepStr is not found, LeftStr=Str and RightStr=''
@@ -15391,92 +15391,82 @@ end;
 {$endif PUREPASCAL}
 {$endif ENHANCEDRTL}
 
-{$ifdef PUREPASCAL}
-function PosEx(const SubStr, S: RawUTF8; Offset: cardinal = 1): Integer;
-var I: PtrInt;
-    LenS, LenSubStr, PntCurr, PntEnd: PtrUInt;
-    WordCurr: word;
-    FirstChar, DWordCurr: cardinal;
-label
-  FindFirstChar, FindFirstCharAligned, FoundFirstChar, FoundFirstChar1,
-  FoundFirstChar2, FoundFirstChar3;
-begin // based on PosEx_AZ_Pas() by Avatar Zondertau from FastCode project
+{$ifdef PUREPASCAL} // from Aleksandr Sharahov's PosEx_Sha_Pas_2()
+function PosEx(const SubStr, S: RawUTF8; Offset: PtrUInt = 1): Integer;
+var len, lenSub: PtrInt;
+    ch: AnsiChar;
+    p, pSub, pStart, pStop: PUTF8Char;
+label Loop0, Loop4, TestT, Test0, Test1, Test2, Test3, Test4,
+      AfterTestT, AfterTest0, Ret, Exit;
+begin;
+  pSub := pointer(SubStr);
+  p := pointer(S);
+  if (p=nil) or (pSub=nil) or (Offset<1) then begin
+    Result := 0;
+    goto Exit;
+  end;
+  lenSub := pinteger(pSub-4)^;
+  dec(lenSub);
+  len := pinteger(p-4)^;
+  if (len<lenSub+Offset) or (lenSub<0) then begin
+    Result := 0;
+    goto Exit;
+  end;
+  pStop := p+len;
+  p := p+lenSub;
+  pSub := pSub+lenSub;
+  pStart := p;
+  p := p+Offset+3;
+  ch := pSub[0];
+  lenSub := -lenSub;
+  if p<pStop then goto Loop4;
+  p := p-4;
+  goto Loop0;
+Loop4:
+  if ch=p[-4] then goto Test4;
+  if ch=p[-3] then goto Test3;
+  if ch=p[-2] then goto Test2;
+  if ch=p[-1] then goto Test1;
+Loop0:
+  if ch=p[0] then goto Test0;
+AfterTest0:
+  if ch=p[1] then goto TestT;
+AfterTestT:
+  p := p+6;
+  if p<pStop then goto Loop4;
+  p := p-4;
+  if p<pStop then goto Loop0;
+  Result := 0;
+  goto Exit;
+Test3: p := p-2;
+Test1: p := p-2;
+TestT: len := lenSub;
+  if lenSub<>0 then
   repeat
-    if (Pointer(SubStr)=nil) or (Pointer(S)=nil) or (Offset<=0) then
-      break;
-    PntCurr := PtrUInt(S)+PtrUInt(Offset-1);
-    LenS := PCardinal(@PAnsiChar(pointer(S))[-4])^;
-    if LenS=0 then
-      break;
-    LenSubStr := PCardinal(@PAnsiChar(pointer(SubStr))[-4])^;
-    if LenSubStr=0 then
-      break;
-    PntEnd := PtrUInt(S)+LenS-LenSubStr+1;
-    if PntCurr>=PntEnd then
-      break;
-    FirstChar := byte(SubStr[1])*$01010101;
-FindFirstChar:
-    case PntCurr and 3 of
-      0: begin
-      FindFirstCharAligned:
-        DWordCurr := PCardinal(PntCurr)^ xor FirstChar;
-        if DWordCurr and $000000FF=0 then goto FoundFirstChar;
-        if DWordCurr and $0000FF00=0 then goto FoundFirstChar1;
-        if DWordCurr and $00FF0000=0 then goto FoundFirstChar2;
-        if DWordCurr and $FF000000=0 then goto FoundFirstChar3;
-        PntCurr := PntCurr+4;
-        if PntCurr<PntEnd then
-          goto FindFirstCharAligned;
-      end;
-      1: begin
-        DWordCurr := PCardinal(PntCurr-1)^ xor FirstChar;
-        if DWordCurr and $0000FF00=0 then goto FoundFirstChar;
-        if DWordCurr and $00FF0000=0 then goto FoundFirstChar1;
-        if DWordCurr and $FF000000=0 then goto FoundFirstChar2;
-        PntCurr := PntCurr+3;
-        if PntCurr<PntEnd then
-          goto FindFirstCharAligned;
-      end;
-      2: begin
-        WordCurr := PWord(PntCurr)^ xor word(FirstChar);
-        if WordCurr and $00FF=0 then goto FoundFirstChar;
-        if WordCurr and $FF00=0 then goto FoundFirstChar1;
-        PntCurr := PntCurr+2;
-        if PntCurr<PntEnd then
-          goto FindFirstCharAligned;
-      end;
-      3: begin
-        if PByte(PntCurr)^=Byte(FirstChar) then goto FoundFirstChar;
-        Inc(PntCurr);
-        if PntCurr<PntEnd then
-          goto FindFirstCharAligned;
-      end;
-    end;
-    break;
-FoundFirstChar3:
-    PntCurr := PntCurr+3;
-    if PntCurr<PntEnd then goto FoundFirstChar else break;
-FoundFirstChar2:
-    PntCurr := PntCurr+2;
-    if PntCurr<PntEnd then goto FoundFirstChar else break;
-FoundFirstChar1:
-    Inc(PntCurr);
-    if PntCurr<PntEnd then goto FoundFirstChar else break;
-FoundFirstChar:
-    for I := PLongInt(@PAnsiChar(pointer(SubStr))[-4])^-1 downto 1 do
-      if PByteArray(PntCurr)^[I]<>PByteArray(SubStr)^[I] then begin
-        Inc(PntCurr);
-        if PntCurr>=PntEnd then
-          break else
-          goto FindFirstChar;
-      end;
-    result := PntCurr-PtrUInt(S)+1; // found whole SubStr
-    exit;
-  until false;
-  result := 0;
+    if (psub[len]<>p[len+1]) or (psub[len+1]<>p[len+2]) then
+      goto AfterTestT;
+    len := len+2;
+  until len>=0;
+  p := p+2;
+  if p<=pStop then goto Ret;
+  Result := 0;
+  goto Exit;
+Test4: p := p-2;
+Test2: p := p-2;
+Test0: len := lenSub;
+  if lenSub<>0 then
+  repeat
+    if (psub[len]<>p[len]) or (psub[len+1]<>p[len+1]) then
+      goto AfterTest0;
+    len := len+2;
+  until len>=0;
+  inc(p);
+Ret:
+  Result := p-pStart;
+Exit:
 end;
 {$else}
-function PosEx(const SubStr, S: RawUTF8; Offset: cardinal = 1): Integer;
+function PosEx(const SubStr, S: RawUTF8; Offset: PtrUInt = 1): Integer;
 asm  // eax=SubStr, edx=S, ecx=Offset
   push    ebx
   push    esi
@@ -15929,7 +15919,7 @@ begin
     P := SQLBegin(P);
     result :=
       ((IdemPChar(P,'SELECT') or IdemPChar(P,'VACUUM') or IdemPChar(P,'PRAGMA')) and
-       (P[6] in [#0..' ',';'])) or 
+       (P[6] in [#0..' ',';'])) or IdemPChar(P,'EXPLAIN ') or
       (((IdemPChar(P,'WITH') ) and (P[4] in [#0..' ',';'])) and
         not (ContainsUTF8(P,'INSERT') or ContainsUTF8(P,'UPDATE') or
              ContainsUTF8(P,'DELETE')));
@@ -19036,12 +19026,7 @@ begin
     exit;
   F := FileOpen(FileName,fmOpenRead or fmShareDenyNone);
   if PtrInt(F)>=0 then begin
-{$ifdef LINUX}
-    Size := FileSeek(F,0,soFromEnd);
-    FileSeek(F,0,soFromBeginning);
-{$else}
     Size := GetFileSize(F,nil);
-{$endif}
     SetLength(result,Size);
     if FileRead(F,pointer(Result)^,Size)<>Size then
       result := '';
@@ -19210,22 +19195,28 @@ begin
 end;
 
 function FileSize(const FileName: TFileName): Int64;
+{$ifdef LINUX}
+begin
+  result := GetLargeFileSize(FileName);
+end;
+{$else}
 var F: THandle;
 begin
   F := FileOpen(FileName,fmOpenRead or fmShareDenyNone);
   if PtrInt(F)>=0 then begin
-{$ifdef LINUX}
-    result := FileSeek64(F,0,soFromEnd);
-{$else}
     PInt64Rec(@result)^.Lo := GetFileSize(F,@PInt64Rec(@result)^.Hi);
-{$endif}
     FileClose(F);
-  end
-  else
+  end else
     result := 0;
 end;
+{$endif}
 
 function FileAgeToDateTime(const FileName: TFileName): TDateTime;
+{$ifdef LINUX}
+begin
+  result := GetFileAgeAsDateTime(FileName);
+end;
+{$else}
 {$ifdef HASNEWFILEAGE}
 begin
   if not FileAge(FileName,result) then
@@ -19238,6 +19229,7 @@ begin
 {$endif}
     result := 0;
 end;
+{$endif}
 
 function DirectoryDelete(const Directory: TFileName; const Mask: TFileName='*.*';
   DeleteOnlyFilesNotDirectory: Boolean=false): Boolean;
@@ -22577,7 +22569,7 @@ begin
 end;
 {$else}
 begin
-  Result := FPCNowUTC;
+  Result := GetNowUTC;
 end;
 {$endif}
 
@@ -45687,4 +45679,4 @@ finalization
   GarbageCollectorFree;
   if GlobalCriticalSectionInitialized then
     DeleteCriticalSection(GlobalCriticalSection);
-end.
+end.
