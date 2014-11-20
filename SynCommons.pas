@@ -1,7 +1,7 @@
 /// common functions used by most Synopse projects
 // - this unit is a part of the freeware Synopse mORMot framework,
 // licensed under a MPL/GPL/LGPL tri-license; version 1.18
-unit SynCommons;
+unit SynCommons; 
 
 (*
     This file is part of Synopse framework.
@@ -403,7 +403,9 @@ unit SynCommons;
   - new StrUInt64(), UniqueRawUTF8(), FastNewRawUTF8() and SetRawUTF8() functions
   - recognize 8.1 and upcoming "Threshold" 9 in TWindowsVersion
   - added TypeInfo, ElemSize, ElemType read-only properties to TDynArray
+  - added DynArrayLoad() and DynArraySave() helper functions
   - introducing TObjectDynArrayWrapper class and IObjectDynArray interface
+  - introducing TSynAuthentication class for simple generic authentication
   - added TDynArrayHashed.HashElement property
   - new TDynArrayHashed.AddUniqueName() method
   - introduced TSingleDynArray, recognized as such in JSON serialization
@@ -530,6 +532,7 @@ unit SynCommons;
   - added RecordSaveJSON() function which follows TTextWriter.AddRecordJSON() format
   - added TSynNameValue.InitFromIniSection() method and optional default value
     parameter to TSynNameValue.Value()
+  - added TSynNameValue.Delete() and SetBlobDataPtr() methods
   - added TSynNameValue.OnAfterAdd callback event
   - added TObjectListLocked class
   - TSynTests will now write the tests summary with colored console output
@@ -1300,6 +1303,11 @@ const
   /// HTTP header for MIME content type used for UTF-8 encoded XML
   XML_CONTENT_TYPE_HEADER = HEADER_CONTENT_TYPE+XML_CONTENT_TYPE;
 
+  /// MIME content type used for raw binary data
+  BINARY_CONTENT_TYPE = 'application/octet-stream';
+
+  /// HTTP header for MIME content type used for raw binary data
+  BINARY_CONTENT_TYPE_HEADER = HEADER_CONTENT_TYPE+BINARY_CONTENT_TYPE;
 
 
 /// faster equivalence to SetString() function for a RawUTF8
@@ -1881,7 +1889,7 @@ procedure Int32ToUTF8(Value : integer; var result: RawUTF8); overload;
 /// use our fast RawUTF8 version of IntToStr()
 // - without any slow UnicodeString=String->AnsiString conversion for Delphi 2009
 // - result as var parameter saves a local assignment and a try..finally
-procedure Int64ToUtf8(const Value: Int64; var result: RawUTF8); overload;
+procedure Int64ToUtf8(Value: Int64; var result: RawUTF8); overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// optimized conversion of a cardinal into RawUTF8
@@ -3093,8 +3101,8 @@ function CodePageToCharSet(CodePage: Cardinal): Integer;
 
 /// retrieve the MIME content type from a supplied binary buffer
 // - return the MIME type, ready to be appended to a 'Content-Type: ' HTTP header
-// - default is 'application/octet-stream' or 'application/extension' if
-// FileName was specified
+// - default is 'application/octet-stream' (BINARY_CONTENT_TYPE) or
+// 'application/extension' if FileName was specified
 // - see @http://en.wikipedia.org/wiki/Internet_media_type for most common values
 // - can be used as such:
 // !  Call.OutHead := HEADER_CONTENT_TYPE+
@@ -3260,7 +3268,7 @@ function FastLocateIntegerSorted(P: PIntegerArray; R: PtrInt; Value: integer): P
 
 /// add an integer value in a sorted dynamic array of integers
 // - returns the index where the Value was added successfully in Values[]
-// - returns -1 if the specified Value was alredy present in Values[]
+// - returns -1 if the specified Value was already present in Values[]
 //  (we must avoid any duplicate for binary search)
 // - if CoValues is set, its content will be moved to allow inserting a new
 // value at CoValues[result] position
@@ -4203,16 +4211,19 @@ type
       OnAdd: TSynNameValueNotify=nil);
     /// search for a Name, return the index in List
     function Find(const aName: RawUTF8): integer;
+    /// search for a Name, and delete it in the List if it exists
+    function Delete(const aName: RawUTF8): boolean;
     /// search for a Name, return the associated Value
     function Value(const aName: RawUTF8; const aDefaultValue: RawUTF8=''): RawUTF8;
     /// returns true if the Init() method has been called
     function Initialized: boolean;
+    /// can be used to set all data from one BLOB memory buffer
+    procedure SetBlobDataPtr(aValue: pointer);
     /// can be used to set or retrieve all stored data as one BLOB content
     property BlobData: RawByteString read GetBlobData write SetBlobData;
     /// event triggerred after an item has just been added to the list
     property OnAfterAdd: TSynNameValueNotify read fOnAdd write fOnAdd;
   end;
-
 
 
 /// helper to retrieve the text of an enumerate item
@@ -4350,20 +4361,32 @@ procedure RecordClear(var Dest; TypeInfo: pointer);
 procedure DynArrayCopy(var Dest; const Source; SourceMaxElem: integer;
   TypeInfo: pointer);
 
+/// fill a dynamic array content from a binary serialization as saved by
+// DynArraySave() / TDynArray.Save()
+// - Value shall be set to the target dynamic array field
+// - just a function helper around TDynArray.Load()
+function DynArrayLoad(var Value; Source: PAnsiChar; TypeInfo: pointer): PAnsiChar;
+
+/// serialize a dynamic array content as binary, ready to be loaded by
+// DynArrayLoad() / TDynArray.Load()
+// - Value shall be set to the source dynamic array field
+// - just a function helper around TDynArray.Load()
+function DynArraySave(var Value; TypeInfo: pointer): RawByteString; 
+
 /// fill a dynamic array content from a JSON serialization as saved by
 // TTextWriter.AddDynArrayJSON
-// - Value shall be set to the target dynamic array field 
+// - Value shall be set to the target dynamic array field
 // - is just a wrapper around TDynArray.LoadFromJSON(), creating a temporary
 // TDynArray wrapper on the stack
 // - to be used e.g. for custom record JSON unserialization, within a
 // TDynArrayJSONCustomReader callback
 // - warning: the JSON buffer will be modified in-place during process - use
-// a temporary copy if you need to access it later 
+// a temporary copy if you need to access it later
 function DynArrayLoadJSON(var Value; JSON: PUTF8Char; TypeInfo: pointer;
   EndOfObject: PUTF8Char=nil): PUTF8Char;
 
-/// serialize a dynamic array content as JSON 
-// - Value shall be set to the source dynamic array field 
+/// serialize a dynamic array content as JSON
+// - Value shall be set to the source dynamic array field
 // - is just a wrapper around TTextWriter.AddDynArrayJSON(), creating
 // a temporary TDynArray wrapper on the stack
 // - to be used e.g. for custom record JSON serialization, within a
@@ -6192,10 +6215,9 @@ type
   // not compatible with previous versions, and it does make sense to
   // work with RawByteString in our UTF-8 oriented framework
   TRawByteStringStream = class(TStream)
-  private
+  protected
     fDataString: RawByteString;
     fPosition: Integer;
-  protected
     procedure SetSize(NewSize: Longint); override;
   public
     constructor Create(const aString: RawByteString=''); overload;
@@ -10547,12 +10569,17 @@ type
     destructor Destroy; override;
   end;
 
+  {$ifdef DELPHI5OROLDER} // IAutoLocker -> internal error C3517 under Delphi 5 :(
+  TAutoLocker = class
+  {$else}
   /// an interface used by TAutoLocker to protect multi-thread execution
   IAutoLocker = interface
     /// will enter the mutex until the IUnknown reference is released
     // - i.e. until you left the method block
     // - using an IUnknown interface to let the compiler auto-generate a
     // try..finally block statement to release the lock
+    // - warning: under FPC, you should assign the result of this method to a local
+    // IAutoFree variable - see bug http://bugs.freepascal.org/view.php?id=26602
     function ProtectMethod: IUnknown;
     /// enter the mutex
     // - any call to Enter should be ended with a call to Leave
@@ -10567,6 +10594,7 @@ type
   // - the main class may initialize a IAutoLocker property in Create, then call
   // IAutoLocker.ProtectMethod in any method to make its execution thread safe
   TAutoLocker = class(TInterfacedObject,IAutoLocker)
+  {$endif}
   protected
     fLock: TRTLCriticalSection;
     fLocked: boolean;
@@ -10636,6 +10664,51 @@ type
     property Value[const Name: RawUTF8]: Variant read GetValue write SetValue; default;
   end;
 {$endif}
+
+  /// used to refer to a simple authentication class
+  TSynAuthenticationClass = class of TSynAuthentication;
+  
+  /// simple authentication class, implementing safe token/challenge security
+  // - maintain a list of user / name credential pairs, and a list of sessions
+  // - is not meant to handle authorization, just plain user access validation
+  // - used e.g. by TSQLDBConnection.RemoteProcessMessage (on server side) and
+  // TSQLDBProxyConnectionPropertiesAbstract (on client side) in SynDB.pas
+  TSynAuthentication = class
+  protected
+    fLock: TAutoLocker;
+    fSessions: TIntegerDynArray;
+    fSessionsCount: Integer;
+    fSessionGenerator: integer;
+    fTokenSeed: Int64;
+    fCredentials: TSynNameValue;
+    function ComputeCredential(previous: boolean; const UserName,PassWord: RawUTF8): cardinal;
+  public
+    /// initialize the authentication scheme
+    // - you can optionally register one user credential
+    constructor Create(const aUserName: RawUTF8=''; const aPassword: RawUTF8='');
+    /// finalize the authentation
+    destructor Destroy; override;
+    /// register one credential for a given user
+    procedure AuthenticateUser(const aName, aPassword: RawUTF8);
+    /// unregister one credential for a given user
+    procedure DisauthenticateUser(const aName: RawUTF8);
+    /// create a new session
+    // - should return 0 on authentication error, or an integer session ID
+    // - this method will check the User name and password, and create a new session
+    function CreateSession(const User: RawUTF8; Hash: cardinal): integer; virtual;
+    /// check if the session exists in the internal list
+    function SessionExists(aID: integer): boolean;
+    /// delete a session
+    procedure RemoveSession(aID: integer);
+    /// returns the current identification token
+    // - to be sent to the client for its authentication challenge
+    function CurrentToken: Int64;
+    /// to be used to compute a Hash on the client, for a given Token
+    // - the token should have been retrieved from the server, and the client
+    // should compute and return this hash value, to perform the authentication
+    // challenge and create the session
+    class function ComputeHash(Token: Int64; const UserName,PassWord: RawUTF8): cardinal;
+  end;
 
   /// the prototype of an individual test
   // - to be used with TSynTest descendants
@@ -11980,10 +12053,16 @@ function FileSynLZ(const Source, Dest: TFileName; Magic: Cardinal): boolean;
 function FileUnSynLZ(const Source, Dest: TFileName; Magic: Cardinal): boolean;
 
 /// compress a memory bufer using the SynLZ algorithm and crc32c hashing
-function SynLZCompress(const Data: RawByteString): RawByteString;
+function SynLZCompress(const Data: RawByteString): RawByteString; overload;
+
+/// compress a memory bufer using the SynLZ algorithm and crc32c hashing
+procedure SynLZCompress(P: PAnsiChar; PLen: integer;out Result: RawByteString); overload;
 
 /// uncompress a memory bufer using the SynLZ algorithm and crc32c hashing
-function SynLZDecompress(const Data: RawByteString): RawByteString;
+function SynLZDecompress(const Data: RawByteString): RawByteString; overload;
+
+/// uncompress a memory bufer using the SynLZ algorithm and crc32c hashing
+procedure SynLZDecompress(P: PAnsiChar; PLen: integer;out Result: RawByteString); overload;
 
 /// a TSynLogArchiveEvent handler which will delete older .log files
 function EventArchiveDelete(const aOldLogFileName, aDestinationPath: TFileName): boolean;
@@ -13729,7 +13808,7 @@ begin
   SetRawUTF8(result,P,@tmp[15]-P);
 end;
 
-procedure Int64ToUtf8(const Value: Int64; var result: RawUTF8);
+procedure Int64ToUtf8(Value: Int64; var result: RawUTF8);
 var tmp: array[0..23] of AnsiChar;
     P: PAnsiChar;
 begin
@@ -24358,7 +24437,7 @@ begin // see http://www.garykessler.net/library/file_sigs.html for magic numbers
     end;
   end;
   if Result='' then
-    Result := 'application/octet-stream';
+    Result := BINARY_CONTENT_TYPE;
 end;
 
 function IsContentCompressed(Content: Pointer; Len: integer): boolean;
@@ -30737,6 +30816,20 @@ begin
   DestDynArray.CopyFrom(Source,SourceMaxElem);
 end;
 
+function DynArrayLoad(var Value; Source: PAnsiChar; TypeInfo: pointer): PAnsiChar;
+var DynArray: TDynArray;
+begin
+  DynArray.Init(TypeInfo,Value);
+  result := DynArray.LoadFrom(Source);
+end;
+
+function DynArraySave(var Value; TypeInfo: pointer): RawByteString;
+var DynArray: TDynArray;
+begin
+  DynArray.Init(TypeInfo,Value);
+  result := DynArray.SaveTo;
+end;
+
 function DynArrayLoadJSON(var Value; JSON: PUTF8Char; TypeInfo: pointer;
   EndOfObject: PUTF8Char=nil): PUTF8Char;
 var DynArray: TDynArray;
@@ -31570,7 +31663,8 @@ begin
   if (Value=nil) or
      //((ElemSize<>sizeof(pointer)) and (StoredElemSize<>ElemSize)) or
      ((ElemType=nil) and (Source^<>#0) or
-     ((ElemType<>nil) and (Source^<>PAnsiChar(ElemType)^))) then begin
+     ((ElemType<>nil) and (Source^=#0{<>PAnsiChar(ElemType)^}))) then begin
+     // ignore ElemType^ to be cross-FPC/Delphi compatible
     result := nil; // invalid Source content
     exit;
   end;
@@ -41732,6 +41826,10 @@ end;
 constructor TSynTableStatement.Create(const SQL: RawUTF8;
   GetFieldIndex: TSynTableFieldIndex; SimpleFieldsBits: TSQLFieldBits=[0..MAX_SQLFIELDS-1];
   FieldProp: TSynTableFieldProperties=nil);
+// TODO: should share code with TSQLRestStorageExternal.AdaptSQLForEngineList,
+// handle multiple AND/OR/NOT Field2=... clauses, and keep the fields order
+// in the result (i.e. define Fields: IntegerDynArray instead of TSQLFieldBits)
+// - see [94ff704bb]
 var Prop: RawUTF8;
     P, B: PUTF8Char;
     err: integer;
@@ -41919,7 +42017,7 @@ limit:
         WhereValue := 'COUNT'; // not void
       end else
         // invalid "SELECT count(*) FROM table TOTO"
-       WhereValue := '' else begin
+        WhereValue := '' else begin
     WhereField := SYNTABLESTATEMENTWHEREALL; // no WHERE clause -> all rows
     WhereValue := '*'; // not void
   end;
@@ -42301,47 +42399,73 @@ begin
 end;
 
 function SynLZCompress(const Data: RawByteString): RawByteString;
-var DataLen, len: integer;
-    P: PAnsiChar;
 begin
-  DataLen := length(Data);
-  if DataLen=0 then
-    result := '' else begin
-    len := SynLZcompressdestlen(DataLen)+8;
-    SetString(result,nil,len);
-    P := pointer(result);
-    PCardinal(P)^ := crc32c(0,pointer(Data),DataLen);
-{$ifdef PUREPASCAL}
-    len := SynLZcompress1pas(pointer(Data),DataLen,P+8); {$else}
-    len := SynLZcompress1asm(pointer(Data),DataLen,P+8);
-{$endif}
-    PCardinal(P+4)^ := crc32c(0,pointer(P+8),len);
-    SetLength(result,len+8);
+  SynLZCompress(pointer(Data),length(Data),result);
+end;
+
+const
+  SYNLZCOMPRESS_SYNLZ_SIZETRIGGER = 100;
+  SYNLZCOMPRESS_STORED = #0;
+  SYNLZCOMPRESS_SYNLZ = #1;
+
+procedure SynLZCompress(P: PAnsiChar; PLen: integer; out Result: RawByteString);
+var len: integer;
+    R: PAnsiChar;
+    crc: cardinal;
+begin
+  if PLen=0 then
+    exit;
+  crc := crc32c(0,P,PLen);
+  if PLen<SYNLZCOMPRESS_SYNLZ_SIZETRIGGER then begin
+    SetString(result,nil,PLen+9);
+    R := pointer(result);
+    PCardinal(R)^ := crc;
+    R[4] := SYNLZCOMPRESS_STORED;
+    PCardinal(R+5)^ := crc;
+    move(P^,R[9],PLen);
+  end else begin
+    SetString(result,nil,SynLZcompressdestlen(PLen)+9);
+    R := pointer(result);
+    PCardinal(R)^ := crc;
+    R[4] := SYNLZCOMPRESS_SYNLZ;
+    {$ifdef PUREPASCAL}
+    len := SynLZcompress1pas(P,PLen,R+9);
+    {$else}
+    len := SynLZcompress1asm(P,PLen,R+9);
+    {$endif}
+    PCardinal(R+5)^ := crc32c(0,pointer(R+9),len);
+    SetLength(result,len+9);
   end;
 end;
 
 function SynLZDecompress(const Data: RawByteString): RawByteString;
-var DataLen, len: integer;
-    P: PAnsiChar;
 begin
-  DataLen := length(Data);
-  result := '';
-  if DataLen=0 then
-    exit;
-  P := pointer(Data);
-  if (DataLen<=8) or (crc32c(0,pointer(P+8),DataLen-8)<>PCardinal(P+4)^) then
-    exit;
-  len := SynLZdecompressdestlen(P+8);
-  SetLength(result,len);
-  if (len<>0) and
-{$ifdef PUREPASCAL}
-        ((SynLZdecompress1pas(P+8,DataLen-8,pointer(result))<>len) or
-{$else} ((SynLZdecompress1asm(P+8,DataLen-8,pointer(result))<>len) or
-{$endif}(crc32c(0,pointer(result),len)<>PCardinal(P)^)) then
-    result := '' else
-    SetLength(result,len);
+  SynLZDecompress(pointer(Data),Length(Data),result);
 end;
 
+procedure SynLZDecompress(P: PAnsiChar; PLen: integer; out Result: RawByteString);
+var len: integer;
+begin
+  if (PLen<=9) or (crc32c(0,pointer(P+9),PLen-9)<>PCardinal(P+5)^) then
+    exit;
+  case P[4] of
+  SYNLZCOMPRESS_STORED:
+    if PCardinal(P)^=PCardinal(P+5)^ then
+      SetString(result,P+9,PLen-9);
+  SYNLZCOMPRESS_SYNLZ: begin
+    len := SynLZdecompressdestlen(P+9);
+    SetLength(result,len);
+    if (len<>0) and
+       {$ifdef PUREPASCAL}
+       ((SynLZdecompress1pas(P+9,PLen-9,pointer(result))<>len) or
+       {$else}
+       ((SynLZdecompress1asm(P+9,PLen-9,pointer(result))<>len) or
+       {$endif}
+       (crc32c(0,pointer(result),len)<>PCardinal(P)^)) then
+      result := '';
+  end;
+  end;
+end;
 
 function MatchPattern(P,PEnd,Up: PUTF8Char; var Dest: PUTF8Char): boolean;
 begin
@@ -45489,8 +45613,7 @@ end;
 
 constructor TRawByteStringStream.Create(const aString: RawByteString);
 begin
-  if aString<>'' then
-    fDataString := aString;
+  fDataString := aString;
 end;
 
 function TRawByteStringStream.Read(var Buffer; Count: Integer): Longint;
@@ -45602,6 +45725,18 @@ begin
   result := fDynArray.FindHashed(aName);
 end;
 
+function TSynNameValue.Delete(const aName: RawUTF8): boolean;
+var ndx: integer;
+begin
+  ndx := fDynArray.FindHashed(aName);
+  if ndx>=0 then begin
+    fDynArray.Delete(ndx);
+    fDynArray.ReHash;
+    result := true;
+  end else
+    result := false;
+end;
+
 function TSynNameValue.Value(const aName: RawUTF8; const aDefaultValue: RawUTF8=''): RawUTF8;
 var i: integer;
 begin
@@ -45621,10 +45756,115 @@ begin
   result := fDynArray.SaveTo;
 end;
 
+procedure TSynNameValue.SetBlobDataPtr(aValue: pointer);
+begin
+  fDynArray.LoadFrom(aValue);
+  fDynArray.ReHash;
+end;
+
 procedure TSynNameValue.SetBlobData(const aValue: RawByteString);
 begin
-  fDynArray.LoadFrom(pointer(aValue));
-  fDynArray.ReHash;
+  SetBlobDataPtr(pointer(aValue));
+end;
+
+
+{ TSynAuthentication }
+
+constructor TSynAuthentication.Create(const aUserName,aPassword: RawUTF8);
+begin
+  fLock := TAutoLocker.Create;
+  fCredentials.Init(true);
+  fTokenSeed := GetTickCount64*PtrUInt(self);
+  fSessionGenerator := PtrUInt(ClassType)*Int64Rec(fTokenSeed).Hi;
+  fSessionGenerator := abs(fSessionGenerator);
+  if aUserName<>'' then
+    AuthenticateUser(aUserName,aPassword);
+end;
+
+destructor TSynAuthentication.Destroy;
+begin
+  fLock.Free;
+  inherited;
+end;
+
+class function TSynAuthentication.ComputeHash(Token: Int64;
+  const UserName,PassWord: RawUTF8): cardinal;
+begin // rough authentication - better than nothing
+  result := length(UserName);
+  result := crc32c(crc32c(crc32c(result,@Token,sizeof(Token)),
+    pointer(UserName),result),pointer(Password),length(PassWord));
+end;
+
+function TSynAuthentication.ComputeCredential(previous: boolean;
+  const UserName,PassWord: RawUTF8): cardinal;
+var tok: Int64;
+begin
+  tok := GetTickCount64 div 10000;
+  if previous then
+    dec(tok);
+  result := ComputeHash(tok xor fTokenSeed,UserName,PassWord);
+end;
+
+function TSynAuthentication.CurrentToken: Int64;
+begin
+  result := (GetTickCount64 div 10000) xor fTokenSeed;
+end;
+
+procedure TSynAuthentication.AuthenticateUser(const aName, aPassword: RawUTF8);
+begin
+  fLock.Enter;
+  fCredentials.Add(aName,aPassword);
+  fLock.Leave;
+end;
+
+procedure TSynAuthentication.DisauthenticateUser(const aName: RawUTF8);
+begin
+  fLock.Enter;
+  fCredentials.Delete(aName);
+  fLock.Leave;
+end;
+
+function TSynAuthentication.CreateSession(const User: RawUTF8; Hash: cardinal): integer;
+var i: integer;
+    password: RawUTF8;
+begin
+  result := 0;
+  fLock.Enter;
+  try
+    // check the credentials
+    i := fCredentials.Find(User);
+    if i<0 then
+      exit;
+    password := fCredentials.List[i].Value;
+    if (ComputeCredential(false,User,password)<>Hash) and
+       (ComputeCredential(true,User,password)<>Hash) then
+      exit;
+    // create the new session
+    repeat
+      result := fSessionGenerator;
+      inc(fSessionGenerator);
+    until result<>0;
+    AddSortedInteger(fSessions,fSessionsCount,result);
+  finally
+    fLock.Leave;
+  end;
+end;
+
+function TSynAuthentication.SessionExists(aID: integer): boolean;
+begin
+  fLock.Enter;
+  result := FastFindIntegerSorted(pointer(fSessions),fSessionsCount-1,aID)>=0;
+  fLock.Leave;
+end;
+
+procedure TSynAuthentication.RemoveSession(aID: integer);
+var i: integer;
+begin
+  fLock.Enter;
+  i := FastFindIntegerSorted(pointer(fSessions),fSessionsCount-1,aID);
+  if i>=0 then
+    DeleteInteger(fSessions,fSessionsCount,i);
+  fLock.Leave;
 end;
 
 
