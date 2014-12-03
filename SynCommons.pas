@@ -538,8 +538,15 @@ unit SynCommons;
     regroup set bits (reduce storage size e.g. for TSQLAccessRights) - format
     is still compatible with old layout, but will more optimized and readable
   - TSynTableStatement.Create() SQL statement parser will handle optional
-    LIMIT [OFFSET] clause (in new FoundLimit/FoundOffset integer properties),
-    "SELECT Count() FROM TableName WHERE ...", "IN(...)" and "IS [NOT] NULL"
+    LIMIT [OFFSET] clause (in new Limit/Offset integer properties),
+    ORDER BY ... [DESC/ASC] clause (in new OrderByField/OrderByDesc properties),
+    GROUP BY ... clause (in GroupByField property), "LIKE", "IN(...)" and
+    "IS [NOT] NULL" operators and custom functions in the WHERE clause
+  - TSynTableStatement.Where[] is now an array to allow complex WHERE clause
+  - TSynTableStatement.Select[] is now an array to allow aggregate functions,
+    (e.g. Count,Max or Distinct), column aliases, or simple +/- computation
+  - introducing TSQLFieldIndex and TSQLFieldIndexDynArray types and associated
+    functions so that TSynTableStatement would store the SELECT column order
   - SQLParamContent() / ExtractInlineParameters() functions moved from mORMot.pas
     (now properly handles SQL null and more than MAX_SQLFIELDS parameters)
   - introducing TSQLParamType / TSQLParamTypeDynArray generic parameters
@@ -586,7 +593,9 @@ unit SynCommons;
     when sorting UTF8 Field with tfoCaseInsensitive in Options
   - speedup of QuotedStr() function and TDynArrayHashed hashing process
   - added GotoEndOfJSONString() function
-  - added GetJSONPropName() function, able to understand MongoDB extended syntax
+  - added GetJSONPropName() and GotoNextJSONPropName() functions, able to
+    understand MongoDB extended syntax
+  - added JSONArrayCount() and JSONObjectPropCount() functions
   - several speedup in GetJSONField() and JSON parsing: it will now expect true,
     false or null to be in lowercase only (as in json.org specifications)
   - fixed function GetJSONField() to properly decode JSON number with exponent
@@ -4684,6 +4693,19 @@ type
   // - you can also use ALL_FIELDS as defined in mORMot.pas
   TSQLFieldBits = set of 0..MAX_SQLFIELDS-1;
 
+  /// used to store a field index in a Table
+  // - note that -1 is commonly used for the ID/RowID field so the values should
+  // be signed
+  {$if MAX_SQLFIELDS=64}
+  TSQLFieldIndex = ShortInt; // -128..127
+  {$else}
+  TSQLFieldIndex = SmallInt; // -32768..32767
+  {$ifend}
+
+  /// used to store field indexes in a Table
+  // - same as TSQLFieldBits, but allowing to store the proper order
+  TSQLFieldIndexDynArray = array of TSQLFieldIndex;
+
   /// points to a bit set used for all available fields in a Table
   PSQLFieldBits = ^TSQLFieldBits;
 
@@ -5682,8 +5704,7 @@ type
     /// used to store output format for TSQLRecord.GetJSONValues()
     fWithID: boolean;
     /// used to store field for TSQLRecord.GetJSONValues()
-    fFields: TSQLFieldBits;
-    fFieldMax: integer;
+    fFields: TSQLFieldIndexDynArray;
     /// if not Expanded format, contains the Stream position of the first
     // useful Row of data; i.e. ',val11' position in:
     // & { "fieldCount":1,"values":["col1","col2",val11,"val12",val21,..] }
@@ -5695,7 +5716,12 @@ type
     // - if no Stream is supplied, a temporary memory stream will be created
     // (it's faster to supply one, e.g. any TSQLRest.TempMemoryStream)
     constructor Create(aStream: TStream; Expand, withID: boolean;
-      const Fields: TSQLFieldBits=[]); overload;
+      const Fields: TSQLFieldBits); overload;
+    /// the data will be written to the specified Stream
+    // - if no Stream is supplied, a temporary memory stream will be created
+    // (it's faster to supply one, e.g. any TSQLRest.TempMemoryStream)
+    constructor Create(aStream: TStream; Expand, withID: boolean;
+      const Fields: TSQLFieldIndexDynArray=nil); overload;
     /// rewind the Stream position and write void JSON object
     procedure CancelAllVoid;
     /// write or init field names for appropriate JSON Expand later use
@@ -5703,6 +5729,10 @@ type
     // - if aKnownRowsCount is not null, a "rowCount":... item will be added
     // to the generated JSON stream (for faster unserialization of huge content)
     procedure AddColumns(aKnownRowsCount: integer=0);
+    /// allow to change on the fly an expanded format column layout
+    // - by definition, a non expanded format would raise a ESynException
+    // - caller should then set ColNames[] and run AddColumns()
+    procedure ChangeExpandedFields(aWithID: boolean; const aFields: TSQLFieldIndexDynArray); overload;
     /// end the serialized JSON object
     // - cancel last ','
     // - close the JSON object ']' or ']}'
@@ -5717,12 +5747,9 @@ type
     /// is set to TRUE in case of Expanded format
     property Expand: boolean read fExpand write fExpand;
     /// is set to TRUE if the ID field must be appended to the resulting JSON
-    property WithID: boolean read fWithID write fWithID;
+    property WithID: boolean read fWithID;
     /// Read-Only access to the field bits set for each column to be stored
-    property Fields: TSQLFieldBits read fFields write fFields;
-    /// Read-Only access to the higher field index to be stored
-    // - i.e. the highest bit set in Fields
-    property FieldMax: integer read fFieldMax write fFieldMax;
+    property Fields: TSQLFieldIndexDynArray read fFields;
     /// if not Expanded format, contains the Stream position of the first
     // useful Row of data; i.e. ',val11' position in:
     // & { "fieldCount":1,"values":["col1","col2",val11,"val12",val21,..] }
@@ -6704,6 +6731,12 @@ function GotoEndJSONItem(P: PUTF8Char): PUTF8Char;
 function GotoNextJSONItem(P: PUTF8Char; NumberOfItemsToJump: cardinal=1;
   EndOfObject: PAnsiChar=nil): PUTF8Char;
 
+/// read the position of the JSON value just after a property identifier
+// - this function will handle strict JSON property name (i.e. a "string"), but
+// also MongoDB extended syntax, e.g. {age:{$gt:18}} or {'people.age':{$gt:18}}
+// see @http://docs.mongodb.org/manual/reference/mongodb-extended-json
+function GotoNextJSONPropName(P: PUTF8Char): PUTF8Char;
+
 /// reach the position of the next JSON object of JSON array
 // - first char is expected to be either '[' either '{' with default EndChar=#0
 // - or you can specify ']' or '}' as the expected EndChar
@@ -6731,6 +6764,11 @@ function JSONArrayCount(P: PUTF8Char): integer; overload;
 // really HUGE arrays, it is faster to allocate the content within the loop,
 // not in-head
 function JSONArrayCount(P,PMax: PUTF8Char): integer; overload;
+
+/// compute the number of fields in a JSON object
+// - this will handle any kind of objects, including those with nested
+// JSON objects or arrays
+function JSONObjectPropCount(P: PUTF8Char): integer;
 
 /// remove comments from a text buffer before passing it to JSON parser
 // - handle two types of comments: starting from // till end of line
@@ -6788,7 +6826,8 @@ const
   /// map a PtrUInt type to the TJSONCustomParserRTTIType set
   ptPtrUInt = {$ifdef CPU64}ptInt64{$else}ptCardinal{$endif};
   /// which TJSONCustomParserRTTIType types are not simple types
-  PT_COMPLEXTYPES = [ptArray, ptRecord, ptCustom];
+  // - ptTimeLog is complex, since could be also TCreateTime or TModTime
+  PT_COMPLEXTYPES = [ptArray, ptRecord, ptCustom, ptTimeLog];
 
 
 { ************ filtering and validation classes and functions }
@@ -7540,13 +7579,38 @@ function IsZero(P: pointer; Length: integer): boolean; overload;
 
 /// returns TRUE if no bit inside this TSQLFieldBits is set
 // - is optimized for 64, 128, 192 and 256 max bits count (i.e. MAX_SQLFIELDS)
-// - will work also with any other value 
+// - will work also with any other value
 function IsZero(const Fields: TSQLFieldBits): boolean; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
+/// fast comparison of two TSQLFieldBits values
 function IsEqual(const A,B: TSQLFieldBits): boolean;
   {$ifdef HASINLINE}inline;{$endif}
 
+/// convert a TSQLFieldBits set of bits into an array of integers
+procedure FieldBitsToIndex(const Fields: TSQLFieldBits;
+  var Index: TSQLFieldIndexDynArray; MaxLength: integer=MAX_SQLFIELDS;
+  IndexStart: integer=0); overload;
+
+/// convert a TSQLFieldBits set of bits into an array of integers
+function FieldBitsToIndex(const Fields: TSQLFieldBits;
+  MaxLength: integer=MAX_SQLFIELDS): TSQLFieldIndexDynArray; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// add a field index to an array of field indexes
+// - returns the index in Indexes[] of the newly appended Field value
+function AddFieldIndex(var Indexes: TSQLFieldIndexDynArray; Field: integer): integer;
+
+/// convert an array of field indexes into a TSQLFieldBits set of bits
+procedure FieldIndexToBits(const Index: TSQLFieldIndexDynArray; var Fields: TSQLFieldBits); overload;
+
+// search a field index in an array of field indexes
+// - returns the index in Indexes[] of the given Field value, -1 if not found
+function SearchFieldIndex(var Indexes: TSQLFieldIndexDynArray; Field: integer): integer;
+
+/// convert an arra of field indexes into a TSQLFieldBits set of bits
+function FieldIndexToBits(const Index: TSQLFieldIndexDynArray): TSQLFieldBits; overload;
+  {$ifdef HASINLINE}inline;{$endif}
 
 type
   TSynBackgroundThreadAbstract = class;
@@ -8271,7 +8335,7 @@ type
     wServer2008_R2, wServer2008_R2_64, wSeven, wSeven_64,
     wEight, wEight_64, wServer2012, wServer2012_64,
     wEightOne, wEightOne_64, wServer2012R2, wServer2012R2_64,
-    wNine, wNine_64, wServer2014R2, wServer2014R2_64);
+    wTen, wTen_64, wServer2014R2, wServer2014R2_64);
   {$ifndef UNICODE}
   /// not defined in older Delphi versions
   TOSVersionInfoEx = record
@@ -8523,69 +8587,129 @@ type
      opGreaterThan,
      opGreaterThanOrEqualTo,
      opIn,
-     opIs);
+     opIsNull,
+     opIsNotNull,
+     opLike,
+     opContains,
+     opFunction);
 
   TSynTableFieldProperties = class;
 
-  /// used to parse a SELECT SQL statement
-  // - handle basic REST commands, no complete SQL interpreter is implemented: only
-  // valid SQL command is "SELECT Field1,Field2 FROM Table WHERE ID=120;", i.e
-  // a one Table SELECT with one optional "WHERE fieldname = value" statement
-  // - handle also basic "SELECT Count(*) FROM TableName;" SQL statement
-  // - will parse the "LIMIT number OFFSET number" end statement clause
-  TSynTableStatement = class
-    /// the SELECT SQL statement parsed
-    SQLStatement: RawUTF8;
-    /// the fields selected for the SQL statement
-    Fields: TSQLFieldBits;
-    /// is TRUE if ID/RowID was set in the WHERE clause
-    WithID: boolean;
-    /// the retrieved table name
-    TableName: RawUTF8;
-    /// the index of the field used for the WHERE clause
-    // - SYNTABLESTATEMENTWHEREID=0 is ID, 1 for field # 0, 2 for field #1,
-    // and so on... (i.e. WhereField = RTTI field index +1)
-    // - equal SYNTABLESTATEMENTWHEREALL=-1, means all rows must be fetched
-    // (no WHERE clause: "SELECT * FROM TableName")
-    // - if SYNTABLESTATEMENTWHERECOUNT=-2, means SQL statement was
-    // "SELECT Count(*) FROM TableName"
-    WhereField: integer;
-    /// the operator of the WHERE clause
-    WhereOperator: TSynTableStatementOperator;
-    /// the value used for the WHERE clause
-    WhereValue: RawUTF8;
-    /// an integer representation of WhereValue (used for ID check e.g.)
-    WhereValueInteger: integer;
-    /// used to fast compare with SBF binary compact formatted data
-    WhereValueSBF: TSBFString;
-    {$ifndef NOVARIANTS}
-    /// the value used for the WHERE clause
-    WhereValueVariant: variant;
-    {$endif}
-    /// the number specified by the optional LIMIT ... clause
-    // - set to 0 by default (meaning no LIMIT clause)
-    FoundLimit: integer;
-    /// the number specified by the optional OFFSET ... clause
-    // - set to 0 by default (meaning no OFFSET clause)
-    FoundOffset: integer;
-    /// TRUE if is "SELECT Count(*) FROM TableName WHERE ..." clause
-    IsSelectCountWhere: boolean;
-    /// optional associated writer
-    Writer: TJSONWriter;
+  /// one recognized SELECT expression for TSynTableStatement
+  TSynTableStatementSelect = record
+    /// the column SELECTed for the SQL statement, in the expected order
+    // - contains 0 for ID/RowID, or the RTTI field index + 1
+    Field: integer;
+    /// an optional integer to be added
+    // - recognized from .. +123 .. -123 patterns in the select 
+    ToBeAdded: integer;
+    /// the optional column alias, e.g. 'MaxID' for 'max(id) as MaxID'
+    Alias: RawUTF8;
+    /// the optional function applied to the SELECTed column
+    // - e.g. Count(*) would store 'Count' and SelectField[0]=0
+    FunctionName: RawUTF8;
+  end;
 
+  /// the recognized SELECT expressions for TSynTableStatement
+  TSynTableStatementSelectDynArray = array of TSynTableStatementSelect;
+  
+  /// one recognized WHERE expression for TSynTableStatement
+  TSynTableStatementWhere = record
+    /// expressions are evaluated as AND unless this field is set to TRUE
+    JoinedOR: boolean;
+    /// the index of the field used for the WHERE expression
+    // - WhereField=0 for ID, 1 for field # 0, 2 for field #1,
+    // and so on... (i.e. WhereField = RTTI field index +1)
+    Field: integer;
+    /// the operator of the WHERE expression
+    Operator: TSynTableStatementOperator;
+    /// the SQL function name associated to a Field and Value
+    // - e.g. 'INTEGERDYNARRAYCONTAINS' and Field=0 for
+    // IntegerDynArrayContains(RowID,10) and ValueInteger=10 
+    // - Value does not contain anything
+    FunctionName: RawUTF8;
+    /// the value used for the WHERE expression
+    Value: RawUTF8;
+    /// the raw value SQL buffer used for the WHERE expression
+    ValueSQL: PUTF8Char;
+    /// the raw value SQL buffer length used for the WHERE expression
+    ValueSQLLen: integer;
+    /// an integer representation of WhereValue (used for ID check e.g.)
+    ValueInteger: integer;
+    /// used to fast compare with SBF binary compact formatted data
+    ValueSBF: TSBFString;
+    {$ifndef NOVARIANTS}
+    /// the value used for the WHERE expression, encoded as Variant
+    // - may be a TDocVariant for the IN operator
+    ValueVariant: variant;
+    {$endif}
+  end;
+
+  /// the recognized WHERE expressions for TSynTableStatement
+  TSynTableStatementWhereDynArray = array of TSynTableStatementWhere;
+
+  /// used to parse a SELECT SQL statement
+  // - handle basic REST commands, only a sub-set of SQL is implemented: i.e.
+  // a SELECT over a single table (no JOIN) with one optional WHERE clause
+  // - handle also basic "SELECT Count(*) FROM TableName;" functions
+  // - will parse any LIMIT OFFSET ORDER BY end statement clause
+  TSynTableStatement = class
+  protected
+    fSQLStatement: RawUTF8;
+    fSelect: TSynTableStatementSelectDynArray;
+    fSelectFunctionCount: integer;
+    fTableName: RawUTF8;
+    fWhere: TSynTableStatementWhereDynArray;
+    fOrderByField: TSQLFieldIndexDynArray;
+    fGroupByField: TSQLFieldIndexDynArray;
+    fOrderByDesc: boolean;
+    fLimit: integer;
+    fOffset: integer;
+    fWriter: TJSONWriter;
+  public
     /// parse the given SELECT SQL statement and retrieve the corresponding
-    // parameters into Fields,TableName,WhereField,WhereValue
-    // - the supplied GetFieldIndex() method is used to populate the Fields and
-    // WhereField parameters
+    // parameters into this class read-only properties
+    // - the supplied GetFieldIndex() method is used to populate the
+    // SelectedFields and Where[].Field properties
     // - SimpleFieldsBits is used for '*' field names
-    // - WhereValue is left '' if the SQL statement is not correct
-    // - if WhereValue is set, the caller must check for TableName to match the
-    // expected value, then use the WhereField value to retrieve the content
-    // - if FieldProp is set, then the WhereValueSBF property is initialized
-    // with the SBF equivalence of the WhereValue
+    // - SQLStatement is left '' if the SQL statement is not correct
+    // - if SQLStatement is set, the caller must check for TableName to match
+    // the expected value, then use the Where[] to retrieve the content
+    // - if FieldProp is set, then the Where[].ValueSBF property is initialized
+    // with the SBF equivalence of the Where[].Value
     constructor Create(const SQL: RawUTF8; GetFieldIndex: TSynTableFieldIndex;
       SimpleFieldsBits: TSQLFieldBits=[0..MAX_SQLFIELDS-1];
       FieldProp: TSynTableFieldProperties=nil);
+    /// compute the SELECT column bits from the SelectFields array
+    procedure SelectFieldBits(var Fields: TSQLFieldBits; var withID: boolean);
+
+    /// the SELECT SQL statement parsed
+    // - equals '' if the parsing failed
+    property SQLStatement: RawUTF8 read fSQLStatement;
+    /// the column SELECTed for the SQL statement, in the expected order
+    property Select: TSynTableStatementSelectDynArray read fSelect;
+    /// if the SELECTed expression of this SQL statement have any function defined
+    property SelectFunctionCount: integer read fSelectFunctionCount;
+    /// the retrieved table name
+    property TableName: RawUTF8 read fTableName;
+    /// the WHERE clause of this SQL statement
+    property Where: TSynTableStatementWhereDynArray read fWhere;
+    /// recognize an GROUP BY clause with one or several fields
+    // - here 0 = ID, otherwise RTTI field index +1
+    property GroupByField: TSQLFieldIndexDynArray read fGroupByField;
+    /// recognize an ORDER BY clause with one or several fields
+    // - here 0 = ID, otherwise RTTI field index +1
+    property OrderByField: TSQLFieldIndexDynArray read fOrderByField;
+    /// false for default ASC order, true for DESC attribute
+    property OrderByDesc: boolean read fOrderByDesc;
+    /// the number specified by the optional LIMIT ... clause
+    // - set to 0 by default (meaning no LIMIT clause)
+    property Limit: integer read fLimit;
+    /// the number specified by the optional OFFSET ... clause
+    // - set to 0 by default (meaning no OFFSET clause)
+    property Offset: integer read fOffset;
+    /// optional associated writer
+    property Writer: TJSONWriter read fWriter write fWriter;
   end;
 
   /// function prototype used to retrieve the RECORD data of a specified Index
@@ -9088,9 +9212,14 @@ type
     {$ifndef DELPHI5OROLDER}
     /// create a TJSONWriter, ready to be filled with GetJSONValues(W) below
     // - will initialize all TJSONWriter.ColNames[] values according to the
+    // specified Fields index list, and initialize the JSON content
+    function CreateJSONWriter(JSON: TStream; Expand, withID: boolean;
+      const Fields: TSQLFieldIndexDynArray): TJSONWriter; overload;
+    /// create a TJSONWriter, ready to be filled with GetJSONValues(W) below
+    // - will initialize all TJSONWriter.ColNames[] values according to the
     // specified Fields bit set, and initialize the JSON content
     function CreateJSONWriter(JSON: TStream; Expand, withID: boolean;
-      const Fields: TSQLFieldBits): TJSONWriter;
+      const Fields: TSQLFieldBits): TJSONWriter; overload;
     (** return the UTF-8 encoded JSON objects for the values contained
       in the specified RecordBuffer encoded in our SBF compact binary format,
       according to the Expand/WithID/Fields parameters of W
@@ -9208,10 +9337,6 @@ const
 
   /// used by TSynTableStatement.WhereField for "SELECT .. FROM TableName WHERE ID=?"
   SYNTABLESTATEMENTWHEREID = 0;
-  /// used by TSynTableStatement.WhereField for "SELECT * FROM TableName"
-  SYNTABLESTATEMENTWHEREALL = -1;
-  /// used by TSynTableStatement.WhereField for "SELECT Count(*) FROM TableName"
-  SYNTABLESTATEMENTWHERECOUNT = -2;
 
 /// convert any AnsiString content into our SBF compact binary format storage
 procedure ToSBFStr(const Value: RawByteString; out Result: TSBFString);
@@ -9606,6 +9731,8 @@ function JSONToVariantDynArray(const JSON: RawUTF8): TVariantDynArray;
 // - will use a TDocVariantData temporary storage
 function ValuesToVariantDynArray(const items: array of const): TVariantDynArray;
 
+/// guess the correct TSQLDBFieldType from a variant value
+function VariantTypeToSQLDBFieldType(const V: Variant): TSQLDBFieldType;
 var
   /// the internal custom variant type used to register TDocVariant
   DocVariantType: TSynInvokeableVariantType = nil;
@@ -9841,6 +9968,7 @@ type
     procedure InternalAddValue(const aName: RawUTF8; const aValue: variant);
     procedure SetCapacity(aValue: integer);
     function GetCapacity: integer;
+      {$ifdef HASINLINE}inline;{$endif}
     /// add some properties to a TDocVariantData dvObject
     // - data is supplied two by two, as Name,Value pairs
     // - caller should ensure that VKind=dvObject
@@ -9856,7 +9984,7 @@ type
     // !  assert(variant(Doc).name='John');
     // !end;
     // - if you call Init*() methods in a row, ensure you call Clear in-between
-    procedure Init(aOptions: TDocVariantOptions=[]);
+    procedure Init(aOptions: TDocVariantOptions=[]; aKind: TDocVariantKind=dvUndefined);
     /// initialize a TDocVariantData to store document-based object content
     // - object will be initialized with data supplied two by two, as Name,Value
     // pairs, e.g.
@@ -9952,6 +10080,11 @@ type
     /// delete all internal stored values
     // - like Clear + Init() with the same options
     procedure Reset;
+    /// force a number of items
+    // - could be used to fast add items to the internal Values[]/Names[] arrays
+    // - just set VCount, do not resize the arrays: caller should ensure that
+    // Capacity is big enough
+    procedure SetCount(aCount: integer);
 
     /// save a document as UTF-8 encoded JSON
     // - will write either a JSON object or array, depending of the internal
@@ -10048,7 +10181,10 @@ type
     // ! TDocVariantData(aVariant).AddValue('name','John');
     // ! Assert(TDocVariantData(aVariant).Kind=dvObject);
     // - returns the index of the corresponding newly added value
-    function AddValue(const aName: RawUTF8; const aValue: variant): integer;
+    function AddValue(const aName: RawUTF8; const aValue: variant): integer; overload;
+    /// add a value in this document
+    // - overloaded function accepting a UTF-8 encoded buffer for the name
+    function AddValue(aName: PUTF8Char; aNameLen: integer; const aValue: variant): integer; overload;
     /// add a value to this document, handled as array
     // - if instance's Kind is dvObject, it will raise an EDocVariant exception
     // - you can therefore write e.g.:
@@ -10173,8 +10309,14 @@ function DocVariantData(const DocVariant: variant): PDocVariantData;
 // instance, which may be of kind varByRef (e.g. when retrieved by late binding)
 // - will return a read-only fake TDocVariantData with Kind=dvUndefined if the
 // supplied variant is not a TDocVariant instance
-function DocVariantDataSafe(const DocVariant: variant): PDocVariantData;
+function DocVariantDataSafe(const DocVariant: variant): PDocVariantData; overload;
 
+/// direct access to a TDocVariantData from a given variant instance
+// - return a pointer to the TDocVariantData corresponding to the variant
+// instance, which may be of kind varByRef (e.g. when retrieved by late binding)
+// - will check the supplied document kind, i.e. either dvObject or dvArray and
+// raise a EDocVariant exception if it does not match 
+function DocVariantDataSafe(const DocVariant: variant; ExpectedKind: TDocVariantKind): PDocVariantData; overload;
 
 /// initialize a variant instance to store some document-based object content
 // - object will be initialized with data supplied two by two, as Name,Value
@@ -10734,32 +10876,34 @@ type
 {$endif}
 
   /// used to refer to a simple authentication class
-  TSynAuthenticationClass = class of TSynAuthentication;
-  
-  /// simple authentication class, implementing safe token/challenge security
-  // - maintain a list of user / name credential pairs, and a list of sessions
-  // - is not meant to handle authorization, just plain user access validation
-  // - used e.g. by TSQLDBConnection.RemoteProcessMessage (on server side) and
-  // TSQLDBProxyConnectionPropertiesAbstract (on client side) in SynDB.pas
-  TSynAuthentication = class
+  TSynAuthenticationClass = class of TSynAuthenticationAbstract;
+
+  /// abstract authentication class, implementing safe token/challenge security
+  // and a list of active sessions
+  // - do not use this class, but plain TSynAuthentication
+  TSynAuthenticationAbstract = class
   protected
     fLock: TAutoLocker;
     fSessions: TIntegerDynArray;
     fSessionsCount: Integer;
     fSessionGenerator: integer;
     fTokenSeed: Int64;
-    fCredentials: TSynNameValue;
-    function ComputeCredential(previous: boolean; const UserName,PassWord: RawUTF8): cardinal;
+    function ComputeCredential(previous: boolean; const UserName,PassWord: RawUTF8): cardinal; virtual;
+    function GetPassword(const UserName: RawUTF8; out Password: RawUTF8): boolean; virtual; abstract;
+    function GetUsersCount: integer; virtual; abstract;
   public
     /// initialize the authentication scheme
-    // - you can optionally register one user credential
-    constructor Create(const aUserName: RawUTF8=''; const aPassword: RawUTF8='');
+    constructor Create;
     /// finalize the authentation
     destructor Destroy; override;
     /// register one credential for a given user
-    procedure AuthenticateUser(const aName, aPassword: RawUTF8);
+    // - this abstract method would raise an exception: inherited classes should
+    // implement them as expected
+    procedure AuthenticateUser(const aName, aPassword: RawUTF8); virtual;
     /// unregister one credential for a given user
-    procedure DisauthenticateUser(const aName: RawUTF8);
+    // - this abstract method would raise an exception: inherited classes should
+    // implement them as expected
+    procedure DisauthenticateUser(const aName: RawUTF8); virtual;
     /// create a new session
     // - should return 0 on authentication error, or an integer session ID
     // - this method will check the User name and password, and create a new session
@@ -10771,11 +10915,35 @@ type
     /// returns the current identification token
     // - to be sent to the client for its authentication challenge
     function CurrentToken: Int64;
+    /// the number of current opened sessions
+    property SessionsCount: integer read fSessionsCount;
+    /// the number of registered users
+    property UsersCount: integer read GetUsersCount;
     /// to be used to compute a Hash on the client, for a given Token
     // - the token should have been retrieved from the server, and the client
     // should compute and return this hash value, to perform the authentication
     // challenge and create the session
-    class function ComputeHash(Token: Int64; const UserName,PassWord: RawUTF8): cardinal;
+    class function ComputeHash(Token: Int64; const UserName,PassWord: RawUTF8): cardinal; virtual;
+  end;
+
+  /// simple authentication class, implementing safe token/challenge security
+  // - maintain a list of user / name credential pairs, and a list of sessions
+  // - is not meant to handle authorization, just plain user access validation
+  // - used e.g. by TSQLDBConnection.RemoteProcessMessage (on server side) and
+  // TSQLDBProxyConnectionPropertiesAbstract (on client side) in SynDB.pas
+  TSynAuthentication = class(TSynAuthenticationAbstract)
+  protected
+    fCredentials: TSynNameValue;
+    function GetPassword(const UserName: RawUTF8; out Password: RawUTF8): boolean; override;
+    function GetUsersCount: integer; override;
+  public
+    /// initialize the authentication scheme
+    // - you can optionally register one user credential
+    constructor Create(const aUserName: RawUTF8=''; const aPassword: RawUTF8=''); reintroduce;
+    /// register one credential for a given user
+    procedure AuthenticateUser(const aName, aPassword: RawUTF8); override;
+    /// unregister one credential for a given user
+    procedure DisauthenticateUser(const aName: RawUTF8); override;
   end;
 
 
@@ -13328,7 +13496,7 @@ const
 procedure SetRawUTF8(var Dest: RawUTF8; text: pointer; len: integer);
 {$ifdef FPC}inline;
 begin
-  if text<>pointer(Dest) then
+  if (len>128) or (len=0) or (text<>pointer(Dest)) then
     SetString(Dest,PAnsiChar(text),len) else
     SetLength(Dest,len);
 end;
@@ -13336,7 +13504,7 @@ end;
 {$ifdef PUREPASCAL}
 var P: PStrRec;
 begin
-  if (len>128) or (PtrInt(Dest)=0) or     // Dest=''
+  if (len>128) or (len=0) or (PtrInt(Dest)=0) or     // Dest=''
     (PStrRec(PtrInt(Dest)-STRRECSIZE)^.refCnt<>1) then 
     SetString(Dest,PAnsiChar(text),len) else begin
     if PStrRec(Pointer(PtrInt(Dest)-STRRECSIZE))^.length<>len then begin
@@ -13356,6 +13524,12 @@ asm // eax=@Dest text=edx len=ecx
     ja @3
 {$else}
     ja System.@LStrFromPCharLen
+{$endif}
+    or ecx,ecx // len=0
+{$ifdef UNICODE}
+    jz @3
+{$else}
+    jz System.@LStrFromPCharLen
 {$endif}
     push ebx
     mov ebx,[eax]
@@ -13513,6 +13687,12 @@ begin
   {$endif}
   varByte:     Value := VByte;
   varInteger:  Value := VInteger;
+  varWord64:
+    if (VInt64>=0) and (VInt64<=High(integer)) then
+      Value := VInt64 else begin
+      result := False;
+      exit;
+    end;
   varInt64:
     if (VInt64>=Low(integer)) and (VInt64<=High(integer)) then
       Value := VInt64 else begin
@@ -13633,7 +13813,8 @@ begin
     UInt32ToUTF8(VByte,result);
   varInteger:
     Int32ToUTF8(VInteger,result);
-  varInt64:
+  varInt64,
+  varWord64:
     Int64ToUTF8(VInt64,result);
   varSingle:
     ExtendedToStr(VSingle,SINGLE_PRECISION,result);
@@ -15435,13 +15616,11 @@ begin
   result := 0;
   if S<>nil then
   while true do
-    if S[0]<>#0 then
-    if S[1]<>#0 then
-    if S[2]<>#0 then
-    if S[3]<>#0 then begin
-      inc(S,4);
-      inc(result,4);
-    end else begin
+    if S[result+0]<>#0 then
+    if S[result+1]<>#0 then
+    if S[result+2]<>#0 then
+    if S[result+3]<>#0 then
+      inc(result,4) else begin
       inc(result,3);
       exit;
     end else begin
@@ -15847,7 +16026,7 @@ begin
      1: Vers := wSeven;
      2: Vers := wEight;
      3: Vers := wEightOne;
-     4: Vers := wNine;
+     4: Vers := wTen;
     end;
     if Vers<>wUnknown then begin
       if wProductType<>VER_NT_WORKSTATION then
@@ -15856,6 +16035,7 @@ begin
         inc(Vers);   // e.g. wEight -> wEight64
     end;
     end;
+    10: Vers := wTen;
   end;
   OSVersion := Vers;
 end;
@@ -21078,6 +21258,58 @@ begin
 end;
 {$WARNINGS ON}
 
+procedure FieldBitsToIndex(const Fields: TSQLFieldBits; var Index: TSQLFieldIndexDynArray;
+  MaxLength,IndexStart: integer);
+var i,n: integer;
+    sets: array[0..MAX_SQLFIELDS-1] of TSQLFieldIndex; // to avoid memory reallocation
+begin
+  n := 0;
+  for i := 0 to MaxLength-1 do
+    if i in Fields then begin
+      sets[n] := i;
+      inc(n);
+    end;
+  SetLength(Index,IndexStart+n);
+  for i := 0 to n-1 do
+    Index[IndexStart+i] := sets[i];
+end;
+
+function FieldBitsToIndex(const Fields: TSQLFieldBits;
+  MaxLength: integer): TSQLFieldIndexDynArray;
+begin
+  FieldBitsToIndex(Fields,result,MaxLength);
+end;
+
+function AddFieldIndex(var Indexes: TSQLFieldIndexDynArray; Field: integer): integer;
+begin
+  result := length(Indexes);
+  SetLength(Indexes,result+1);
+  Indexes[result] := Field;
+end;
+
+function SearchFieldIndex(var Indexes: TSQLFieldIndexDynArray; Field: integer): integer;
+begin
+  for result := 0 to length(Indexes)-1 do
+    if Indexes[result]=Field then
+      exit;
+  result := -1;
+end;
+
+procedure FieldIndexToBits(const Index: TSQLFieldIndexDynArray; var Fields: TSQLFieldBits);
+var i: integer;
+begin
+  fillchar(Fields,sizeof(Fields),0);
+  for i := 0 to Length(Index)-1 do
+    if Index[i]>=0 then
+      include(Fields,Index[i]);
+end;
+
+function FieldIndexToBits(const Index: TSQLFieldIndexDynArray): TSQLFieldBits;
+begin
+  FieldIndexToBits(Index,result);
+end;
+
+
 function Hash32(const Text: RawByteString): cardinal;
 begin
   result := Hash32(pointer(Text),length(Text));
@@ -23182,8 +23414,8 @@ begin // see http://www.garykessler.net/library/file_sigs.html for magic numbers
     case PosEx(copy(Result,2,4),
         'png,gif,tiff,jpg,jpeg,bmp,doc,htm,html,css,js,ico,wof,txt,svg,'+
       // 1   5   9    14  18   23  27  31  35   40  44 47  51  55  59
-        'atom,rdf,rss,webp,appc,mani,docx,xml,json') of
-      // 63   68  72  76   81   86   91   96  100
+        'atom,rdf,rss,webp,appc,mani,docx,xml,json,woff') of
+      // 63   68  72  76   81   86   91   96  100  105
       1:  Result := 'image/png';
       5:  Result := 'image/gif';
       9:  Result := 'image/tiff';
@@ -23194,7 +23426,7 @@ begin // see http://www.garykessler.net/library/file_sigs.html for magic numbers
       40: Result := 'text/css';
       44: Result := 'application/x-javascript';
       47: Result := 'image/x-icon';
-      51: Result := 'application/font-woff';
+      51,105: Result := 'application/font-woff';
       55: Result := TEXT_CONTENT_TYPE;
       59: Result := 'image/svg+xml';
       63,68,72,96: Result := XML_CONTENT_TYPE;
@@ -27676,7 +27908,7 @@ begin
       PInteger(Dest)^ := VInteger;
       inc(Dest,sizeof(VInteger));
     end;
-    varInt64, varDouble, varDate, varCurrency:begin
+    varInt64, varWord64, varDouble, varDate, varCurrency:begin
       PInt64(Dest)^ := VInt64;
       inc(Dest,sizeof(VInt64));
     end;
@@ -27714,7 +27946,7 @@ begin
     result := sizeof(VSmallint)+sizeof(VType);
   varSingle, varLongWord, varInteger:
     result := sizeof(VInteger)+sizeof(VType);
-  varInt64, varDouble, varDate, varCurrency:
+  varInt64, varWord64, varDouble, varDate, varCurrency:
     result := sizeof(VInt64)+sizeof(VType);
   varString, varOleStr:
     if VAny=nil then
@@ -27791,7 +28023,7 @@ begin
       VInteger := PInteger(Source)^;
       inc(Source,sizeof(VInteger));
     end;
-    varInt64, varDouble, varDate, varCurrency:begin
+    varInt64, varWord64, varDouble, varDate, varCurrency:begin
       VInt64 := PInt64(Source)^;
       inc(Source,sizeof(VInt64));
     end;
@@ -28525,23 +28757,51 @@ begin
   result := tmp.VValue;
 end;
 
+function VariantTypeToSQLDBFieldType(const V: Variant): TSQLDBFieldType;
+begin
+  with TVarData(V) do
+  case VType of
+  varEmpty:
+    result := ftUnknown;
+  varNull:
+    result := ftNull;
+  {$ifndef DELPHI5OROLDER}varShortInt, varWord, varLongWord,{$endif}
+  varSmallInt, varByte, varBoolean, varInteger, varInt64, varWord64:
+    result := ftInt64;
+  varSingle,varDouble:
+    result := ftDouble;
+  varDate:
+    result := ftDate;
+  varCurrency:
+    result := ftCurrency;
+  varString:
+    if (VString<>nil) and (PCardinal(VString)^ and $ffffff=JSON_BASE64_MAGIC) then
+      result := ftBlob else
+      result := ftUTF8;
+  else
+  if VType=varVariant or varByRef then
+    result := VariantTypeToSQLDBFieldType(PVariant(VPointer)^) else
+    result := ftUTF8;
+  end;
+end;
+
 
 { TDocVariantData }
 
-procedure TDocVariantData.Init(aOptions: TDocVariantOptions=[]);
+procedure TDocVariantData.Init(aOptions: TDocVariantOptions; aKind: TDocVariantKind);
 begin
   if DocVariantType=nil then
     DocVariantType := SynRegisterCustomVariantType(TDocVariant);
   ZeroFill(TVarData(self));
   VType := DocVariantType.VarType;
   VOptions := aOptions;
+  VKind := aKind;
 end;
 
 procedure TDocVariantData.InitObject(const NameValuePairs: array of const;
   aOptions: TDocVariantOptions=[]);
 begin
-  Init(aOptions);
-  VKind := dvObject;
+  Init(aOptions,dvObject);
   AddNameValuesToObject(NameValuePairs);
 end;
 
@@ -28564,8 +28824,7 @@ procedure TDocVariantData.InitArray(const Items: array of const;
   aOptions: TDocVariantOptions=[]);
 var A: integer;
 begin
-  Init(aOptions);
-  VKind := dvArray;
+  Init(aOptions,dvArray);
   if high(Items)>=0 then begin
     VCount := length(Items);
     SetLength(VValue,VCount);
@@ -28579,9 +28838,8 @@ procedure TDocVariantData.InitArrayFromVariants(const Items: TVariantDynArray;
 begin
   if Items=nil then
     VType := varNull else begin
-    Init(aOptions);
+    Init(aOptions,dvArray);
     VCount := length(Items);
-    VKind := dvArray;
     VValue := Items; // direct by-reference copy
   end;
 end;
@@ -28591,9 +28849,8 @@ procedure TDocVariantData.InitObjectFromVariants(const aNames: TRawUTF8DynArray;
 begin
   if (aNames=nil) or (aValues=nil) or (length(aNames)<>length(aValues)) then
     VType := varNull else begin
-    Init(aOptions);
+    Init(aOptions,dvObject);
     VCount := length(aNames);
-    VKind := dvObject;
     VName := aNames; // direct by-reference copy
     VValue := aValues;
   end;
@@ -28603,7 +28860,7 @@ function TDocVariantData.InitJSONInPlace(JSON: PUTF8Char;
   aOptions: TDocVariantOptions; aEndOfObject: PUTF8Char): PUTF8Char;
 var EndOfObject: AnsiChar;
     Name: PUTF8Char;
-    n,len: integer;
+    n: integer;
 begin
   Init(aOptions);
   result := nil;
@@ -28620,15 +28877,13 @@ begin
     if n>0 then begin
       SetLength(VValue,n);
       repeat
-        if VCount>n then
-          break;
         GetJSONToAnyVariant(VValue[VCount],JSON,@EndOfObject,@VOptions);
         if JSON=nil then
           exit;
         inc(VCount);
+        if VCount>n then
+          raise EDocVariant.Create('Unexpected array size');
       until EndOfObject=']';
-      if VCount<>n then
-        raise EDocVariant.Create('Unexpected array size');
     end else
       if JSON^=']' then // n=0
         repeat inc(JSON) until not(JSON^ in [#1..' ']) else
@@ -28636,28 +28891,30 @@ begin
   end;
   '{': begin
     repeat inc(JSON) until not(JSON^ in [#1..' ']);
+    n := JSONObjectPropCount(JSON);
+    if n<0 then
+      exit; // invalid content
     VKind := dvObject;
-    SetLength(VValue,16);
-    SetLength(VName,16);
-    len := 16;
-    n := 0;
-    repeat
-      // see http://docs.mongodb.org/manual/reference/mongodb-extended-json
-      Name := GetJSONPropName(JSON);
-      if Name=nil then
+    if n>0 then begin
+      SetLength(VValue,n);
+      SetLength(VName,n);
+      repeat
+        // see http://docs.mongodb.org/manual/reference/mongodb-extended-json
+        Name := GetJSONPropName(JSON);
+        if Name=nil then
+          exit;
+        GetJSONToAnyVariant(VValue[VCount],JSON,@EndOfObject,@VOptions);
+        if JSON=nil then
+          exit;
+        VName[VCount] := Name;
+        inc(VCount);
+        if VCount>n then
+          raise EDocVariant.Create('Unexpected object size');
+      until EndOfObject='}';
+    end else
+      if JSON^='}' then // n=0
+        repeat inc(JSON) until not(JSON^ in [#1..' ']) else
         exit;
-      if n>=len then begin
-        len := len+len shr 3+32;
-        SetLength(VValue,len);
-        SetLength(VName,len);
-      end;
-      GetJSONToAnyVariant(VValue[n],JSON,@EndOfObject,@VOptions);
-      if JSON=nil then
-        exit;
-      VName[n] := Name;
-      inc(n);
-    until EndOfObject='}';
-    VCount := n;
   end;
   'n','N': begin
     if IdemPChar(JSON+1,'ULL') then begin
@@ -28746,6 +29003,11 @@ begin
   VOptions := opt;
 end;
 
+procedure TDocVariantData.SetCount(aCount: integer);
+begin
+  VCount := aCount;
+end;
+
 procedure TDocVariantData.InternalAddValue(const aName: RawUTF8; const aValue: variant);
 var len: integer;
 begin
@@ -28780,6 +29042,8 @@ end;
 
 procedure TDocVariantData.SetCapacity(aValue: integer);
 begin
+  if VKind=dvObject then
+    SetLength(VName,aValue);
   SetLength(VValue,aValue);
 end;
 
@@ -28798,6 +29062,13 @@ begin
   end;
   InternalAddValue(aName,aValue);
   result := VCount-1;
+end;
+
+function TDocVariantData.AddValue(aName: PUTF8Char; aNameLen: integer; const aValue: variant): integer;
+var tmp: RawUTF8;
+begin
+  SetString(tmp,PAnsiChar(aName),aNameLen);
+  result := AddValue(tmp,aValue);
 end;
 
 function TDocVariantData.AddItem(const aValue: variant): integer;
@@ -29412,7 +29683,7 @@ end;
 
 const // will be in code section of the exe, so will be read-only by design
   DocVariantDataFake: TDocVariantData = ();
-  
+
 function DocVariantDataSafe(const DocVariant: variant): PDocVariantData;
 begin
   with TVarData(DocVariant) do
@@ -29421,6 +29692,14 @@ begin
     if VType=varByRef or varVariant then
       result := DocVariantDataSafe(PVariant(VPointer)^) else
       result := @DocVariantDataFake;
+end;
+
+function DocVariantDataSafe(const DocVariant: variant; ExpectedKind: TDocVariantKind): PDocVariantData; overload;
+begin
+  result := DocVariantDataSafe(DocVariant);
+  if result^.Kind<>ExpectedKind then
+    raise EDocVariant.CreateUTF8('DocVariantSafe(%)<>%',
+      [ord(result^.Kind),ord(ExpectedKind)]);
 end;
 
 function _Obj(const NameValuePairs: array of const;
@@ -30103,6 +30382,39 @@ begin
     repeat inc(P) until not(P^ in [#1..' ']);
   end;
   if P^=']' then
+    result := n;
+end;
+
+function JSONObjectPropCount(P: PUTF8Char): integer;
+var n: integer;
+begin
+  result := -1;
+  n := 0;
+  P := GotoNextNotSpace(P);
+  if P^<>'}' then
+  repeat
+    P := GotoNextJSONPropName(P);
+    if P=nil then
+      exit;
+    case P^ of
+    '"': begin
+      P := GotoEndOfJSONString(P);
+      if P^<>'"' then
+        exit;
+      inc(P);
+    end;
+    '{','[': begin
+      P := GotoNextJSONObjectOrArray(P);
+      if P=nil then
+        exit; // invalid content
+    end;
+    end;
+    while not (P^ in [#0,',','}']) do inc(P);
+    inc(n);
+    if P^<>',' then break;
+    repeat inc(P) until not(P^ in [#1..' ']);
+  until false;
+  if P^='}' then
     result := n;
 end;
 
@@ -34041,13 +34353,18 @@ end;
 constructor TJSONWriter.Create(aStream: TStream; Expand, withID: boolean;
   const Fields: TSQLFieldBits);
 begin
+  Create(aStream,Expand,withID,FieldBitsToIndex(Fields));
+end;
+
+constructor TJSONWriter.Create(aStream: TStream; Expand, withID: boolean;
+  const Fields: TSQLFieldIndexDynArray);
+begin
   if aStream=nil then
     CreateOwnedStream else
     inherited Create(aStream);
   fExpand := Expand;
   fWithID := withID;
   fFields := Fields;
-  fFieldMax := MAX_SQLFIELDS-1;
 end;
 
 procedure TJSONWriter.AddColumns(aKnownRowsCount: integer);
@@ -34074,6 +34391,16 @@ begin
      // B := buf-1 at startup -> need ',val11' position in
      // "values":["col1","col2",val11,' i.e. current pos without the ','
   end;
+end;
+
+procedure TJSONWriter.ChangeExpandedFields(aWithID: boolean;
+  const aFields: TSQLFieldIndexDynArray);
+begin
+  if not Expand then
+    raise ESynException.CreateUTF8(
+      '%.ChangeExpandedFields() called with Expanded=false',[self]);
+  fWithID := aWithID;
+  fFields := aFields;
 end;
 
 procedure TJSONWriter.EndJSONObject(aKnownRowsCount,aRowsCount: integer);
@@ -34522,7 +34849,7 @@ begin  // should match GotoNextJSONObjectOrArray()
     if P^ in [#1..' '] then repeat inc(P) until not(P^ in [#1..' ']);
     if not (P^ in [':','=']) then // allow both age:18 and age=18 pairs
       exit;
-    P^ :=#0;
+    P^ := #0;
     inc(P);
   end;
   '''': begin // single quotes won't handle nested quote character
@@ -34546,6 +34873,46 @@ begin  // should match GotoNextJSONObjectOrArray()
     exit;
   end;
   result := Name;
+end;
+
+function GotoNextJSONPropName(P: PUTF8Char): PUTF8Char;
+label s;
+begin  // should match GotoNextJSONObjectOrArray()
+  if P^ in [#1..' '] then repeat inc(P) until not(P^ in [#1..' ']);
+  result := nil;
+  if P=nil then
+    exit;
+  case P^ of
+  '_','A'..'Z','a'..'z','0'..'9','$': begin // e.g. '{age:{$gt:18}}'
+    repeat
+      inc(P);
+    until not (P^ in ['_','A'..'Z','a'..'z','0'..'9','.']);
+    if P^ in [#1..' '] then
+      inc(P);
+    if P^ in [#1..' '] then repeat inc(P) until not(P^ in [#1..' ']);
+    if not (P^ in [':','=']) then // allow both age:18 and age=18 pairs
+      exit;
+  end;
+  '''': begin // single quotes won't handle nested quote character
+    inc(P);
+    while P^<>'''' do
+      if P^<' ' then
+        exit else
+        inc(P);
+    goto s;
+  end;
+  '"': begin
+    P := GotoEndOfJSONString(P);
+    if P^<>'"' then
+      exit;
+s:  repeat inc(P) until not(P^ in [#1..' ']);
+    if P^<>':' then
+      exit;
+  end else
+    exit;
+  end;
+  repeat inc(P) until not(P^ in [#1..' ']);
+  result := P;
 end;
 
 function GetJSONFieldOrObjectOrArray(var P: PUTF8Char; wasString: PBoolean=nil;
@@ -34760,6 +35127,14 @@ begin
       repeat inc(P); if P^<=' ' then exit; until P^='''';
       repeat inc(P) until not(P^ in [#1..' ']);
       if P^<>':' then exit;
+    end;
+    '/': begin
+      repeat // allow extended /regex/ syntax
+        inc(P);
+        if P^=#0 then
+          exit;
+      until P^='/';
+      repeat inc(P) until not(P^ in [#1..' ']);
     end;
     else begin
 Prop: if not (P^ in ['_','A'..'Z','a'..'z','0'..'9','$']) then
@@ -38592,40 +38967,39 @@ begin
 end;
 
 {$ifndef DELPHI5OROLDER}
+
 function TSynTable.CreateJSONWriter(JSON: TStream; Expand, withID: boolean;
   const Fields: TSQLFieldBits): TJSONWriter;
-var i, n: integer;
 begin
-  if (self=nil) or (IsZero(Fields) and not withID) then begin
+  result := CreateJSONWriter(JSON,Expand,withID,FieldBitsToIndex(Fields,fField.Count));
+end;
+
+function TSynTable.CreateJSONWriter(JSON: TStream; Expand, withID: boolean;
+  const Fields: TSQLFieldIndexDynArray): TJSONWriter;
+var i,nf,n: integer;
+begin
+  if (self=nil) or ((Fields=nil) and not withID) then begin
     result := nil; // no data to retrieve
     exit;
   end;
-  // get col max count
+  result := TJSONWriter.Create(JSON,Expand,withID,Fields);
+  // set col names
   if withID then
     n := 1 else
     n := 0;
-  result := TJSONWriter.Create(JSON,Expand,withID,Fields);
-  // set col names
-  SetLength(result.ColNames,fField.Count+n);
+  nf := length(Fields);
+  SetLength(result.ColNames,nf+n);
   if withID then
     result.ColNames[0] := 'ID';
-  with result do
-    for i := 0 to fField.Count-1 do
-      if i in Fields then begin
-        ColNames[n] := TSynTableFieldProperties(fField.List[i]).Name;
-        inc(n);
-        fFieldMax := i;
-      end;
-  // adjust col count
-  if n<>length(result.ColNames) then
-    SetLength(result.ColNames,n);
+  for i := 0 to nf-1 do
+    result.ColNames[i+n] := TSynTableFieldProperties(fField.List[Fields[i]]).Name;
   result.AddColumns; // write or init field names for appropriate JSON Expand
 end;
 
 procedure TSynTable.GetJSONValues(aID: integer; RecordBuffer: PUTF8Char;
   W: TJSONWriter);
-var i, n: integer;
-    F: TSynTableFieldProperties;
+var i,n: integer;
+    buf: array[0..MAX_SQLFIELDS-1] of PUTF8Char;
 begin
   if (self=nil) or (RecordBuffer=nil) or (W=nil) then
     exit; // avoid GPF
@@ -38640,17 +39014,17 @@ begin
     n := 1;
   end else
     n := 0;
-  for i := 0 to W.FieldMax do begin
-    F := TSynTableFieldProperties(fField.List[i]);
-    if i in W.Fields then begin
-      if W.Expand then begin
-        W.AddString(W.ColNames[n]); // '"'+ColNames[]+'":'
-        inc(n);
-      end;
-      RecordBuffer := F.GetJSON(RecordBuffer,W);
-      W.Add(',');
-    end else
-      inc(RecordBuffer,F.GetLength(RecordBuffer));
+  for i := 0 to fField.Count-1 do begin
+    buf[i] := RecordBuffer;
+    inc(RecordBuffer,TSynTableFieldProperties(fField.List[i]).GetLength(RecordBuffer));
+  end;
+  for i := 0 to length(W.Fields)-1 do begin
+    if W.Expand then begin
+      W.AddString(W.ColNames[n]); // '"'+ColNames[]+'":'
+      inc(n);
+    end;
+    TSynTableFieldProperties(fField.List[W.Fields[i]]).GetJSON(buf[i],W);
+    W.Add(',');
   end;
   W.CancelLastComma; // cancel last ','
   if W.Expand then
@@ -38661,28 +39035,33 @@ function TSynTable.IterateJSONValues(Sender: TObject; Opaque: pointer;
   ID: integer; Data: pointer; DataLen: integer): boolean;
 var Statement: TSynTableStatement absolute Opaque;
     F: TSynTableFieldProperties;
-    FIndex: cardinal;
+    nWhere,fIndex: cardinal;
 begin  // note: we should have handled -2 (=COUNT) case already
+  nWhere := length(Statement.Where);
   if (self=nil) or (Statement=nil) or (Data=nil) or
-     (Statement.WhereValueSBF='') or IsZero(Statement.Fields) then begin
+     (Statement.Select=nil) or (nWhere>1) or 
+     ((nWhere=1)and(Statement.Where[0].ValueSBF='')) then begin
     result := false;
     exit;
   end;
   result := true;
-  FIndex := Statement.WhereField;
-  if FIndex=SYNTABLESTATEMENTWHEREID then begin
-    if ID<>Statement.WhereValueInteger then
-      exit;
-  end else begin
-    dec(FIndex); // 0 is ID, 1 for field # 0, 2 for field #1, and so on...
-    if FIndex<cardinal(fField.Count) then begin
-      F := TSynTableFieldProperties(fField.List[FIndex]);
-      if F.SortCompare(GetData(Data,F),pointer(Statement.WhereValueSBF))<>0 then
+  if nWhere=1 then begin // Where=nil -> all rows
+    fIndex := Statement.Where[0].Field;
+    if fIndex=SYNTABLESTATEMENTWHEREID then begin
+      if ID<>Statement.Where[0].ValueInteger then
         exit;
-    end; // WhereField=-1 -> all rows (ignore -2 -> COUNT)
+    end else begin
+      dec(fIndex); // 0 is ID, 1 for field # 0, 2 for field #1, and so on...
+      if fIndex<cardinal(fField.Count) then begin
+        F := TSynTableFieldProperties(fField.List[fIndex]);
+        if F.SortCompare(GetData(Data,F),pointer(Statement.Where[0].ValueSBF))<>0 then
+          exit;
+      end;
+    end;
   end;
   GetJSONValues(ID,Data,Statement.Writer);
 end;
+
 {$endif DELPHI5OROLDER}
 
 function TSynTable.GetData(RecordBuffer: PUTF8Char; Field: TSynTableFieldProperties): pointer;
@@ -40113,6 +40492,7 @@ begin
   result := Prop<>'';
 end;
 
+
 constructor TSynTableStatement.Create(const SQL: RawUTF8;
   GetFieldIndex: TSynTableFieldIndex; SimpleFieldsBits: TSQLFieldBits=[0..MAX_SQLFIELDS-1];
   FieldProp: TSynTableFieldProperties=nil);
@@ -40122,7 +40502,9 @@ constructor TSynTableStatement.Create(const SQL: RawUTF8;
 // - see [94ff704bb]
 var Prop: RawUTF8;
     P, B: PUTF8Char;
-    err: integer;
+    ndx,err,len,selectCount,whereCount: integer;
+    whereWithOR: boolean;
+
 function GetPropIndex: integer;
 begin
   if not GetNextFieldProp(P,Prop) then
@@ -40135,20 +40517,183 @@ begin
   end;
 end;
 function SetFields: boolean;
-var i: integer;
+var select: TSynTableStatementSelect;
 begin
-  i := GetPropIndex; // 0 = ID, otherwise PropertyIndex+1
-  if i<0 then
-    result := false else begin // Field not found -> incorrect SQL statement
-    if i=0 then
-      withID := true else
-      include(Fields,i-1);
-    result := true;
+  result := false;
+  select.Field := GetPropIndex; // 0 = ID, otherwise PropertyIndex+1
+  select.ToBeAdded := 0;
+  if select.Field<0 then begin
+    if P^<>'(' then // Field not found -> try function(field)
+      exit;
+    P := GotoNextNotSpace(P+1);
+    select.FunctionName := Prop;
+    inc(fSelectFunctionCount);
+    if IdemPropNameU(Prop,'COUNT') and (P^='*') then begin
+      select.Field := 0; // count(*) -> count(ID)
+      P := GotoNextNotSpace(P+1);
+    end else begin
+      select.Field := GetPropIndex;
+      if select.Field<0 then
+        exit;
+    end;
+    if P^<>')' then
+      exit;
+    P := GotoNextNotSpace(P+1);
   end;
+  if P^ in ['+','-'] then begin
+    select.ToBeAdded := GetNextItemInteger(P,' ');
+    if select.ToBeAdded=0 then
+      exit;
+    P := GotoNextNotSpace(P);
+  end;
+  if IdemPChar(P,'AS ') then begin
+    inc(P,3);
+    if not GetNextFieldProp(P,select.Alias) then
+      exit;
+  end;
+  SetLength(fSelect,selectCount+1);
+  fSelect[selectCount] := select;
+  inc(selectCount);
+  result := true;
 end;
-label limit;
+function GetWhereValue(var Where: TSynTableStatementWhere): boolean;
 begin
-  // if fValue.Count=0 then exit; allow no row
+  result := false;
+  P := GotoNextNotSpace(P);
+  Where.ValueSQL := P;
+  if PWord(P)^=ord(':')+ord('(') shl 8 then
+    inc(P,2); // ignore :(...): parameter (no prepared statements here)
+  if P^ in ['''','"'] then begin
+    // SQL String statement
+    P := UnQuoteSQLStringVar(P,Where.Value);
+    if P=nil then
+      exit; // end of string before end quote -> incorrect
+    {$ifndef NOVARIANTS}
+    RawUTF8ToVariant(Where.Value,Where.ValueVariant);
+    {$endif}
+    if FieldProp<>nil then
+      // create a SBF formatted version of the WHERE value
+      Where.ValueSBF := FieldProp.SBFFromRawUTF8(Where.Value);
+  end else
+  if (PInteger(P)^ and $DFDFDFDF=NULL_UPP) and (P[4] in [#0..' ',';']) then begin
+    // NULL statement
+    Where.Value := 'null'; // not void
+    {$ifndef NOVARIANTS}
+    SetVariantNull(Where.ValueVariant);
+    {$endif}
+  end else begin
+    // numeric statement or 'true' or 'false' (OK for NormalizeValue)
+    B := P;
+    repeat
+      inc(P);
+    until P^ in [#0..' ',';',')'];
+    SetString(Where.Value,B,P-B);
+    {$ifndef NOVARIANTS}
+    Where.ValueVariant := VariantLoadJSON(Where.Value);
+    {$endif}
+    Where.ValueInteger := GetInteger(pointer(Where.Value),err);
+    if FieldProp<>nil then
+      if Where.Value<>'?' then
+        if (FieldProp.FieldType in FIELD_INTEGER) and (err<>0) then
+          // we expect a true INTEGER value here
+          Where.Value := '' else
+          // create a SBF formatted version of the WHERE value
+          Where.ValueSBF := FieldProp.SBFFromRawUTF8(Where.Value);
+  end;
+  if PWord(P)^=ord(')')+ord(':')shl 8 then
+    inc(P,2); // ignore :(...): parameter
+  Where.ValueSQLLen := P-Where.ValueSQL;
+  P := GotoNextNotSpace(P);
+  result := true;
+end;
+function GetWhereExpression(FieldIndex: integer; var Where: TSynTableStatementWhere): boolean;
+begin
+  result := false;
+  Where.JoinedOR := whereWithOR;
+  Where.Field := FieldIndex; // 0 = ID, otherwise PropertyIndex+1
+  case P^ of
+  '=': Where.Operator := opEqualTo;
+  '>': if P[1]='=' then begin
+         inc(P);
+         Where.Operator := opGreaterThanOrEqualTo;
+       end else
+         Where.Operator := opGreaterThan;
+  '<': case P[1] of
+       '=': begin
+         inc(P);
+         Where.Operator := opLessThanOrEqualTo;
+       end;
+       '>': begin
+         inc(P);
+         Where.Operator := opNotEqualTo;
+       end;
+       else
+         Where.Operator := opLessThan;
+       end;
+  'i','I':
+    case P[1] of
+    's','S': begin
+      P := GotoNextNotSpace(P+2);
+      if IdemPChar(P,'NULL') then begin
+        Where.Value := 'null';
+        Where.Operator := opIsNull;
+        Where.ValueSQL := P;
+        Where.ValueSQLLen := 4;
+        TVarData(Where.ValueVariant).VType := varNull;
+        inc(P,4);
+        result := true;
+      end else
+      if IdemPChar(P,'NOT NULL') then begin
+        Where.Value := 'not null';
+        Where.Operator := opIsNotNull;
+        Where.ValueSQL := P;
+        Where.ValueSQLLen := 8;
+        TVarData(Where.ValueVariant).VType := varNull;
+        inc(P,8);
+        result := true; // leave ValueVariant=unassigned
+      end;
+      exit;
+    end;
+    {$ifndef NOVARIANTS}
+    'n','N': begin
+       Where.Operator := opIn;
+       P := GotoNextNotSpace(P+2);
+       if P^<>'(' then
+         exit; // incorrect SQL statement
+       B := P; // get the IN() clause as JSON - without :(...): by now
+       inc(P);
+       while P^<>')' do
+         if P^=#0 then
+           exit else
+           inc(P);
+       inc(P);
+       SetString(Where.Value,PAnsiChar(B),P-B);
+       Where.ValueSQL := B;
+       Where.ValueSQLLen := P-B;
+       Where.Value[1] := '[';
+       Where.Value[P-B] := ']';
+       TDocVariantData(Where.ValueVariant).InitJSONInPlace(
+         pointer(Where.Value),JSON_OPTIONS[true]);
+       result := true;
+       exit;
+    end;
+    {$endif}
+    end; // 'i','I':
+  'l','L':
+    if IdemPChar(P+1,'IKE') then begin
+      inc(P,3);
+      Where.Operator := opLike;
+    end else
+    exit;
+  else exit; // unknown operator
+  end;
+  // we got 'WHERE FieldName operator ' -> handle value
+  inc(P);
+  result := GetWhereValue(Where);
+end;
+
+label lim,lim2;
+begin
   P := pointer(SQL);
   if (P=nil) or (self=nil) then
     exit; // avoid GPF
@@ -40157,161 +40702,144 @@ begin
     exit else // handle only SELECT statement
     inc(P,7);
   // 1. get SELECT clause: set bits in Fields from CSV field IDs in SQL
+  selectCount := 0;
   P := GotoNextNotSpace(P); // trim left
-  if P^=#0 then exit else // no SQL statement
+  if P^=#0 then
+    exit; // no SQL statement
   if P^='*' then begin // all simple (not TSQLRawBlob/TSQLRecordMany) fields
-    withID := true;
-    Fields := SimpleFieldsBits;
     inc(P);
+    SetLength(fSelect,GetBitsCount(SimpleFieldsBits,MAX_SQLFIELDS)+1);
+    selectCount := 1; // Select[0].Field := 0 -> ID
+    for ndx := 0 to MAX_SQLFIELDS-1 do
+      if ndx in SimpleFieldsBits then begin
+        fSelect[selectCount].Field := ndx+1;
+        inc(selectCount);
+      end;
     GetNextFieldProp(P,Prop);
   end else
-  if IdemPChar(P,'COUNT(*) ') then begin
-    inc(P,8);
-    GetNextFieldProp(P,Prop);
-    IsSelectCountWhere := true; // get WHERE clause below
-  end else begin
-    if not SetFields then
-      exit else // we need at least one field name
-      if P^<>',' then
-        GetNextFieldProp(P,Prop) else
-        repeat
-          while P^ in [',',#1..' '] do inc(P); // trim left
-        until not SetFields; // add other CSV field names
-  end;
-  // 2. get FROM clause
-  if not IdemPropName(Prop,'FROM') then exit; // incorrect SQL statement
-  GetNextFieldProp(P,Prop);
-  TableName := Prop;
-  // 3. get WHERE clause
-  GetNextFieldProp(P,Prop);
-  if IdemPropName(Prop,'WHERE') then begin
-    WhereField := GetPropIndex; // 0 = ID, otherwise PropertyIndex+1
-    if WhereField<0 then
-      exit; // incorrect SQL statement
-    case P^ of
-    '=': WhereOperator := opEqualTo;
-    '>': if P[1]='=' then begin
-           inc(P);
-           WhereOperator := opGreaterThanOrEqualTo;
-         end else
-           WhereOperator := opGreaterThan;
-    '<': if P[1]='=' then begin
-           inc(P);
-           WhereOperator := opLessThanOrEqualTo;
-         end else
-           WhereOperator := opLessThan;
-    'i','I':
-      case P[1] of
-      's','S': begin
-        P := GotoNextNotSpace(P+2);
-        {$ifndef NOVARIANTS}
-        SetVariantNull(WhereValueVariant);
-        {$endif}
-        if IdemPChar(P,'NULL') then begin
-          WhereValue := 'null';
-          WhereOperator := opIs;
-          inc(P,4);
-          goto Limit;
-        end else
-        if IdemPChar(P,'NOT NULL') then begin
-          WhereValue := 'not null';
-          WhereOperator := opIs;
-          inc(P,8);
-          goto Limit;
-        end;
-        exit;
-      end;
-      {$ifndef NOVARIANTS}
-      'n','N': begin
-         WhereOperator := opIn;
-         P := GotoNextNotSpace(P+2);
-         if P^<>'(' then
-           exit; // incorrect SQL statement
-         B := P; // get the IN() clause - without :(...): by now
-         inc(P);
-         while P^<>')' do
-           if P^=#0 then
-             exit else
-             inc(P);
-         inc(P);
-         SetString(WhereValue,PAnsiChar(B),P-B);
-         WhereValue[1] := '[';
-         WhereValue[P-B] := ']';
-         TDocVariantData(WhereValueVariant).InitJSONInPlace(
-           pointer(WhereValue),JSON_OPTIONS[true]);
-         goto Limit;
-      end;
-      {$endif}
-      end;
-    else exit; // unknown operator
-    end;
-    inc(P); // we had 'WHERE FieldName = '
-    P := GotoNextNotSpace(P);
-    if PWord(P)^=ord(':')+ord('(') shl 8 then
-      inc(P,2); // ignore :(...): parameter (no prepared statements here)
-    if P^ in ['''','"'] then begin
-      // SQL String statement
-      P := UnQuoteSQLStringVar(P,WhereValue);
-      if P=nil then
-        exit; // end of string before end quote -> incorrect
-      {$ifndef NOVARIANTS}
-      RawUTF8ToVariant(WhereValue,WhereValueVariant);
-      {$endif}
-      if FieldProp<>nil then
-        // create a SBF formatted version of the WHERE value
-        WhereValueSBF := FieldProp.SBFFromRawUTF8(WhereValue);
-    end else
-    if (PInteger(P)^ and $DFDFDFDF=NULL_UPP) and (P[4] in [#0..' ',';']) then begin
-      // NULL statement
-      WhereValue := 'null'; // not void
-      {$ifndef NOVARIANTS}
-      SetVariantNull(WhereValueVariant);
-      {$endif}
-    end else begin
-      // numeric statement or 'true' or 'false' (OK for NormalizeValue)
-      B := P;
+  if not SetFields then
+    exit else // we need at least one field name
+    if P^<>',' then
+      GetNextFieldProp(P,Prop) else
       repeat
-        inc(P);
-      until P^ in [#0..' ',';',')'];
-      SetString(WhereValue,B,P-B);
-      {$ifndef NOVARIANTS}
-      WhereValueVariant := VariantLoadJSON(WhereValue);
-      {$endif}
-      WhereValueInteger := GetInteger(pointer(WhereValue),err);
-      if FieldProp<>nil then
-        if WhereValue<>'?' then
-          if (FieldProp.FieldType in FIELD_INTEGER) and (err<>0) then
-            // we expect a true INTEGER value here
-            WhereValue := '' else
-            // create a SBF formatted version of the WHERE value
-            WhereValueSBF := FieldProp.SBFFromRawUTF8(WhereValue);
-    end;
-    if PWord(P)^=ord(')')+ord(':')shl 8 then
-      inc(P,2); // ignore :(...): parameter
-    // 4. get optional LIMIT clause
-limit:
-    P := GotoNextNotSpace(P);
+        while P^ in [',',#1..' '] do inc(P); // trim left
+      until not SetFields; // add other CSV field names
+  // 2. get FROM clause
+  if not IdemPropNameU(Prop,'FROM') then exit; // incorrect SQL statement
+  GetNextFieldProp(P,Prop);
+  fTableName := Prop;
+  // 3. get WHERE clause
+  whereCount := 0;
+  whereWithOR := false;
+  GetNextFieldProp(P,Prop);
+  if IdemPropNameU(Prop,'WHERE') then begin
+    repeat
+      B := P;
+      ndx := GetPropIndex;
+      if ndx<0 then begin
+        if P^='(' then begin
+          inc(P);
+          SetLength(fWhere,whereCount+1);
+          with fWhere[whereCount] do begin
+            JoinedOR := whereWithOR;
+            FunctionName := UpperCase(Prop);
+            // Byte/Word/Integer/Cardinal/Int64/CurrencyDynArrayContains(BlobField,I64)
+            len := length(Prop);
+            if (len>16) and
+               IdemPropName('DynArrayContains',PUTF8Char(@PByteArray(Prop)[len-16]),16) then
+              Operator := opContains else
+              Operator := opFunction;
+            B := P;
+            Field := GetPropIndex;
+            if Field<0 then
+              P := B else
+              if P^<>',' then
+                break else
+                P := GotoNextNotSpace(P+1);
+            if (P^=')') or
+               (GetWhereValue(fWhere[whereCount]) and (P^=')')) then begin
+              inc(P);
+              break;
+            end;
+          end;
+        end;
+        P := B;
+        break;
+      end;
+      SetLength(fWhere,whereCount+1);
+      if not GetWhereExpression(ndx,fWhere[whereCount]) then
+        exit; // invalid SQL statement
+      inc(whereCount);
+      GetNextFieldProp(P,Prop);
+      if IdemPropNameU(Prop,'OR') then
+        whereWithOR := true else
+      if IdemPropNameU(Prop,'AND') then
+        whereWithOR := false else
+        goto lim2;
+    until false;
+    // 4. get optional LIMIT/OFFSET/ORDER clause
+lim:P := GotoNextNotSpace(P);
     while (P<>nil) and not(P^ in [#0,';']) do begin
       GetNextFieldProp(P,Prop);
-      if IdemPropName(Prop,'LIMIT') then
-        FoundLimit := GetNextItemCardinal(P,' ') else
-      if IdemPropName(Prop,'OFFSET') then
-        FoundOffset := GetNextItemCardinal(P,' ') else
-        // any other clause (e.g. "ORDER BY") is ignored
-        break;
+lim2: if IdemPropNameU(Prop,'LIMIT') then
+        fLimit := GetNextItemCardinal(P,' ') else
+      if IdemPropNameU(Prop,'OFFSET') then
+        fOffset := GetNextItemCardinal(P,' ') else
+      if IdemPropNameU(Prop,'ORDER') then begin
+        GetNextFieldProp(P,Prop);
+        if IdemPropNameU(Prop,'BY') then begin
+          repeat
+            ndx := GetPropIndex; // 0 = ID, otherwise PropertyIndex+1
+            if ndx<0 then
+              exit; // incorrect SQL statement
+            AddFieldIndex(fOrderByField,ndx);
+            if P^<>',' then begin // check ORDER BY ... ASC/DESC
+              B := P;
+              if GetNextFieldProp(P,Prop) then
+                if IdemPropNameU(Prop,'DESC') then
+                  fOrderByDesc := true else
+                if not IdemPropNameU(Prop,'ASC') then
+                  P := B;
+              break;
+            end;
+            P := GotoNextNotSpace(P+1);
+          until P^ in [#0,';'];
+        end else
+        exit; // incorrect SQL statement
+      end else
+      if IdemPropNameU(Prop,'GROUP') then begin
+        GetNextFieldProp(P,Prop);
+        if IdemPropNameU(Prop,'BY') then begin
+          repeat
+            ndx := GetPropIndex; // 0 = ID, otherwise PropertyIndex+1
+            if ndx<0 then
+              exit; // incorrect SQL statement
+            AddFieldIndex(fGroupByField,ndx);
+            if P^<>',' then
+              break;
+            P := GotoNextNotSpace(P+1);
+          until P^ in [#0,';'];
+        end else
+        exit; // incorrect SQL statement
+      end else
+      if Prop<>'' then
+        exit else // incorrect SQL statement
+        break; // reached the end of the statement
     end;
   end else
-    if IsSelectCountWhere then
-      if (P=nil) or (GotoNextNotSpace(P)^ in [#0,';'])  then begin
-        WhereField := SYNTABLESTATEMENTWHERECOUNT;
-        WhereValue := 'COUNT'; // not void
-      end else
-        // invalid "SELECT count(*) FROM table TOTO"
-        WhereValue := '' else begin
-    WhereField := SYNTABLESTATEMENTWHEREALL; // no WHERE clause -> all rows
-    WhereValue := '*'; // not void
-  end;
-  SQLStatement := SQL;
+  if Prop<>'' then
+    goto lim2; // handle LIMIT OFFSET ORDER
+  fSQLStatement := SQL; // make a private copy e.g. for Where[].ValueSQL
+end;
+
+procedure TSynTableStatement.SelectFieldBits(var Fields: TSQLFieldBits; var withID: boolean);
+var i: integer;
+begin
+  fillchar(Fields,sizeof(Fields),0);
+  for i := 0 to Length(Select)-1 do
+    if Select[i].Field=0 then
+      withID := true else
+      include(Fields,Select[i].Field-1);
 end;
 
 
@@ -41164,26 +41692,23 @@ begin
 end;
 
 
-{ TSynAuthentication }
+{ TSynAuthenticationAbstract }
 
-constructor TSynAuthentication.Create(const aUserName,aPassword: RawUTF8);
+constructor TSynAuthenticationAbstract.Create;
 begin
   fLock := TAutoLocker.Create;
-  fCredentials.Init(true);
   fTokenSeed := GetTickCount64*PtrUInt(self);
   fSessionGenerator := PtrUInt(ClassType)*Int64Rec(fTokenSeed).Hi;
   fSessionGenerator := abs(fSessionGenerator);
-  if aUserName<>'' then
-    AuthenticateUser(aUserName,aPassword);
 end;
 
-destructor TSynAuthentication.Destroy;
+destructor TSynAuthenticationAbstract.Destroy;
 begin
   fLock.Free;
   inherited;
 end;
 
-class function TSynAuthentication.ComputeHash(Token: Int64;
+class function TSynAuthenticationAbstract.ComputeHash(Token: Int64;
   const UserName,PassWord: RawUTF8): cardinal;
 begin // rough authentication - better than nothing
   result := length(UserName);
@@ -41191,7 +41716,7 @@ begin // rough authentication - better than nothing
     pointer(UserName),result),pointer(Password),length(PassWord));
 end;
 
-function TSynAuthentication.ComputeCredential(previous: boolean;
+function TSynAuthenticationAbstract.ComputeCredential(previous: boolean;
   const UserName,PassWord: RawUTF8): cardinal;
 var tok: Int64;
 begin
@@ -41201,37 +41726,30 @@ begin
   result := ComputeHash(tok xor fTokenSeed,UserName,PassWord);
 end;
 
-function TSynAuthentication.CurrentToken: Int64;
+function TSynAuthenticationAbstract.CurrentToken: Int64;
 begin
   result := (GetTickCount64 div 10000) xor fTokenSeed;
 end;
 
-procedure TSynAuthentication.AuthenticateUser(const aName, aPassword: RawUTF8);
+procedure TSynAuthenticationAbstract.AuthenticateUser(const aName, aPassword: RawUTF8);
 begin
-  fLock.Enter;
-  fCredentials.Add(aName,aPassword);
-  fLock.Leave;
+  raise ESynException.CreateFmt('%.AuthenticateUser() is not implemented',[self]);
 end;
 
-procedure TSynAuthentication.DisauthenticateUser(const aName: RawUTF8);
+procedure TSynAuthenticationAbstract.DisauthenticateUser(const aName: RawUTF8);
 begin
-  fLock.Enter;
-  fCredentials.Delete(aName);
-  fLock.Leave;
+  raise ESynException.CreateFmt('%.DisauthenticateUser() is not implemented',[self]);
 end;
 
-function TSynAuthentication.CreateSession(const User: RawUTF8; Hash: cardinal): integer;
-var i: integer;
-    password: RawUTF8;
+function TSynAuthenticationAbstract.CreateSession(const User: RawUTF8; Hash: cardinal): integer;
+var password: RawUTF8;
 begin
   result := 0;
   fLock.Enter;
   try
     // check the credentials
-    i := fCredentials.Find(User);
-    if i<0 then
+    if not GetPassword(User,password) then
       exit;
-    password := fCredentials.List[i].Value;
     if (ComputeCredential(false,User,password)<>Hash) and
        (ComputeCredential(true,User,password)<>Hash) then
       exit;
@@ -41246,20 +41764,63 @@ begin
   end;
 end;
 
-function TSynAuthentication.SessionExists(aID: integer): boolean;
+function TSynAuthenticationAbstract.SessionExists(aID: integer): boolean;
 begin
   fLock.Enter;
   result := FastFindIntegerSorted(pointer(fSessions),fSessionsCount-1,aID)>=0;
   fLock.Leave;
 end;
 
-procedure TSynAuthentication.RemoveSession(aID: integer);
+procedure TSynAuthenticationAbstract.RemoveSession(aID: integer);
 var i: integer;
 begin
   fLock.Enter;
   i := FastFindIntegerSorted(pointer(fSessions),fSessionsCount-1,aID);
   if i>=0 then
     DeleteInteger(fSessions,fSessionsCount,i);
+  fLock.Leave;
+end;
+
+
+{ TSynAuthentication }
+
+constructor TSynAuthentication.Create(const aUserName,aPassword: RawUTF8);
+begin
+  inherited Create;
+  fCredentials.Init(true);
+  if aUserName<>'' then
+    AuthenticateUser(aUserName,aPassword);
+end;
+
+function TSynAuthentication.GetPassword(const UserName: RawUTF8;
+  out Password: RawUTF8): boolean;
+var i: integer;
+begin
+  i := fCredentials.Find(UserName);
+  if i<0 then begin
+    result := false;
+    exit;
+  end;
+  password := fCredentials.List[i].Value;
+  result := true;
+end;
+
+function TSynAuthentication.GetUsersCount: integer;
+begin
+  result := fCredentials.Count;
+end;
+
+procedure TSynAuthentication.AuthenticateUser(const aName, aPassword: RawUTF8);
+begin
+  fLock.Enter;
+  fCredentials.Add(aName,aPassword);
+  fLock.Leave;
+end;
+
+procedure TSynAuthentication.DisauthenticateUser(const aName: RawUTF8);
+begin
+  fLock.Enter;
+  fCredentials.Delete(aName);
   fLock.Leave;
 end;
 
@@ -41385,10 +41946,10 @@ begin
     end;
     if IsIdle then
       break;
-    case OnIdleProcessNotify of
-      0..9:    Sleep(0);
-      10..100: Sleep(5);
-      else     Sleep(10);
+    case OnIdleProcessNotify of // GetTickCount64 resolution is 10-16 ms
+    0..30:   Sleep(0);
+    31..100: Sleep(1);
+    else     Sleep(5);
     end;
   until false;
   // process execution in the background thread 
@@ -41598,4 +42159,4 @@ finalization
   GarbageCollectorFree;
   if GlobalCriticalSectionInitialized then
     DeleteCriticalSection(GlobalCriticalSection);
-end.
+end.
