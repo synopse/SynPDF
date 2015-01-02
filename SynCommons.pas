@@ -6,7 +6,7 @@ unit SynCommons;
 (*
     This file is part of Synopse framework.
 
-    Synopse framework. Copyright (C) 2014 Arnaud Bouchez
+    Synopse framework. Copyright (C) 2015 Arnaud Bouchez
       Synopse Informatique - http://synopse.info
 
   *** BEGIN LICENSE BLOCK *****
@@ -25,7 +25,7 @@ unit SynCommons;
 
   The Initial Developer of the Original Code is Arnaud Bouchez.
 
-  Portions created by the Initial Developer are Copyright (C) 2014
+  Portions created by the Initial Developer are Copyright (C) 2015
   the Initial Developer. All Rights Reserved.
 
   Contributor(s):
@@ -645,6 +645,7 @@ unit SynCommons;
   - added TSynBackgroundThreadAbstract class for generic background process, and
     callback-driven TSynBackgroundThreadEvent / TSynBackgroundThreadProcedure /
     TSynBackgroundThreadMethod inherited classes
+  - added SetThreadName/SetCurrentThreadName functions for request [6acfd0a3d3]
   - added TSynFPUException class to allow per-method customization of the FPU
     exception mapping: to be used e.g. when mixing code between external
     libraries and Delphi code
@@ -7606,9 +7607,15 @@ procedure FieldIndexToBits(const Index: TSQLFieldIndexDynArray; var Fields: TSQL
 // - returns the index in Indexes[] of the given Field value, -1 if not found
 function SearchFieldIndex(var Indexes: TSQLFieldIndexDynArray; Field: integer): integer;
 
-/// convert an arra of field indexes into a TSQLFieldBits set of bits
+/// convert an array of field indexes into a TSQLFieldBits set of bits
 function FieldIndexToBits(const Index: TSQLFieldIndexDynArray): TSQLFieldBits; overload;
   {$ifdef HASINLINE}inline;{$endif}
+
+/// name the current thread so that it would be easily identified in the IDE debugger
+procedure SetCurrentThreadName(Format: PUTF8Char; const Args: array of const);
+
+/// name a thread so that it would be easily identified in the IDE debugger
+procedure SetThreadName(ThreadID: cardinal; Format: PUTF8Char; const Args: array of const);
 
 type
   TSynBackgroundThreadAbstract = class;
@@ -7661,7 +7668,9 @@ type
     fOnAfterExecute: TNotifyThreadEvent;
     fOnBeforeProcess: TNotifyThreadEvent;
     fOnAfterProcess: TNotifyThreadEvent;
+    fThreadName: RawUTF8;
     function GetOnIdleBackgroundThreadActive: boolean;
+    /// where the main process takes place
     procedure Execute; override;
     /// called by Execute method when fProcessParams<>nil and fEvent is notified
     procedure Process; virtual; abstract;
@@ -7671,7 +7680,8 @@ type
     /// initialize the thread
     // - if aOnIdle is not set (i.e. equals nil), it will simply wait for
     // the background process to finish until RunAndWait() will return
-    constructor Create(aOnIdle: TOnIdleSynBackgroundThread); reintroduce;
+    constructor Create(aOnIdle: TOnIdleSynBackgroundThread;
+      const aThreadName: RawUTF8); reintroduce;
     /// release used resources
     destructor Destroy; override;
     /// launch Process abstract method asynchronously in the background thread
@@ -7732,7 +7742,7 @@ type
     // - if aOnIdle is not set (i.e. equals nil), it will simply wait for
     // the background process to finish until RunAndWait() will return 
     constructor Create(aOnProcess: TOnProcessSynBackgroundThread;
-      aOnIdle: TOnIdleSynBackgroundThread); reintroduce;
+      aOnIdle: TOnIdleSynBackgroundThread; const aThreadName: RawUTF8); reintroduce;
     /// provide a method handler to be execute in the background thread
     // - triggered by RunAndWait() method - which will wait until finished
     // - the OpaqueParam as specified to RunAndWait() will be supplied here
@@ -7766,7 +7776,7 @@ type
     // - if aOnIdle is not set (i.e. equals nil), it will simply wait for
     // the background process to finish until RunAndWait() will return
     constructor Create(aOnProcess: TOnProcessSynBackgroundThreadProc;
-      aOnIdle: TOnIdleSynBackgroundThread); reintroduce;
+      aOnIdle: TOnIdleSynBackgroundThread; const aThreadName: RawUTF8); reintroduce;
     /// provide a procedure handler to be execute in the background thread
     // - triggered by RunAndWait() method - which will wait until finished
     // - the OpaqueParam as specified to RunAndWait() will be supplied here
@@ -7908,7 +7918,7 @@ type
     // - FromNow uses local time: this function retrieves the system time
     // expressed in Coordinated Universal Time (UTC)
     procedure FromUTCTime;
-    /// get the year (e.g. 2014) of the TTimeLog value
+    /// get the year (e.g. 2015) of the TTimeLog value
     function Year: Integer; {$ifdef HASINLINE}inline;{$endif}
     /// get the month (1..12) of the TTimeLog value
     function Month: Integer; {$ifdef HASINLINE}inline;{$endif}
@@ -10136,6 +10146,10 @@ type
     // - return false if aName is not found, or if the instance is not a TDocVariant
     // - return true if the name has been found, and aValue stores the value
     function GetAsInteger(const aName: RawUTF8; out aValue: integer): Boolean;
+    /// find an item in this document, and returns its value as integer
+    // - return false if aName is not found, or if the instance is not a TDocVariant
+    // - return true if the name has been found, and aValue stores the value
+    function GetAsInt64(const aName: RawUTF8; out aValue: Int64): Boolean;
     /// find an item in this document, and returns its value as floating point
     // - return false if aName is not found, or if the instance is not a TDocVariant
     // - return true if the name has been found, and aValue stores the value
@@ -10211,9 +10225,14 @@ type
     /// search a property match in this document, handled as array
     // - {aPropName:aPropValue} will be searched within the stored array,
     // and the corresponding item index will be returned, on match
-    // - returns -1 if no match is found 
+    // - returns -1 if no match is found
     function SearchItemByProp(const aPropName,aPropValue: RawUTF8;
       aCaseSensitive: boolean): integer;
+    /// search a value in this document, handled as array
+    // - aValue will be searched within the stored array
+    // and the corresponding item index will be returned, on match
+    // - returns -1 if no match is found
+    function SearchItemByValue(const aValue: Variant): integer;
 
     /// how this document will behave
     // - those options are set when creating the instance
@@ -15415,8 +15434,12 @@ begin
   end;
 end;
 begin
-  if (Format='') or (high(Args)<0) then begin
+  if (Format=nil) or (high(Args)<0) then begin
     result := Format; // no formatting to process
+    exit;
+  end;
+  if PWord(Format)^=ord('%') then begin
+    VarRecToUTF8(Args[0],result);
     exit;
   end;
   result := '';
@@ -15756,7 +15779,6 @@ begin
     if P2='' then
       exit;
   L := PStrRec(PtrInt(P1)-STRRECSIZE)^.length;
-
   if L<>PStrRec(PtrInt(P2)-STRRECSIZE)^.length then
     exit;
   j := 1;
@@ -28962,6 +28984,15 @@ begin
   result := -1;
 end;
 
+function TDocVariantData.SearchItemByValue(const aValue: Variant): integer;
+begin
+  if VKind=dvArray then
+    for result := 0 to VCount-1 do
+      if VValue[result]=aValue then // rely on Variants.pas comparison
+        exit;
+  result := -1;
+end;
+
 function TDocVariantData.Delete(Index: integer): boolean;
 begin
   if cardinal(Index)>=cardinal(VCount) then
@@ -29045,6 +29076,15 @@ begin
   if found=nil then
     result := false else
     result := VariantToInteger(PVariant(found)^,aValue)
+end;
+
+function TDocVariantData.GetAsInt64(const aName: RawUTF8; out aValue: Int64): Boolean;
+var found: PVarData;
+begin
+  found := GetVarData(aName);
+  if found=nil then
+    result := false else
+    result := VariantToInt64(PVariant(found)^,aValue)
 end;
 
 function TDocVariantData.GetAsDouble(const aName: RawUTF8; out aValue: double): Boolean;
@@ -41828,11 +41868,55 @@ end;
 
 { TSynBackgroundThreadAbstract }
 
-constructor TSynBackgroundThreadAbstract.Create(aOnIdle: TOnIdleSynBackgroundThread);
+{$ifdef MSWINDOWS}
+function IsDebuggerPresent: BOOL; stdcall; external kernel32; // since XP
+{$endif}
+
+procedure SetCurrentThreadName(Format: PUTF8Char; const Args: array of const);
+begin
+  SetThreadName(GetCurrentThreadId,Format,Args);
+end;
+
+procedure SetThreadName(ThreadID: cardinal; Format: PUTF8Char; const Args: array of const);
+var name: RawByteString;
+{$ifndef ISDELPHIXE2}
+{$ifdef MSWINDOWS}
+    info: record
+      FType: LongWord;     // must be 0x1000
+      FName: PAnsiChar;    // pointer to name (in user address space)
+      FThreadID: LongWord; // thread ID (-1 indicates caller thread)
+      FFlags: LongWord;    // reserved for future use, must be zero
+    end;
+{$endif}
+{$endif}
+begin
+  {$ifdef MSWINDOWS}
+  if not IsDebuggerPresent then
+    exit;
+  {$endif}
+  name := CurrentAnsiConvert.UTF8ToAnsi(FormatUTF8(Format,Args));
+  {$ifdef ISDELPHIXE2}
+  TThread.NameThreadForDebugging(name,ThreadID);
+  {$else}
+  {$ifdef MSWINDOWS}
+  info.FType := $1000;
+  info.FName := pointer(name);
+  info.FThreadID := ThreadID;
+  info.FFlags := 0;
+  try
+    RaiseException($406D1388,0,SizeOf(info) div SizeOf(LongWord),@info);
+  except {ignore} end;
+  {$endif}
+  {$endif}
+end;
+
+constructor TSynBackgroundThreadAbstract.Create(aOnIdle: TOnIdleSynBackgroundThread;
+  const aThreadName: RawUTF8);
 begin
   fOnIdle := aOnIdle;
   fProcessEvent := TEvent.Create(nil,false,false,'');
   fCallerEvent := TEvent.Create(nil,false,false,'');
+  fThreadName := aThreadName;
   inherited Create(false);
   InitializeCriticalSection(fPendingProcessLock);
 end;
@@ -41868,6 +41952,9 @@ end;
 
 procedure TSynBackgroundThreadAbstract.Execute;
 begin
+  if fThreadName='' then
+    SetCurrentThreadName('%(%)',[self,pointer(self)]) else
+    SetCurrentThreadName('%',[fThreadName]);
   if Assigned(fOnBeforeExecute) then
     fOnBeforeExecute(self);
   try
@@ -41987,9 +42074,9 @@ end;
 { TSynBackgroundThreadEvent }
 
 constructor TSynBackgroundThreadEvent.Create(aOnProcess: TOnProcessSynBackgroundThread;
-  aOnIdle: TOnIdleSynBackgroundThread);
+  aOnIdle: TOnIdleSynBackgroundThread; const aThreadName: RawUTF8);
 begin
-  inherited Create(aOnIdle);
+  inherited Create(aOnIdle,aThreadName);
   fOnProcess := aOnProcess;
 end;
 
@@ -42022,9 +42109,9 @@ end;
 { TSynBackgroundThreadProcedure }
 
 constructor TSynBackgroundThreadProcedure.Create(aOnProcess: TOnProcessSynBackgroundThreadProc;
-  aOnIdle: TOnIdleSynBackgroundThread);
+  aOnIdle: TOnIdleSynBackgroundThread; const aThreadName: RawUTF8);
 begin
-  inherited Create(aOnIdle);
+  inherited Create(aOnIdle,aThreadName);
   fOnProcess := aOnProcess;
 end;
 
@@ -42160,4 +42247,4 @@ finalization
   GarbageCollectorFree;
   if GlobalCriticalSectionInitialized then
     DeleteCriticalSection(GlobalCriticalSection);
-end.
+end.

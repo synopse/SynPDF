@@ -6,7 +6,7 @@ unit mORMotReport;
 (*
     This file is part of Synopse framework.
 
-    Synopse framework. Copyright (C) 2014 Arnaud Bouchez
+    Synopse framework. Copyright (C) 2015 Arnaud Bouchez
       Synopse Informatique - http://synopse.info
 
   *** BEGIN LICENSE BLOCK *****
@@ -27,7 +27,7 @@ unit mORMotReport;
 
   Portions created by the Initial Developer are Copyright (C) 2003
   the Initial Developer. All Rights Reserved.
-  Portions created by Arnaud Bouchez for Synopse are Copyright (C) 2014
+  Portions created by Arnaud Bouchez for Synopse are Copyright (C) 2015
   Arnaud Bouchez. All Rights Reserved.
 
   Contributor(s):
@@ -109,7 +109,7 @@ unit mORMotReport;
   - full Unicode text process (even before Delphi 2009)
   - speed up and various bug fixes to work with Delphi 5 up to XE3
 
-  Modifications © 2009-2014 Arnaud Bouchez
+  Modifications © 2009-2015 Arnaud Bouchez
 
   Version 1.4 - February 8, 2010
   - whole Synopse SQLite3 database framework released under the GNU Lesser
@@ -200,6 +200,8 @@ unit mORMotReport;
   - fixed [cfdc644038] about truncated parenthesis in pdf export for caCurrency
   - fixed [e7ffb69131] about TGDIPages.DrawGraphic() when the TGraphic is Empty
   - allow preview as a blank colored component at design time (thanks to Celery)
+  - added VisibleButtons optional parameter to TGDIPages.ShowPreviewForm method
+    as requested by [4d64a52675]
 
 
 *)
@@ -354,6 +356,14 @@ type
   /// used to store all pages of the report
   TGDIPageContentDynArray = array of TGDIPageContent;
   
+  /// the available menu items
+  TGdiPagePreviewButton = (
+    rNone, rNextPage, rPreviousPage, rGotoPage, rZoom, rBookmarks,
+    rPageAsText, rPrint, rExportPDF, rClose);
+
+  /// set of menu items
+  TGdiPagePreviewButtons = set of TGdiPagePreviewButton;
+
   /// Report class for generating documents from code
   // - data is drawn in memory, they displayed or printed as desired
   // - allow preview and printing, and direct pdf export
@@ -771,7 +781,10 @@ type
 {$endif}
     /// show a form with the preview, allowing the user to browse pages and
     // print the report
-    procedure ShowPreviewForm;
+    // - you can customize the buttons and popup menu actions displayed on
+    // the screen - by default, all buttons are visible
+    procedure ShowPreviewForm(VisibleButtons: TGdiPagePreviewButtons =
+      [rNextPage..High(TGdiPagePreviewButton)]);
 
     /// set the Tabs stops on every line
     // - if one value is provided, it will set the Tabs as every multiple of it
@@ -1370,16 +1383,11 @@ resourcestring
   sPDFFile = 'Acrobat File';
   sPageN = 'Page %d / %d';
   /// used to create the popup menu of the report
+  // - should match TGdiPagePreviewButton order
   sReportPopupMenu1 = '&Next page,&Previous page,&Go to Page...,&Zoom...,'+
     '&Bookmarks,Copy Page as &Text,P&rint,PDF &Export,&Close,Page fit,Page width';
   /// used to create the pages browsing menu of the report
   sReportPopupMenu2 = 'Pages %d to %d,Page %d';
-
-type
-  /// the available menu items
-  TReportPopupMenu = (
-    rNone, rNextPage, rPreviousPage, rGotoPage, rZoom, rBookmarks,
-    rPageAsText, rPrint, rExportPDF, rClose);
 
 const
   /// minimum gray border with around preview page
@@ -3667,7 +3675,7 @@ const // zoom percentages for popup menu entries
 procedure TGDIPages.EndDoc;
 var PC: PChar;
     i, n, aX: integer;
-    Men: TReportPopupMenu;
+    Men: TGdiPagePreviewButton;
     M, Root: TMenuItem;
     Page: TMetaFile;
     s: string;
@@ -4438,7 +4446,7 @@ begin
   end;
 end;
 
-procedure TGDIPages.ShowPreviewForm;
+procedure TGDIPages.ShowPreviewForm(VisibleButtons: TGdiPagePreviewButtons);
   procedure CopyMenus(Source,Dest: TMenuItem);
   var i: integer;
       Sub: TMenuItem;
@@ -4503,21 +4511,25 @@ begin
           PopupMenu := PopupMenuClass.Create(PreviewForm);
           CopyMenus(M,PopupMenu.Items);
         end;
-        case TReportPopupMenu(i+1) of
-        rPrint: begin
-          Height := 60;
-          inc(y,64);
-          Default := true;
-        end;
-        rClose, rNextPage, rPreviousPage: begin
-          Height := 48;
-          inc(y,52);
-        end;
-        rGotoPage, rZoom, rBookmarks, rExportPDF:
-          inc(y,48);
-        else
-          inc(y,36);
-        end;
+        if TGdiPagePreviewButton(i+1) in VisibleButtons then
+          case TGdiPagePreviewButton(i+1) of
+          rPrint: begin
+            Height := 60;
+            inc(y,64);
+            Default := true;
+          end;
+          rClose, rNextPage, rPreviousPage: begin
+            Height := 48;
+            inc(y,52);
+          end;
+          rGotoPage, rZoom, rBookmarks, rExportPDF:
+            inc(y,48);
+          else
+            inc(y,36);
+          end else begin
+            M.Visible := false;
+            Visible := false;
+          end;
       end;
     end;
     OldParent := Parent;
