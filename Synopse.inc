@@ -127,6 +127,13 @@
 // be affected (unless you use the enhanced RTTI for record/dynamic array JSON
 // serialization) - left undefined by default to ensure minimal impact
 
+{.$define NOSETTHREADNAME}
+// if defined, SetThreadName() would not raise the exception used to set the
+// thread name: to be defined if you have issues when debugging your application
+
+{.$define OLDTEXTWRITERFORMAT}
+// force TTextWriter.Add(Format) to handle the alternate $ % tags
+
 {$ifdef LVCL}
    // NormToUpper[] exists only in our enhanced RTL
   {$define OWNNORMTOUPPER}
@@ -196,18 +203,25 @@
   {$endif CPU64}
 
   {$define FPC_OR_PUREPASCAL}
+  {$define FPC_OR_KYLIX}
   // exceptions interception code in FPC differs from Delphi
   {$define NOEXCEPTIONINTERCEPT}
 
-   {$ifdef VER2_7_1}
-     {$define ISFPC271}
-     {$define HASVARUSTRING}
-     {$define HASVARUSTRARG}
-     // defined if the http://mantis.freepascal.org/view.php?id=26773 bug is fixed
-     // you should use 2.7.1/trunk branch in revision 28995 from 2014-11-05T22:17:54
-     // => this will change the TInvokeableVariantType.SetProperty() signature
-     {$define FPC_VARIANTSETVAR}
-   {$endif}
+  {$ifdef VER2_7}
+    {$define ISFPC27}
+  {$endif}
+  {$ifdef VER3_1}
+    {$define ISFPC27}
+  {$endif}
+  {$ifdef ISFPC27}
+    {$define ISFPC271}
+    {$define HASVARUSTRING}
+    {$define HASVARUSTRARG}
+    // defined if the http://mantis.freepascal.org/view.php?id=26773 bug is fixed
+    // you should use 2.7.1/trunk branch in revision 28995 from 2014-11-05T22:17:54
+    // => this will change the TInvokeableVariantType.SetProperty() signature
+    {$define FPC_VARIANTSETVAR}
+  {$endif}
 
 {$else FPC}
 
@@ -226,14 +240,16 @@
   {.$define NOEXCEPTIONINTERCEPT}
 
   {$IFDEF CONDITIONALEXPRESSIONS}  // Delphi 6 or newer
+    {$define HASINTERFACERTTI} // interface RTTI (not FPC)
     {$ifdef LINUX}
       {$if RTLVersion = 14.5}
-        // Kylix 3 will be handled just like Delphi 7
-        {$undef ENHANCEDRTL} // Enhanced Runtime library not fully tested yet
-        {$undef DOPATCHTRTL}
-        {$define NOVARCOPYPROC}
-        {$define NOEXCEPTIONINTERCEPT} // no exception interception yet
         {$define KYLIX3}
+        {$define FPC_OR_KYLIX}
+        // Kylix 3 will be handled just like Delphi 7
+        {$undef ENHANCEDRTL}   // Enhanced Runtime library not fully tested yet
+        {$define DOPATCHTRTL}  // nice speed up for server apps
+        {$define NOVARCOPYPROC}
+        {$define NOSQLITE3STATIC} // Kylix will use external sqlite3.so
       {$else}
       Kylix1/2 are unsupported
       {$ifend}
@@ -285,16 +301,17 @@
     {$if CompilerVersion >= 26.0}
       {$define ISDELPHIXE5}
       {$define PUBLISHRECORD}
-      // if defined, a sftUtf8Record will be defined in order to serialize published
-      // properties with a record type: but even if such properties can be defined,
-      // there is RTTI generated only since Delphi XE5: so it won't work before :( see
-      // http://docwiki.embarcadero.com/RADStudio/en/Classes_and_Objects#Published_Members
+      // if defined, will handle RTTI available only since Delphi XE5 for
+      // record published properties 
     {$ifend}
     {$if CompilerVersion >= 27.0}
       {$define ISDELPHIXE6}
     {$ifend}
     {$if CompilerVersion >= 28.0}
       {$define ISDELPHIXE7}
+    {$ifend}
+    {$if CompilerVersion >= 29.0}
+      {$define ISDELPHIXE8}
     {$ifend}
   {$ELSE}
     // Delphi 5 or older
@@ -313,6 +330,11 @@
   {$define NODELPHIASM}
   {$define FPC_OR_PUREPASCAL}
   {$undef DOPATCHTRTL}
+  {$ifdef CPU64DELPHI}
+    {$define NOTPUREPASCALNORCPU64DELPHI}
+  {$endif CPU64DELPHI}
+{$else}
+  {$define NOTPUREPASCALNORCPU64DELPHI}
 {$endif PUREPASCAL}
 
 {$R-} // disable Range checking in our code
@@ -340,6 +362,20 @@
   {$WARN UNIT_PLATFORM OFF}
 {$endif}
 
+// see http://synopse.info/fossil/tktview?name=6593f0fbd1
+{$ifndef WITHUXTHEME}
+  {$define EXTENDEDTOSTRING_USESTR} // no TFormatSettings before Delphi 6
+{$endif}
+{$ifdef LVCL}
+  {$define EXTENDEDTOSTRING_USESTR} // no FloatToText implemented in LVCL
+{$endif}
+{$ifdef FPC}
+  {$define EXTENDEDTOSTRING_USESTR} // FloatToText uses str() in FPC
+{$endif}
+{$ifdef CPU64}
+  {$define EXTENDEDTOSTRING_USESTR} // FloatToText() much slower in x64 mode
+{$endif}
+
 // global conditional to use SQLite3 with fastcall calling convention
 // used by SynSQLite3, SynSQLite3Static, SynSQlite3RegEx and mORMotSQLite3 units
 {$ifdef CPU64}
@@ -362,4 +398,15 @@
   {$define NOSQLITE3ENCRYPT}
 {$endif}
 
-
+{$ifdef MSWINDOWS}
+   // our current IOCP pattern is Windows-specific:
+   //  with Thread Pool: 3394 requests / second (each request with 4 KB of data)
+   //  without the Pool: 140/s in the IDE (i.e. one core), 2637/s on a dual core
+   // but less needed under Linux, since thread creation sounds much cheaper
+   // see http://www.akkadia.org/drepper/nptl-design.pdf 
+   {$define USETHREADPOOL}
+   {.$define ONLYUSEHTTPSOCKET} // for debugging
+{$else}
+   // http.sys server is Windows-specific
+   {$define ONLYUSEHTTPSOCKET}
+{$endif}
