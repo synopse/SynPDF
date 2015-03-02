@@ -8937,9 +8937,13 @@ procedure SleepHiRes(ms: cardinal);
 
 {$else MSWINDOWS}
 
-/// compatibility function for Linux
+/// compatibility function for Linux/Android
 function GetCurrentThreadID: LongWord; cdecl;
+{$ifdef ANDROID}
+  external 'libc.so' name 'pthread_self';
+{$else}
   external 'libpthread.so.0' name 'pthread_self';
+{$endif}
 
 {$ifdef KYLIX3}
 /// overloaded function using open64() to allow 64 bit positions
@@ -10967,7 +10971,13 @@ function _Obj(const NameValuePairs: array of const;
 // initialized with the Name/Value pairs
 // - this function will also ensure that ensure Obj is not stored by reference,
 // but as a true TDocVariantData
-procedure _ObjAddProps(const NameValuePairs: array of const; var Obj: variant);
+procedure _ObjAddProps(const NameValuePairs: array of const; var Obj: variant); overload;
+
+/// add the property values of a document to a document-based object content
+// - if the Document and Obj are a TDocVariant object, then all Document's
+// properties will be added at the root level of Obj
+// - if Document or Obj are not a TDocVariant object, will do nothing 
+procedure _ObjAddProps(const Document: variant; var Obj: variant); overload;
 
 /// initialize a variant instance to store some document-based array content
 // - array will be initialized with data supplied as parameters, e.g.
@@ -14227,7 +14237,7 @@ type
     {$endif FPC_REQUIRES_PROPER_ALIGNMENT}
     record
     {$ifdef FPC}
-    {$ifdef VER2_7}
+    {$ifdef ISFPC27}
     codePage: Word;
     elemSize: Word;
     {$endif}
@@ -30951,6 +30961,22 @@ begin
     TDocVariantData(Obj).AddNameValuesToObject(NameValuePairs);
 end;
 
+procedure _ObjAddProps(const Document: variant; var Obj: variant);
+var i: integer;
+begin
+  while TVarData(Obj).VType=varByRef or varVariant do
+    TVarData(Obj) := PVarData(TVarData(Obj).VPointer)^;
+  if (DocVariantType=nil) or
+     (TVarData(Obj).VType<>DocVariantType.VarType) or
+     (TDocVariantData(Obj).Kind<>dvObject) or
+     (TVarData(Document).VType<>DocVariantType.VarType) or
+     (TDocVariantData(Document).Kind<>dvObject) then
+    exit; // nothing to do
+  with TDocVariantData(Document) do
+    for i := 0 to VCount-1 do
+      TDocVariantData(Obj).AddValue(VName[i],VValue[i]);
+end;
+
 function _ObjFast(const NameValuePairs: array of const): variant;
 begin
   if not(TVarData(result).VType in VTYPE_STATIC) then
@@ -38121,24 +38147,12 @@ begin
   result :=
 {$ifdef FPC}
   'Free Pascal'
-  {$ifdef VER2_4_0}+' 2.4.0'{$endif}
-  {$ifdef VER2_4_2}+' 2.4.2'{$endif}
-  {$ifdef VER2_4_3}+' 2.4.3'{$endif}
-  {$ifdef VER2_4_4}+' 2.4.4'{$endif}
-  {$ifdef VER2_5_0}+' 2.5.0'{$endif}
-  {$ifdef VER2_5_1}+' 2.5.1'{$endif}
-  {$ifdef VER2_6_0}+' 2.6.0'{$endif}
-  {$ifdef VER2_6_1}+' 2.6.1'{$endif}
-  {$ifdef VER2_6_2}+' 2.6.2'{$endif}
-  {$ifdef VER2_6_3}+' 2.6.3'{$endif}
   {$ifdef VER2_6_4}+' 2.6.4'{$endif}
   {$ifdef VER2_7_0}+' 2.7.0'{$endif}
   {$ifdef VER2_7_1}+' 2.7.1'{$endif}
+  {$ifdef VER3_0_1}+' 3.0.1'{$endif}
   {$ifdef VER3_1_1}+' 3.1.1'{$endif}
 {$else}
-  {$ifdef VER90}  'Delphi 2'{$endif}
-  {$ifdef VER100} 'Delphi 3'{$endif}
-  {$ifdef VER120} 'Delphi 4'{$endif}
   {$ifdef VER130} 'Delphi 5'{$endif}
   {$ifdef CONDITIONALEXPRESSIONS}  // Delphi 6 or newer
     {$if     defined(KYLIX3)}'Kylix 3'
@@ -42622,6 +42636,7 @@ procedure TSynTableStatement.SelectFieldBits(var Fields: TSQLFieldBits; var with
 var i: integer;
 begin
   fillchar(Fields,sizeof(Fields),0);
+  withID := false;
   for i := 0 to Length(Select)-1 do
     if Select[i].Field=0 then
       withID := true else
@@ -44126,7 +44141,7 @@ const n2u: array[138..255] of byte =
 {$endif OWNNORMTOUPPER}
 begin
   {$ifdef FPC}
-  {$ifdef VER2_7}
+  {$ifdef ISFPC27}
   DefaultSystemCodepage := CODEPAGE_US;
   {$endif}
   {$endif FPC}
