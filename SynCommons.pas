@@ -1920,13 +1920,13 @@ function Pos(const substr, str: RawUTF8): Integer; overload; inline;
 /// use our fast RawUTF8 version of IntToStr()
 // - without any slow UnicodeString=String->AnsiString conversion for Delphi 2009
 // - only useful if our Enhanced Runtime (or LVCL) library is not installed
-function Int64ToUtf8(Value: Int64): RawUTF8; overload;
+function Int64ToUtf8(Value: Int64): RawByteString; overload;
   {$ifdef PUREPASCAL}{$ifdef HASINLINE}inline;{$endif}{$endif}
 
 /// use our fast RawUTF8 version of IntToStr()
 // - without any slow UnicodeString=String->AnsiString conversion for Delphi 2009
 // - only useful if our Enhanced Runtime (or LVCL) library is not installed
-function Int32ToUtf8(Value: integer): RawUTF8; overload;
+function Int32ToUtf8(Value: integer): RawByteString; overload;
   {$ifdef PUREPASCAL}{$ifdef HASINLINE}inline;{$endif}{$endif}
 
 /// use our fast RawUTF8 version of IntToStr()
@@ -1942,7 +1942,7 @@ procedure Int64ToUtf8(Value: Int64; var result: RawUTF8); overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// optimized conversion of a cardinal into RawUTF8
-function UInt32ToUtf8(Value: cardinal): RawUTF8; overload;
+function UInt32ToUtf8(Value: cardinal): RawByteString; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// optimized conversion of a cardinal into RawUTF8
@@ -4329,13 +4329,12 @@ type
     function JustAdded: boolean;
   end;
 
-  {$M+} 
-  /// abstract parent class with threadsafe implementation of IInterface and
-  // a virtual constructor
-  // - you can specify e.g. such a class to TSQLRestServer.ServiceRegister() if
-  // you need an interfaced object with a virtual constructor, ready to be
-  // overridden to initialize the instance
-  TInterfacedObjectWithCustomCreate = class(TInterfacedObject)
+  /// abstract parent class with a virtual constructor, ready to be overridden
+  // to initialize the instance
+  // - you can specify such a class if you need an object including published
+  // properties (like TPersistent) with a virtual constructor (e.g. to
+  // initialize some nested class properties)
+  TPersistentWithCustomCreate = class(TPersistent)
   public
     /// this virtual constructor will be called at instance creation
     // - this constructor does nothing, but is declared as virtual so that
@@ -4343,12 +4342,13 @@ type
     constructor Create; virtual;
   end;
 
-  /// abstract parent class with a virtual constructor, ready to be overridden
-  // to initialize the instance
-  // - you can specify such a class if you need an object including published
-  // properties (like TPersistent) with a virtual constructor (e.g. to
-  // initialize some nested class properties)
-  TPersistentWithCustomCreate = class(TPersistent)
+  {$M+} 
+  /// abstract parent class with threadsafe implementation of IInterface and
+  // a virtual constructor
+  // - you can specify e.g. such a class to TSQLRestServer.ServiceRegister() if
+  // you need an interfaced object with a virtual constructor, ready to be
+  // overridden to initialize the instance
+  TInterfacedObjectWithCustomCreate = class(TInterfacedObject)
   public
     /// this virtual constructor will be called at instance creation
     // - this constructor does nothing, but is declared as virtual so that
@@ -7340,6 +7340,10 @@ type
     function Process(FieldIndex: integer; const Value: RawUTF8; var ErrorMsg: string): boolean;
       virtual; abstract;
   end;
+
+  /// points to a TSynValidate variable
+  // - used e.g. as optional parameter to TSQLRecord.Validate/FilterAndValidate
+  PSynValidate = ^TSynValidate;
 
   /// IP v4 address validation to be applied to a Record field content
   // (typicaly a TSQLRecord)
@@ -14956,7 +14960,7 @@ end;
 
 {$define OWNI2S}
 
-function Int32ToUTF8(Value : integer): RawUTF8; // 3x faster than SysUtils.IntToStr
+function Int32ToUTF8(Value : integer): RawByteString; // 3x faster than SysUtils.IntToStr
 // from IntToStr32_JOH_IA32_6_a, adapted for Delphi 2009+
 asm // eax=Value, edx=@result
   push   ebx
@@ -15053,7 +15057,7 @@ asm // eax=Value, edx=@result
   mov    [ecx],al                {Save Final Digit}
 end;
 
-function Int64ToUTF8(Value: Int64): RawUTF8;
+function Int64ToUTF8(Value: Int64): RawByteString;
 // from IntToStr64_JOH_IA32_6_b, adapted for Delphi 2009+ 
 asm
   push   ebx
@@ -16158,7 +16162,7 @@ end;
 
 {$ifndef OWNI2S}
 
-function Int32ToUTF8(Value : integer): RawUTF8; // faster than SysUtils.IntToStr
+function Int32ToUTF8(Value : integer): RawByteString; // faster than SysUtils.IntToStr
 var tmp: array[0..15] of AnsiChar;
     P: PAnsiChar;
 begin
@@ -16166,7 +16170,7 @@ begin
   SetString(result,P,@tmp[15]-P);
 end;
 
-function Int64ToUtf8(Value: Int64): RawUTF8; // faster than SysUtils.IntToStr
+function Int64ToUtf8(Value: Int64): RawByteString; // faster than SysUtils.IntToStr
 var tmp: array[0..23] of AnsiChar;
     P: PAnsiChar;
 begin
@@ -16176,7 +16180,7 @@ end;
 
 {$endif}
 
-function UInt32ToUTF8(Value: Cardinal): RawUTF8; // faster than SysUtils.IntToStr
+function UInt32ToUTF8(Value: Cardinal): RawByteString; // faster than SysUtils.IntToStr
 var tmp: array[0..15] of AnsiChar;
     P: PAnsiChar;
 begin
@@ -35192,6 +35196,10 @@ begin
     Add(pointer(s),0,Escape);  // direct write of RawUTF8 content
   CP_UTF16:
     AddW(pointer(s),0,Escape); // direct write of UTF-16 content
+  CP_SQLRAWBLOB: begin
+    AddNoJSONEscape(@JSON_BASE64_MAGIC_QUOTE_VAR,4);
+    WrBase64(pointer(s),L,false);
+  end;
   else begin
     if L>=SizeOf(tmpU8)div 3 then
       Getmem(U8,L*3+1) else
