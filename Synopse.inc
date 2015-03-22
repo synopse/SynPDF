@@ -195,6 +195,10 @@
   {$ifdef ANDROID}
     {$define LINUX}
   {$endif}
+  {$ifdef DARWIN}
+    {$define LINUX}
+    {$define PUREPASCAL} // e.g. low-level stack layout differs  
+  {$endif}
 
   {$ifdef CPU64}
     {$define PUREPASCAL}
@@ -277,6 +281,7 @@
     {$if CompilerVersion >= 18}
       {$define HASNEWFILEAGE} // Delphi 2006 or newer
       {$define HASINLINE}
+      {$define HASREGION}
     {$ifend}
     {$if CompilerVersion > 18}
       {$define ISDELPHI2007ANDUP} // Delphi 2007 or newer
@@ -398,11 +403,14 @@
   {.$define SQLITE3_FASTCALL}
 {$endif}
 
-// Only Win32+Linux32 do support our SQLite3 static linked library  
+// Only Win32+Linux32 do support our SQLite3 static linked library yet  
 {$ifdef CPU64}
   {$define NOSQLITE3STATIC}
 {$endif}
 {$ifdef ANDROID}
+  {$define NOSQLITE3STATIC}
+{$endif}
+{$ifdef DARWIN}
   {$define NOSQLITE3STATIC}
 {$endif}
 
@@ -421,7 +429,7 @@
   // but less needed under Linux, since thread creation sounds much cheaper
   // see http://www.akkadia.org/drepper/nptl-design.pdf
   {$define USETHREADPOOL}
-  {.$define ONLYUSEHTTPSOCKET} // for testing under Windows (should use http.sys)
+  {.$define ONLYUSEHTTPSOCKET} // for testing (no benefit vs http.sys)
   {.$define USELIBCURL}     // for testing under Windows (no benefit vs WinHTTP)
 {$else}
   // http.sys server is Windows-specific
@@ -431,5 +439,4 @@
   {$define USELIBCURL}
   {$endif}
 {$endif}
-
 

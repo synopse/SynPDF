@@ -222,8 +222,10 @@ unit SynCrypto;
    - added AES encryption using official Microsoft AES Cryptographic Provider
      (CryptoAPI) via TAESECB_API, TAESCBC_API, TAESCFB_API and TAESOFB_API -
      our optimized asm version is faster, so is still our default/preferred
-   - added CompressShaAes() and global CompressShaAesKey, CompressShaAesIV and
-     CompressShaAesClass variables to be used by THttpSocket.RegisterCompress
+   - added optional IVAtBeginning parameter to EncryptPKCS7/DecryptPKC7 methods
+   - get rid of the unsafe IV parameter for TAES* classes constructors
+   - added CompressShaAes() and global CompressShaAesKey and CompressShaAesClass
+     variables to be used by THttpSocket.RegisterCompress
    - introduce new TRC4 object for RC4 encryption algorithm
    - removed several compilation hints when assertions are set to off
 
@@ -315,10 +317,10 @@ type
     // - first method to call before using this class
     // - KeySize is in bits, i.e. 128,192,256
     function EncryptInit(const Key; KeySize: cardinal): boolean;
-    /// encrypt an AES data block
-    procedure Encrypt(var B: TAESBlock); overload;
     /// encrypt an AES data block into another data block
     procedure Encrypt(const BI: TAESBlock; var BO: TAESBlock); overload;
+    /// encrypt an AES data block
+    procedure Encrypt(var B: TAESBlock); overload;
 
     /// Initialize AES contexts for uncypher
     function DecryptInit(const Key; KeySize: cardinal): boolean;
@@ -360,12 +362,15 @@ type
   protected
     fKeySize: cardinal;
     fKeySizeBytes: cardinal;
+    fKey: TAESKey;
+    fIV: TAESBlock;
   public
     /// Initialize AES contexts for cypher
     // - first method to call before using this class
     // - KeySize is in bits, i.e. 128,192,256
-    // - IV is the Initialization Vector
-    constructor Create(const aKey; aKeySize: cardinal; const aIV: TAESBlock); virtual;
+    constructor Create(const aKey; aKeySize: cardinal); virtual;
+    /// compute a class instance similar to this one
+    function Clone: TAESAbstract; virtual;
 
     /// perform the AES cypher in the corresponding mode
     procedure Encrypt(BufIn, BufOut: pointer; Count: cardinal); virtual; abstract;
@@ -375,14 +380,29 @@ type
     /// encrypt a memory buffer using a PKCS7 padding pattern
     // - PKCS7 is described in RFC 5652 - it will add up to 16 bytes to
     // the input buffer
-    function EncryptPKCS7(const Input: RawByteString): RawByteString;
+    // - if IVAtBeginning is TRUE, a random Initialization Vector will be computed,
+    // and stored at the beginning of the output binary buffer
+    function EncryptPKCS7(const Input: RawByteString; IVAtBeginning: boolean=false): RawByteString;
     /// decrypt a memory buffer using a PKCS7 padding pattern
     // - PKCS7 is described in RFC 5652 - it will trim up to 16 bytes from
     // the input buffer
-    function DecryptPKCS7(const Input: RawByteString): RawByteString;
+    // - if IVAtBeginning is TRUE, the Initialization Vector will be taken
+    // from the beginning of the input binary buffer
+    function DecryptPKCS7(const Input: RawByteString; IVAtBeginning: boolean=false): RawByteString;
+
+    /// simple wrapper able to cypher/decypher any content
+    // - here all data variable could be text or binary
+    // - if IVAtBeginning is TRUE, a random Initialization Vector will be computed,
+    // and stored at the beginning of the output binary buffer
+    class function SimpleEncrypt(const Input,Key: RawByteString; Encrypt: boolean;
+      IVAtBeginning: boolean=false): RawByteString;
 
     /// associated Key Size, in bits (i.e. 128,192,256)
     property KeySize: cardinal read fKeySize;
+    /// associated Initialization Vector
+    // - you should better use PKCS7 encoding with IVAtBeginning option than
+    // a fixed Initialization Vector, especially in ECB mode
+    property IV: TAESBlock read fIV write fIV;
   end;
 
   /// handle AES cypher/uncypher with chaining
@@ -390,22 +410,19 @@ type
   // mode required - TAESECB, TAESCBC, TAESCFB, TAESOFB and TAESCTR classes to
   // handle in ECB, CBC, CFB, OFB and CTR mode (including PKCS7 padding)
   // - this class will use AES-NI hardware instructions, if available
+  // - those classes are re-entrant, i.e. that you can call the Encrypt*
+  // or Decrypt* methods on the same instance several times
   TAESAbstractSyn = class(TAESAbstract)
   protected
     fIn, fOut: PAESBlock;
     AES: TAES;
-    fKey: TAESKey;
     fCount: Cardinal;
     fCV: TAESBlock;
     procedure EncryptInit;
     procedure DecryptInit;
     procedure EncryptTrailer;
+    procedure DecryptTrailer;
   public
-    /// Initialize AES context for cypher
-    // - first method to call before using this class
-    // - KeySize is in bits, i.e. 128,192,256
-    // - IV is the Initialization Vector
-    constructor Create(const aKey; aKeySize: cardinal; const aIV: TAESBlock); override;
     /// perform the AES cypher in the corresponding mode
     // - this abstract method will set CV from AES.Context, and fIn/fOut
     // from BufIn/BufOut
@@ -418,8 +435,8 @@ type
 
   /// handle AES cypher/uncypher without chaining (ECB)
   // - this mode is known to be less secure than the others
-  // - IV value set on constructor is used to code the trailing bytes
-  // of the buffer (by a simple XOR)
+  // - IV property should be set to a fixed value to encode the trailing bytes
+  // of the buffer by a simple XOR - but you should better use the PKC7 pattern
   // - this class will use AES-NI hardware instructions, if available, e.g.
   // ! ECB128: 19.70ms in x86 optimized code, 6.97ms with AES-NI
   TAESECB = class(TAESAbstractSyn)
@@ -508,8 +525,7 @@ type
       aiKeyAlg: cardinal;
       dwKeyLength: cardinal;
     end;
-    fKey: TAESKey;
-    fIV: TAESBlock;
+    fKeyHeaderKey: TAESKey;
     fKeyCryptoAPI: pointer;
     fInternalMode: cardinal;
     procedure InternalSetMode; virtual; abstract;
@@ -518,13 +534,18 @@ type
     /// Initialize AES context for cypher
     // - first method to call before using this class
     // - KeySize is in bits, i.e. 128,192,256
-    // - IV is the Initialization Vector
-    constructor Create(const aKey; aKeySize: cardinal; const aIV: TAESBlock); override;
+    constructor Create(const aKey; aKeySize: cardinal); override;
     /// release the AES execution context
     destructor Destroy; override;
     /// perform the AES cypher in the ECB mode
+    // - if Count is not a multiple of a 16 bytes block, the IV will be used
+    // to XOR the trailing bytes - so it won't be compatible with our
+    // TAESAbstractSyn classes: you should better use PKC7 padding instead
     procedure Encrypt(BufIn, BufOut: pointer; Count: cardinal); override;
     /// perform the AES un-cypher in the ECB mode
+    // - if Count is not a multiple of a 16 bytes block, the IV will be used
+    // to XOR the trailing bytes - so it won't be compatible with our
+    // TAESAbstractSyn classes: you should better use PKC7 padding instead
     procedure Decrypt(BufIn, BufOut: pointer; Count: cardinal); override;
   end;
 
@@ -811,7 +832,7 @@ procedure AESSHA256(bIn, bOut: pointer; Len: integer; const Password: RawByteStr
 
 /// AES encryption using the TAES format with a supplied SHA256 password
 // - last bytes (not part of 16 bytes blocks) are not crypted by AES, but with XOR
-function  AESSHA256(const s, Password: RawByteString; Encrypt: boolean): RawByteString; overload;
+function AESSHA256(const s, Password: RawByteString; Encrypt: boolean): RawByteString; overload;
 
 /// AES encryption using the TAESFull format with a supplied SHA256 password
 // - outStream will be larger/smaller than Len: this is a full AES version with
@@ -834,6 +855,10 @@ function MD5DigestsEqual(const A, B: TMD5Digest): Boolean;
 
 /// compute the hexadecimal representation of a MD5 digest
 function MD5DigestToString(const D: TMD5Digest): RawUTF8;
+
+/// fill a block of 16 bytes with some random values
+// - is used internally by this unit to compute an AES Initialization Vector
+procedure FillRandom(var IV: TAESBlock);
 
 /// compute the HTDigest for a user and a realm, according to a supplied password
 // - apache-compatible: 'agent007:download area:8364d0044ef57b3defcfa141e8f77b65'
@@ -895,32 +920,26 @@ procedure XorConst(p: PIntegerArray; Count: integer);
 var
   /// the encryption key used by CompressShaAes() global function
   // - the key is global to the whole process
-  // - use CompressShaAesSetKey() procedure to set this Key and associated IV
+  // - use CompressShaAesSetKey() procedure to set this Key from text 
   CompressShaAesKey: TSHA256Digest;
-
-  /// the Initialization Vector used by CompressShaAes() global function
-  // - this vector is global to the whole process
-  // - use CompressShaAesSetKey() procedure to set this IV and associated Key
-  CompressShaAesIV: TAESBlock;
 
   /// the AES-256 encoding class used by CompressShaAes() global function
   // - use any of the implementation classes, corresponding to the chaining
   // mode required - TAESECB, TAESCBC, TAESCFB, TAESOFB and TAESCTR classes to
   // handle in ECB, CBC, CFB, OFB and CTR mode (including PKCS7 padding)
-  // - set to the secure and efficient CTR mode by default
-  CompressShaAesClass: TAESAbstractClass = TAESCTR;
+  // - set to the secure and efficient CFB mode by default
+  CompressShaAesClass: TAESAbstractClass = TAESCFB;
 
-/// set an text-based encryption key/IV for CompressShaAes() global function
-// - will compute the key/IV via SHA256Weak() and set global CompressShaAesKey var
-// - the key and Initialization Vector are global to the whole process
-procedure CompressShaAesSetKey(const Key: RawByteString; const IV: RawByteString='');
+/// set an text-based encryption key for CompressShaAes() global function
+// - will compute the key via SHA256Weak() and set CompressShaAesKey
+// - the key is global to the whole process
+procedure CompressShaAesSetKey(const Key: RawByteString; AesClass: TAESAbstractClass=nil);
 
 /// encrypt data content using the AES-256/CTR algorithm, after SynLZ compression
 // - as expected by THttpSocket.RegisterCompress()
 // - will return 'synshaaes' as ACCEPT-ENCODING: header parameter
-// - will use global CompressShaAesKey and CompressShaAesIV variables to be set
-// according to the expected compression Key and Initialization Vector, e.g.
-// via a call to the CompressShaAesSetKey() global procedure
+// - will use global CompressShaAesKey / CompressShaAesClass variables to be set
+// according to the expected algorithm and Key e.g. via a call to CompressShaAesSetKey() 
 // - if you want to change the chaining mode, you can customize the global
 // CompressShaAesClass variable to the expected TAES* class name
 // - will store a hash of both cyphered and clear stream: if the
@@ -1429,6 +1448,108 @@ begin
   Encrypt(B,B);
 end;
 
+{$ifdef USEAESNI}
+procedure AesNiEncryptXmm7;
+asm // input: eax=TAESContext, xmm7=data; output: xmm7=data
+  mov dl,[eax].TAESContext.Rounds
+  movdqu xmm0,[eax+16*0]
+  movdqu xmm1,[eax+16*1]
+  movdqu xmm2,[eax+16*2]
+  movdqu xmm3,[eax+16*3]
+  movdqu xmm4,[eax+16*4]
+  movdqu xmm5,[eax+16*5]
+  movdqu xmm6,[eax+16*6]
+  pxor xmm7,xmm0
+  cmp dl,10
+  {$ifdef HASAESNI}
+  aesenc xmm7,xmm1
+  aesenc xmm7,xmm2
+  aesenc xmm7,xmm3
+  aesenc xmm7,xmm4
+  {$else}
+  db $66,$0F,$38,$DC,$F9
+  db $66,$0F,$38,$DC,$FA
+  db $66,$0F,$38,$DC,$FB
+  db $66,$0F,$38,$DC,$FC
+  {$endif}
+  movdqu xmm0,[eax+16*7]
+  movdqu xmm1,[eax+16*8]
+  movdqu xmm2,[eax+16*9]
+  movdqu xmm3,[eax+16*10]
+  je @128
+  cmp dl,12
+  {$ifdef HASAESNI}
+  aesenc xmm7,xmm5
+  aesenc xmm7,xmm6
+  {$else}
+  db $66,$0F,$38,$DC,$FD
+  db $66,$0F,$38,$DC,$FE
+  {$endif}
+  movdqu xmm4,[eax+16*11]
+  movdqu xmm5,[eax+16*12]
+  je @192
+@256:
+  movdqu xmm6,[eax+16*13]
+  {$ifdef HASAESNI}
+  aesenc xmm7,xmm0
+  aesenc xmm7,xmm1
+  {$else}
+  db $66,$0F,$38,$DC,$F8
+  db $66,$0F,$38,$DC,$F9
+  {$endif}
+  movdqu xmm1,[eax+16*14]
+  {$ifdef HASAESNI}
+  aesenc xmm7,xmm2
+  aesenc xmm7,xmm3
+  aesenc xmm7,xmm4
+  aesenc xmm7,xmm5
+  aesenc xmm7,xmm6
+  aesenclast xmm7,xmm1
+  {$else}
+  db $66,$0F,$38,$DC,$FA
+  db $66,$0F,$38,$DC,$FB
+  db $66,$0F,$38,$DC,$FC
+  db $66,$0F,$38,$DC,$FD
+  db $66,$0F,$38,$DC,$FE
+  db $66,$0F,$38,$DD,$F9
+  {$endif}
+  ret
+@128:
+  {$ifdef HASAESNI}
+  aesenc xmm7,xmm5
+  aesenc xmm7,xmm6
+  aesenc xmm7,xmm0
+  aesenc xmm7,xmm1
+  aesenc xmm7,xmm2
+  aesenclast xmm7,xmm3
+  {$else}
+  db $66,$0F,$38,$DC,$FD
+  db $66,$0F,$38,$DC,$FE
+  db $66,$0F,$38,$DC,$F8
+  db $66,$0F,$38,$DC,$F9
+  db $66,$0F,$38,$DC,$FA
+  db $66,$0F,$38,$DD,$FB
+  {$endif}
+  ret
+@192:
+  {$ifdef HASAESNI}
+  aesenc xmm7,xmm0
+  aesenc xmm7,xmm1
+  aesenc xmm7,xmm2
+  aesenc xmm7,xmm3
+  aesenc xmm7,xmm4
+  aesenclast xmm7,xmm5
+  {$else}
+  db $66,$0F,$38,$DC,$F8
+  db $66,$0F,$38,$DC,$F9
+  db $66,$0F,$38,$DC,$FA
+  db $66,$0F,$38,$DC,$FB
+  db $66,$0F,$38,$DC,$FC
+  db $66,$0F,$38,$DD,$FD
+  {$endif}
+end;
+{$endif}
+
 procedure TAES.Encrypt(const BI: TAESBlock; var BO: TAESBlock);
 // encrypt one block: Context contains encryption key
 {$ifdef PURE_PASCAL}
@@ -1479,8 +1600,8 @@ begin
     s0 := t0 xor PK[0];
     s1 := t1 xor PK[1];
     s2 := t2 xor PK[2];
-      Inc(pK);
-    end;
+    Inc(pK);
+  end;
   TWA4(BO)[0] := ((SBox[s0        and $ff])        xor
                   (SBox[s1 shr  8 and $ff]) shl  8 xor
                   (SBox[s2 shr 16 and $ff]) shl 16 xor
@@ -1594,104 +1715,7 @@ asm // eax=TAES(self)=TAESContext edx=BI ecx=BO
   cmp byte ptr [eax].TAESContext.AesNi,0
   je @noAesNi
   movdqu xmm7,[edx]
-  mov dl,[eax].TAESContext.Rounds
-  movdqu xmm0,[eax+16*0]
-  movdqu xmm1,[eax+16*1]
-  movdqu xmm2,[eax+16*2]
-  movdqu xmm3,[eax+16*3]
-  movdqu xmm4,[eax+16*4]
-  movdqu xmm5,[eax+16*5]
-  movdqu xmm6,[eax+16*6]
-  pxor xmm7,xmm0
-  cmp dl,10
-  {$ifdef HASAESNI}
-  aesenc xmm7,xmm1
-  aesenc xmm7,xmm2
-  aesenc xmm7,xmm3
-  aesenc xmm7,xmm4
-  {$else}
-  db $66,$0F,$38,$DC,$F9
-  db $66,$0F,$38,$DC,$FA
-  db $66,$0F,$38,$DC,$FB
-  db $66,$0F,$38,$DC,$FC
-  {$endif}
-  movdqu xmm0,[eax+16*7]
-  movdqu xmm1,[eax+16*8]
-  movdqu xmm2,[eax+16*9]
-  movdqu xmm3,[eax+16*10]
-  je @128
-  cmp dl,12
-  {$ifdef HASAESNI}
-  aesenc xmm7,xmm5
-  aesenc xmm7,xmm6
-  {$else}
-  db $66,$0F,$38,$DC,$FD
-  db $66,$0F,$38,$DC,$FE
-  {$endif}
-  movdqu xmm4,[eax+16*11]
-  movdqu xmm5,[eax+16*12]
-  je @192
-@256:
-  movdqu xmm6,[eax+16*13]
-  {$ifdef HASAESNI}
-  aesenc xmm7,xmm0
-  aesenc xmm7,xmm1
-  {$else}
-  db $66,$0F,$38,$DC,$F8
-  db $66,$0F,$38,$DC,$F9
-  {$endif}
-  movdqu xmm1,[eax+16*14]
-  {$ifdef HASAESNI}
-  aesenc xmm7,xmm2
-  aesenc xmm7,xmm3
-  aesenc xmm7,xmm4
-  aesenc xmm7,xmm5
-  aesenc xmm7,xmm6
-  aesenclast xmm7,xmm1
-  {$else}
-  db $66,$0F,$38,$DC,$FA
-  db $66,$0F,$38,$DC,$FB
-  db $66,$0F,$38,$DC,$FC
-  db $66,$0F,$38,$DC,$FD
-  db $66,$0F,$38,$DC,$FE
-  db $66,$0F,$38,$DD,$F9
-  {$endif}
-  movdqu [ecx],xmm7
-  ret
-@128:
-  {$ifdef HASAESNI}
-  aesenc xmm7,xmm5
-  aesenc xmm7,xmm6
-  aesenc xmm7,xmm0
-  aesenc xmm7,xmm1
-  aesenc xmm7,xmm2
-  aesenclast xmm7,xmm3
-  {$else}
-  db $66,$0F,$38,$DC,$FD
-  db $66,$0F,$38,$DC,$FE
-  db $66,$0F,$38,$DC,$F8
-  db $66,$0F,$38,$DC,$F9
-  db $66,$0F,$38,$DC,$FA
-  db $66,$0F,$38,$DD,$FB
-  {$endif}
-  movdqu [ecx],xmm7
-  ret
-@192:
-  {$ifdef HASAESNI}
-  aesenc xmm7,xmm0
-  aesenc xmm7,xmm1
-  aesenc xmm7,xmm2
-  aesenc xmm7,xmm3
-  aesenc xmm7,xmm4
-  aesenclast xmm7,xmm5
-  {$else}
-  db $66,$0F,$38,$DC,$F8
-  db $66,$0F,$38,$DC,$F9
-  db $66,$0F,$38,$DC,$FA
-  db $66,$0F,$38,$DC,$FB
-  db $66,$0F,$38,$DC,$FC
-  db $66,$0F,$38,$DD,$FD
-  {$endif}
+  call AesNiEncryptXmm7
   movdqu [ecx],xmm7
   ret
 @noAesNi:
@@ -4193,7 +4217,7 @@ type
 
 function AES(const Key; KeySize: cardinal; const s: RawByteString; Encrypt: boolean): RawByteString;
 begin
-  SetLength(result,length(s));
+  SetString(result,nil,length(s));
   if s<>'' then
     AES(Key,KeySize,pointer(s),pointer(result),length(s),Encrypt);
 end;
@@ -4483,7 +4507,7 @@ end;
 
 function AESSHA256(const s, Password: RawByteString; Encrypt: boolean): RawByteString;
 begin
-  SetLength(result,length(s));
+  SetString(result,nil,length(s));
   AESSHA256(pointer(s),pointer(result),length(s),Password,Encrypt);
 end;
 
@@ -4753,7 +4777,7 @@ end;
 var
   Xor32Byte: TByteArray absolute Td0;  // $2000=8192 bytes of XOR tables ;)
 
-{$ifndef PURE_PASCAL} // should be put outside XorOffset() for FPC :(
+{$ifndef PUREPASCAL} // should be put outside XorOffset() for FPC :(
 procedure Xor64(PI: PIntegerArray; P: pByte; Count: integer);
 asm // eax=PI edx=P ecx=Count64
   push ebx
@@ -5006,7 +5030,7 @@ function MD5DigestToString(const D: TMD5Digest): RawUTF8;
 var P: PAnsiChar;
     I: Integer;
 begin
-  SetLength(result,sizeof(D)*2);
+  SetString(result,nil,sizeof(D)*2);
   P := pointer(result);
   for I := 0 to sizeof(D)-1 do begin
     P[0] := Digits[D[I] shr 4];
@@ -5019,7 +5043,7 @@ function SHA1DigestToString(const D: TSHA1Digest): RawUTF8;
 var P: PAnsiChar;
     I: Integer;
 begin
-  SetLength(result,sizeof(D)*2);
+  SetString(result,nil,sizeof(D)*2);
   P := pointer(result);
   for I := 0 to sizeof(D)-1 do begin
     P[0] := Digits[D[I] shr 4];
@@ -5032,7 +5056,7 @@ function SHA256DigestToString(const D: TSHA256Digest): RawUTF8;
 var P: PAnsiChar;
     I: Integer;
 begin
-  SetLength(result,sizeof(D)*2);
+  SetString(result,nil,sizeof(D)*2);
   P := pointer(result);
   for I := 0 to sizeof(D)-1 do begin
     P[0] := Digits[D[I] shr 4];
@@ -5289,8 +5313,16 @@ end;
 const
   sAESException = 'AES engine initialization failure';
 
-constructor TAESAbstract.Create(const aKey; aKeySize: cardinal;
-  const aIV: TAESBlock);
+procedure FillRandom(var IV: TAESBlock);
+var i,rnd: cardinal;
+begin
+  rnd := (GetTickCount64 xor PtrUInt(@IV))*Random(MaxInt);
+  for i := 0 to 3 do
+    PCardinalArray(@IV)[i] := PCardinalArray(@IV)[i]
+      xor rnd xor TD0[(rnd shr i)and 8091];
+end;
+
+constructor TAESAbstract.Create(const aKey; aKeySize: cardinal);
 begin
    if (aKeySize<>128) and (aKeySize<>192) and (aKeySize<>256) then
     raise ESynCrypto.CreateFmt(
@@ -5298,54 +5330,85 @@ begin
       [ClassName,aKeySize]);
   fKeySize := aKeySize;
   fKeySizeBytes := fKeySize shr 3;
+  move(aKey,fKey,fKeySizeBytes);
 end;
 
-function TAESAbstract.DecryptPKCS7(const Input: RawByteString): RawByteString;
-var len: integer;
+function TAESAbstract.DecryptPKCS7(const Input: RawByteString;
+  IVAtBeginning: boolean): RawByteString;
+var len,iv: integer;
 begin
   // validate input
   len := length(Input);
   if (len<AESBlockSize) or (len and (AESBlockSize-1)<>0) then
     raise ESynCrypto.Create('Invalid content');
   // decrypt
-  SetLength(result,len);
-  Decrypt(pointer(Input),pointer(result),len);
+  if IVAtBeginning then begin
+    fIV := PAESBlock(Input)^;
+    dec(len,AESBlockSize);
+    iv := AESBlockSize;
+  end else
+    iv := 0;
+  SetString(result,nil,len);
+  Decrypt(@PByteArray(Input)^[iv],pointer(result),len);
   // delete right padding
   if ord(result[len])>AESBlockSize then
     raise ESynCrypto.Create('Invalid content');
   SetLength(result,len-ord(result[len]));
 end;
 
-function TAESAbstract.EncryptPKCS7(const Input: RawByteString): RawByteString;
-var len, padding: cardinal;
+function TAESAbstract.EncryptPKCS7(const Input: RawByteString;
+  IVAtBeginning: boolean): RawByteString;
+var len, padding, iv: cardinal;
+    P: Pointer;
 begin
   // use PKCS7 padding, so expects AESBlockSize=16 bytes blocks
   len := length(Input);
   padding := AESBlockSize-(len and (AESBlockSize-1));
-  SetLength(result,len+padding);
-  move(Pointer(Input)^,pointer(result)^,len);
-  FillChar(PByteArray(result)^[len],padding,padding);
+  if IVAtBeginning then
+    iv := AESBlockSize else
+    iv := 0;
+  SetString(result,nil,iv+len+padding);
+  if IVAtBeginning then begin
+    FillRandom(fIV);
+    PAESBlock(result)^ := fIV;
+  end;
+  move(Pointer(Input)^,PByteArray(result)^[iv],len);
+  FillChar(PByteArray(result)^[iv+len],padding,padding);
   // encryption
-  Encrypt(pointer(result),pointer(result),len+padding);
+  P := @PByteArray(result)^[iv];
+  Encrypt(P,P,len+padding);
+end;
+
+class function TAESAbstract.SimpleEncrypt(const Input,Key: RawByteString;
+  Encrypt, IVAtBeginning: boolean): RawByteString;
+var instance: TAESAbstract;
+    digest: TSHA256Digest;
+begin
+  SHA256Weak(Key,digest);
+  instance := Create(digest,256);
+  try
+    if Encrypt then
+      result := instance.EncryptPKCS7(Input,IVAtBeginning) else
+      result := instance.DecryptPKCS7(Input,IVAtBeginning);
+  finally
+    instance.Free;
+  end;
+end;
+
+function TAESAbstract.Clone: TAESAbstract;
+begin
+  result := TAESAbstractClass(ClassType).Create(fKey,fKeySize);
 end;
 
 
 { TAESAbstractSyn }
-
-constructor TAESAbstractSyn.Create(const aKey; aKeySize: cardinal;
-  const aIV: TAESBlock);
-begin
-  inherited;
-  TAESContext(AES.Context).IV := aIV;
-  move(aKey,fKey,fKeySizeBytes);
-end;
 
 procedure TAESAbstractSyn.Decrypt(BufIn, BufOut: pointer; Count: cardinal);
 begin
   fIn := BufIn;
   fOut := BufOut;
   fCount := Count;
-  fCV := TAESContext(AES.Context).IV;
+  fCV := fIV;
 end;
 
 procedure TAESAbstractSyn.DecryptInit;
@@ -5359,7 +5422,7 @@ begin
   fIn := BufIn;
   fOut := BufOut;
   fCount := Count;
-  fCV := TAESContext(AES.Context).IV;
+  fCV := fIV;
 end;
 
 procedure TAESAbstractSyn.EncryptInit;
@@ -5378,6 +5441,17 @@ begin
   end;
 end;
 
+procedure TAESAbstractSyn.DecryptTrailer;
+var len: Cardinal;
+begin
+  len := fCount and (AESBlockSize-1);
+  if len<>0 then begin
+    EncryptInit; 
+    AES.Encrypt(fCV,fCV);
+    XorBlockN(pointer(fIn),pointer(fOut),@fCV,len);
+  end;
+end;
+
 
 { TAESECB }
 
@@ -5391,7 +5465,7 @@ begin
     inc(fIn);
     inc(fOut);
   end;
-  XorBlockN(pointer(fIn),pointer(fOut),@fCV,Count and (AESBlockSize-1));
+  DecryptTrailer;
 end;
 
 procedure TAESECB.Encrypt(BufIn, BufOut: pointer; Count: cardinal);
@@ -5404,7 +5478,7 @@ begin
     inc(fIn);
     inc(fOut);
   end;
-  XorBlockN(pointer(fIn),pointer(fOut),@fCV,Count and (AESBlockSize-1));
+  EncryptTrailer;
 end;
 
 
@@ -5426,12 +5500,7 @@ begin
       inc(fOut);
     end;
   end;
-  Count := Count and (AESBlockSize-1);
-  if Count<>0 then begin
-    EncryptInit; // not set in EncryptTrailer -> use custom code
-    AES.Encrypt(fCV,fCV);
-    XorBlockN(pointer(fIn),pointer(fOut),@fCV,Count);
-  end;
+  DecryptTrailer;
 end;
 
 procedure TAESCBC.Encrypt(BufIn, BufOut: pointer; Count: cardinal);
@@ -5452,36 +5521,115 @@ end;
 
 { TAESCFB }
 
+{$ifdef USEAESNI}
+procedure AesNiTrailer;
+asm
+    and    ecx,15
+    jz     @0
+    call   AesNiEncryptXmm7
+    lea    edx,[eax].TAESContext.buf
+    movdqu [edx],xmm7
+    cld
+@s: lodsb
+    xor    al,[edx]
+    inc    edx
+    stosb
+    loop   @s
+@0:
+end;
+{$endif}
+
 procedure TAESCFB.Decrypt(BufIn, BufOut: pointer; Count: cardinal);
 var i: integer;
     tmp: TAESBlock;
 begin
-  inherited; // CV := IV + set fIn,fOut,fCount
-  EncryptInit;
-  for i := 1 to Count shr 4 do begin
-    tmp := fIn^;
-    AES.Encrypt(fCV,fCV);
-    XorBlock16(pointer(fIn),pointer(fOut),pointer(@fCV));
-    fCV := tmp;
-    inc(fIn);
-    inc(fOut);
+  if not AES.Initialized then
+    EncryptInit; // CFB mode = only Encrypt -> allow prepare the key once
+  {$ifdef USEAESNI}
+  if TAESContext(AES.Context).AesNi then
+  asm
+    push   esi
+    push   edi
+    mov    eax,self
+    mov    ecx,Count
+    mov    esi,BufIn
+    mov    edi,BufOut
+    movdqu xmm7,dqword ptr [eax].TAESCFB.fIV
+    lea    eax,[eax].TAESCFB.AES
+    push   ecx
+    shr    ecx,4
+    jz     @z
+@s: call   AesNiEncryptXmm7
+    movdqu xmm0,dqword ptr [esi]
+    pxor   xmm0,xmm7
+    movdqu xmm7,dqword ptr [esi]
+    movdqu dqword ptr [edi],xmm0
+    dec    ecx
+    lea    esi,[esi+16]
+    lea    edi,[edi+16]
+    jnz    @s
+@z: pop    ecx
+    call   AesNiTrailer
+    pop    edi
+    pop    esi
+  end else
+  {$endif} begin
+    inherited; // CV := IV + set fIn,fOut,fCount
+    for i := 1 to Count shr 4 do begin
+      tmp := fIn^;
+      AES.Encrypt(fCV,fCV);
+      XorBlock16(pointer(fIn),pointer(fOut),pointer(@fCV));
+      fCV := tmp;
+      inc(fIn);
+      inc(fOut);
+    end;
+    EncryptTrailer;
   end;
-  EncryptTrailer;
 end;
 
 procedure TAESCFB.Encrypt(BufIn, BufOut: pointer; Count: cardinal);
 var i: integer;
 begin
-  inherited; // CV := IV + set fIn,fOut,fCount
-  EncryptInit;
-  for i := 1 to Count shr 4 do begin
-    AES.Encrypt(fCV,fCV);
-    XorBlock16(pointer(fIn),pointer(fOut),pointer(@fCV));
-    fCV := fOut^;
-    inc(fIn);
-    inc(fOut);
+  if not AES.Initialized then
+    EncryptInit; // CFB mode = only Encrypt -> allow prepare the key once
+  {$ifdef USEAESNI}
+  if TAESContext(AES.Context).AesNi then
+  asm
+    push   esi
+    push   edi
+    mov    eax,self
+    mov    ecx,Count
+    mov    esi,BufIn
+    mov    edi,BufOut
+    movdqu xmm7,dqword ptr [eax].TAESCFB.fIV
+    lea    eax,[eax].TAESCFB.AES
+    push   ecx
+    shr    ecx,4
+    jz     @z
+@s: call   AesNiEncryptXmm7
+    movdqu xmm0,dqword ptr [esi]
+    pxor   xmm7,xmm0
+    movdqu dqword ptr [edi],xmm7
+    dec    ecx
+    lea    esi,[esi+16]
+    lea    edi,[edi+16]
+    jnz    @s
+@z: pop    ecx
+    call   AesNiTrailer
+    pop    edi
+    pop    esi
+  end else
+  {$endif} begin
+    inherited; // CV := IV + set fIn,fOut,fCount
+    for i := 1 to Count shr 4 do begin
+      AES.Encrypt(fCV,fCV);
+      XorBlock16(pointer(fIn),pointer(fOut),pointer(@fCV));
+      fCV := fOut^;
+      inc(fIn);
+      inc(fOut);
+    end;
+    EncryptTrailer;
   end;
-  EncryptTrailer;
 end;
 
 
@@ -5495,15 +5643,45 @@ end;
 procedure TAESOFB.Encrypt(BufIn, BufOut: pointer; Count: cardinal);
 var i: integer;
 begin
-  inherited; // CV := IV + set fIn,fOut,fCount
-  EncryptInit;
-  for i := 1 to Count shr 4 do begin
-    AES.Encrypt(fCV,fCV);
-    XorBlock16(pointer(fIn),pointer(fOut),pointer(@fCV));
-    inc(fIn);
-    inc(fOut);
+  if not AES.Initialized then
+    EncryptInit; // OFB mode = only Encrypt -> allow prepare the key once
+  {$ifdef USEAESNI}
+  if TAESContext(AES.Context).AesNi then
+  asm
+    push   esi
+    push   edi
+    mov    eax,self
+    mov    ecx,Count
+    mov    esi,BufIn
+    mov    edi,BufOut
+    movdqu xmm7,dqword ptr [eax].TAESCFB.fIV
+    lea    eax,[eax].TAESCFB.AES
+    push   ecx
+    shr    ecx,4
+    jz     @z
+@s: call   AesNiEncryptXmm7
+    movdqu xmm0,dqword ptr [esi]
+    pxor   xmm0,xmm7
+    movdqu dqword ptr [edi],xmm0
+    dec    ecx
+    lea    esi,[esi+16]
+    lea    edi,[edi+16]
+    jnz    @s
+@z: pop    ecx
+    call   AesNiTrailer
+    pop    edi
+    pop    esi
+  end else
+  {$endif} begin
+    inherited; // CV := IV + set fIn,fOut,fCount
+    for i := 1 to Count shr 4 do begin
+      AES.Encrypt(fCV,fCV);
+      XorBlock16(pointer(fIn),pointer(fOut),pointer(@fCV));
+      inc(fIn);
+      inc(fOut);
+    end;
+    EncryptTrailer;
   end;
-  EncryptTrailer;
 end;
 
 
@@ -5518,8 +5696,9 @@ procedure TAESCTR.Encrypt(BufIn, BufOut: pointer; Count: cardinal);
 var i,j: integer;
     tmp: TAESBlock;
 begin
+  if not AES.Initialized then
+    EncryptInit; // CTR mode = only Encrypt -> allow prepare the key once
   inherited; // CV := IV + set fIn,fOut,fCount
-  EncryptInit;
   for i := 1 to Count shr 4 do begin
     AES.Encrypt(fCV,tmp);
     inc(fCV[7]);
@@ -5639,12 +5818,10 @@ end;
 
 { TAESAbstract_API }
 
-constructor TAESAbstract_API.Create(const aKey; aKeySize: cardinal;
-  const aIV: TAESBlock);
+constructor TAESAbstract_API.Create(const aKey; aKeySize: cardinal);
 begin
   EnsureCryptoAPIAESProviderAvailable;
-  inherited Create(aKey,aKeySize,aIV); // check and set fKeySize[Bytes]
-  fIV := aIV;
+  inherited Create(aKey,aKeySize); // check and set fKeySize[Bytes]
   InternalSetMode;
   fKeyHeader.bType := PLAINTEXTKEYBLOB;
   fKeyHeader.bVersion := CUR_BLOB_VERSION;
@@ -5654,7 +5831,7 @@ begin
   256: fKeyHeader.aiKeyAlg := CALG_AES_256;
   end;
   fKeyHeader.dwKeyLength := fKeySizeBytes;
-  move(aKey,fKey,fKeySizeBytes);
+  fKeyHeaderKey := fKey;
 end;
 
 destructor TAESAbstract_API.Destroy;
@@ -5664,7 +5841,8 @@ begin
   inherited;
 end;
 
-procedure TAESAbstract_API.EncryptDecrypt(BufIn, BufOut: pointer; Count: cardinal; DoEncrypt: boolean);
+procedure TAESAbstract_API.EncryptDecrypt(BufIn, BufOut: pointer; Count: cardinal;
+  DoEncrypt: boolean);
 var n: Cardinal;
 begin
   if Count=0 then
@@ -5825,17 +6003,11 @@ begin
 end;
 
 
-procedure CompressShaAesSetKey(const Key: RawByteString; const IV: RawByteString='');
-var IV256: TSHA256Digest;
+procedure CompressShaAesSetKey(const Key: RawByteString; AesClass: TAESAbstractClass);
 begin
   if Key='' then
     FillChar(CompressShaAesKey,sizeof(CompressShaAesKey),0) else
     SHA256Weak(Key,CompressShaAesKey);
-  if IV='' then
-    FillChar(CompressShaAesIV,sizeof(CompressShaAesIV),0) else begin
-    SHA256Weak(IV,IV256);
-    move(IV256,CompressShaAesIV,sizeof(CompressShaAesIV));
-  end;
 end;
 
 function CompressShaAes(var DataRawByteString; Compress: boolean): AnsiString;
@@ -5843,13 +6015,13 @@ var Data: RawByteString absolute DataRawByteString;
 begin
   if (Data<>'') and (CompressShaAesClass<>nil) then
   try
-    with CompressShaAesClass.Create(CompressShaAesKey,256,CompressShaAesIV) do
+    with CompressShaAesClass.Create(CompressShaAesKey,256) do
     try
       if Compress then begin
         CompressSynLZ(Data,true);
-        Data := EncryptPKCS7(Data);
+        Data := EncryptPKCS7(Data,true);
       end else begin
-        Data := DecryptPKCS7(Data);
+        Data := DecryptPKCS7(Data,true);
         if CompressSynLZ(Data,false)='' then begin
           result := '';
           exit; // invalid content
@@ -5890,4 +6062,4 @@ finalization
     FreeLibrary(CryptoAPI.Handle);
   end;
 {$endif}
-end.
+end.
