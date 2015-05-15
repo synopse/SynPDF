@@ -31,8 +31,9 @@ unit SynCrypto;
   the Initial Developer. All Rights Reserved.
 
   Contributor(s):
-  - Wolfgang Ehrhardt under zlib license for AES "pure pascal" versions
   - Intel's sha256_sse4.asm under under a three-clause Open Software license
+  - Wolfgang Ehrhardt under zlib license for AES "pure pascal" versions
+  - souchaud
 
   Alternatively, the contents of this file may be used under the terms of
   either the GNU General Public License Version 2 or later (the "GPL"), or
@@ -288,7 +289,7 @@ const
 
 type
   /// class of Exceptions raised by this unit
-  ESynCrypto = class(Exception);
+  ESynCrypto = class(ESynException);
 
   PAESBlock = ^TAESBlock;
 
@@ -365,11 +366,15 @@ type
     fKeySizeBytes: cardinal;
     fKey: TAESKey;
     fIV: TAESBlock;
+    procedure DecryptLen(var InputLen,iv: integer; Input: pointer; IVAtBeginning: boolean);
   public
     /// Initialize AES contexts for cypher
     // - first method to call before using this class
     // - KeySize is in bits, i.e. 128,192,256
     constructor Create(const aKey; aKeySize: cardinal); virtual;
+    /// Initialize AES contexts for cypher
+    // - here the Key is supplied as a string, and will be hashed using SHA-256
+    constructor CreateFromSha256(const aKey: RawUTF8); virtual;
     /// compute a class instance similar to this one
     function Clone: TAESAbstract; virtual;
 
@@ -383,13 +388,41 @@ type
     // the input buffer
     // - if IVAtBeginning is TRUE, a random Initialization Vector will be computed,
     // and stored at the beginning of the output binary buffer
-    function EncryptPKCS7(const Input: RawByteString; IVAtBeginning: boolean=false): RawByteString;
+    function EncryptPKCS7(const Input: RawByteString; IVAtBeginning: boolean=false): RawByteString; overload;
     /// decrypt a memory buffer using a PKCS7 padding pattern
     // - PKCS7 is described in RFC 5652 - it will trim up to 16 bytes from
     // the input buffer
     // - if IVAtBeginning is TRUE, the Initialization Vector will be taken
     // from the beginning of the input binary buffer
-    function DecryptPKCS7(const Input: RawByteString; IVAtBeginning: boolean=false): RawByteString;
+    function DecryptPKCS7(const Input: RawByteString; IVAtBeginning: boolean=false): RawByteString; overload;
+    /// encrypt a memory buffer using a PKCS7 padding pattern
+    // - PKCS7 is described in RFC 5652 - it will add up to 16 bytes to
+    // the input buffer
+    // - if IVAtBeginning is TRUE, a random Initialization Vector will be computed,
+    // and stored at the beginning of the output binary buffer
+    function EncryptPKCS7(const Input: TBytes; IVAtBeginning: boolean=false): TBytes; overload;
+    /// decrypt a memory buffer using a PKCS7 padding pattern
+    // - PKCS7 is described in RFC 5652 - it will trim up to 16 bytes from
+    // the input buffer
+    // - if IVAtBeginning is TRUE, the Initialization Vector will be taken
+    // from the beginning of the input binary buffer
+    function DecryptPKCS7(const Input: TBytes; IVAtBeginning: boolean=false): TBytes; overload;
+
+    /// compute how many bytes would be needed in the output buffer, when
+    // encrypte using a PKCS7 padding pattern
+    // - could be used to pre-compute the OutputLength for EncryptPKCS7Buffer()
+    function EncryptPKCS7Length(InputLen: cardinal; IVAtBeginning: boolean): cardinal;
+      {$ifdef HASINLINE}inline;{$endif}
+    /// encrypt a memory buffer using a PKCS7 padding pattern
+    // - PKCS7 is described in RFC 5652 - it will add up to 16 bytes to
+    // the output buffer (+ 16 additional bytes if IVAtBeginning is true): use
+    // EncryptPKCS7Length() function to compute the actual needed length
+    // - if IVAtBeginning is TRUE, a random Initialization Vector will be computed,
+    // and stored at the beginning of the output binary buffer
+    // - returns TRUE on success, FALSE if OutputLen is not correct - you should
+    // use EncryptPKCS7Length() to compute the exact needed number of bytes
+    function EncryptPKCS7Buffer(Input,Output: Pointer; InputLen,OutputLen: cardinal;
+      IVAtBeginning: boolean): boolean;
 
     /// simple wrapper able to cypher/decypher any content
     // - here all data variable could be text or binary
@@ -612,7 +645,7 @@ type
 
   PSHA256Digest = ^TSHA256Digest;
   /// 256 bits memory block for SHA256 hash digest storage
-  TSHA256Digest   = packed array[0..31] of byte;
+  TSHA256Digest = packed array[0..31] of byte;
 
   PSHA256 = ^TSHA256;
   /// handle SHA256 hashing
@@ -921,7 +954,7 @@ procedure XorConst(p: PIntegerArray; Count: integer);
 var
   /// the encryption key used by CompressShaAes() global function
   // - the key is global to the whole process
-  // - use CompressShaAesSetKey() procedure to set this Key from text 
+  // - use CompressShaAesSetKey() procedure to set this Key from text
   CompressShaAesKey: TSHA256Digest;
 
   /// the AES-256 encoding class used by CompressShaAes() global function
@@ -940,7 +973,7 @@ procedure CompressShaAesSetKey(const Key: RawByteString; AesClass: TAESAbstractC
 // - as expected by THttpSocket.RegisterCompress()
 // - will return 'synshaaes' as ACCEPT-ENCODING: header parameter
 // - will use global CompressShaAesKey / CompressShaAesClass variables to be set
-// according to the expected algorithm and Key e.g. via a call to CompressShaAesSetKey() 
+// according to the expected algorithm and Key e.g. via a call to CompressShaAesSetKey()
 // - if you want to change the chaining mode, you can customize the global
 // CompressShaAesClass variable to the expected TAES* class name
 // - will store a hash of both cyphered and clear stream: if the
@@ -3957,7 +3990,7 @@ var H: TSHAHash;
 begin
   {$ifdef CPUX64}
   if cfSSE41 in CpuFeatures then begin
-    if K256Aligned='' then 
+    if K256Aligned='' then
       SetString(K256Aligned,PAnsiChar(@K256),SizeOf(K256));
     if PtrUInt(K256ALigned)and 15=0 then begin
       sha256_sse4(TSHAContext(Context).Buffer,TSHAContext(Context).Hash,1);
@@ -4707,12 +4740,12 @@ end;
 
 function TAESWriteStream.Read(var Buffer; Count: Integer): Longint;
 begin
-  raise ESynCrypto.Create(ClassName);
+  raise ESynCrypto.CreateUTF8('Unexpected %.Read',[self]);
 end;
 
 function TAESWriteStream.Seek(Offset: Integer; Origin: Word): Longint;
 begin
-  raise ESynCrypto.Create(ClassName);
+  raise ESynCrypto.CreateUTF8('Unexpected %.Seek',[self]);
 end;
 
 function TAESWriteStream.Write(const Buffer; Count: Integer): Longint;
@@ -4998,7 +5031,7 @@ begin
   t := 64 - (t and $3f);  // Space available in in_ (at least 1)
   if t>len then begin
     Move(p^, Pointer(PtrUInt(@in_) + 64 - t)^, len);
-    Exit;
+    exit;
   end;
   // First chunk is an odd size
   Move(p^, Pointer(PtrUInt(@in_) + 64 - t)^, t);
@@ -5326,67 +5359,113 @@ end;
 constructor TAESAbstract.Create(const aKey; aKeySize: cardinal);
 begin
    if (aKeySize<>128) and (aKeySize<>192) and (aKeySize<>256) then
-    raise ESynCrypto.CreateFmt(
-      '%s.Create key size = %d; should be either 128, 192 or 256',
-      [ClassName,aKeySize]);
+    raise ESynCrypto.CreateUTF8(
+      '%.Create key size = %; should be either 128, 192 or 256',[self,aKeySize]);
   fKeySize := aKeySize;
   fKeySizeBytes := fKeySize shr 3;
   move(aKey,fKey,fKeySizeBytes);
 end;
 
-function TAESAbstract.DecryptPKCS7(const Input: RawByteString;
-  IVAtBeginning: boolean): RawByteString;
-var len,iv: integer;
+constructor TAESAbstract.CreateFromSha256(const aKey: RawUTF8);
+var Digest: TSHA256Digest;
 begin
-  // validate input
-  len := length(Input);
-  if (len<AESBlockSize) or (len and (AESBlockSize-1)<>0) then
-    raise ESynCrypto.Create('Invalid content');
-  // decrypt
-  if IVAtBeginning then begin
-    fIV := PAESBlock(Input)^;
-    dec(len,AESBlockSize);
-    iv := AESBlockSize;
-  end else
-    iv := 0;
-  SetString(result,nil,len);
-  Decrypt(@PByteArray(Input)^[iv],pointer(result),len);
-  // delete right padding
-  if ord(result[len])>AESBlockSize then
-    raise ESynCrypto.Create('Invalid content');
-  SetLength(result,len-ord(result[len]));
+  SHA256Weak(aKey,Digest);
+  Create(Digest,256);
 end;
 
 function TAESAbstract.EncryptPKCS7(const Input: RawByteString;
   IVAtBeginning: boolean): RawByteString;
-var len, padding, iv: cardinal;
-    P: Pointer;
 begin
-  // use PKCS7 padding, so expects AESBlockSize=16 bytes blocks
-  len := length(Input);
-  padding := AESBlockSize-(len and (AESBlockSize-1));
+  SetString(result,nil,EncryptPKCS7Length(length(Input),IVAtBeginning));
+  EncryptPKCS7Buffer(Pointer(Input),pointer(result),
+    length(Input),length(result),IVAtBeginning);
+end;
+
+function TAESAbstract.EncryptPKCS7(const Input: TBytes;
+  IVAtBeginning: boolean): TBytes;
+begin
+  SetLength(result,EncryptPKCS7Length(length(Input),IVAtBeginning));
+  EncryptPKCS7Buffer(Pointer(Input),pointer(result),
+    length(Input),length(result),IVAtBeginning);
+end;
+
+function TAESAbstract.EncryptPKCS7Length(InputLen: cardinal;
+  IVAtBeginning: boolean): cardinal;
+begin
+  result := InputLen+AESBlockSize-(InputLen and (AESBlockSize-1));
+  if IVAtBeginning then
+    inc(Result,AESBlockSize);
+end;
+
+function TAESAbstract.EncryptPKCS7Buffer(Input,Output: Pointer; InputLen,OutputLen: cardinal;
+  IVAtBeginning: boolean): boolean;
+var padding, iv: cardinal;
+begin
+  padding := AESBlockSize-(InputLen and (AESBlockSize-1));
   if IVAtBeginning then
     iv := AESBlockSize else
     iv := 0;
-  SetString(result,nil,iv+len+padding);
+  if OutputLen<>iv+InputLen+padding then begin
+    result := false;
+    exit;
+  end;
   if IVAtBeginning then begin
     FillRandom(fIV);
-    PAESBlock(result)^ := fIV;
+    PAESBlock(Output)^ := fIV;
   end;
-  move(Pointer(Input)^,PByteArray(result)^[iv],len);
-  FillChar(PByteArray(result)^[iv+len],padding,padding);
-  // encryption
-  P := @PByteArray(result)^[iv];
-  Encrypt(P,P,len+padding);
+  move(Input^,PByteArray(Output)^[iv],InputLen);
+  FillChar(PByteArray(Output)^[iv+InputLen],padding,padding);
+  Inc(PByte(Output),iv);
+  Encrypt(Output,Output,InputLen+padding);
+  result := true;
+end;
+
+procedure TAESAbstract.DecryptLen(var InputLen,iv: Integer;
+  Input: pointer; IVAtBeginning: boolean);
+begin
+  if (InputLen<AESBlockSize) or (InputLen and (AESBlockSize-1)<>0) then
+    raise ESynCrypto.CreateUTF8('%.DecryptPKCS7: Invalid InputLen=%',[self,InputLen]);
+  if IVAtBeginning then begin
+    fIV := PAESBlock(Input)^;
+    dec(InputLen,AESBlockSize);
+    iv := AESBlockSize;
+  end else
+    iv := 0;
+end;
+
+function TAESAbstract.DecryptPKCS7(const Input: RawByteString;
+  IVAtBeginning: boolean): RawByteString;
+var len,iv,padding: integer;
+begin
+  len := length(Input);
+  DecryptLen(len,iv,pointer(Input),IVAtBeginning);
+  SetString(result,nil,len);
+  Decrypt(@PByteArray(Input)^[iv],pointer(result),len);
+  padding := ord(result[len]); // result[1..len]
+  if padding>AESBlockSize then
+    raise ESynCrypto.CreateUTF8('%.DecryptPKCS7: Invalid content',[self]);
+  SetLength(result,len-padding);
+end;
+
+function TAESAbstract.DecryptPKCS7(const Input: TBytes;
+  IVAtBeginning: boolean): TBytes;
+var len,iv,padding: integer;
+begin
+  len := length(Input);
+  DecryptLen(len,iv,pointer(Input),IVAtBeginning);
+  SetLength(result,len);
+  Decrypt(@PByteArray(Input)^[iv],pointer(result),len);
+  padding := result[len-1]; // result[0..len-1]
+  if padding>AESBlockSize then
+    raise ESynCrypto.CreateUTF8('%.DecryptPKCS7: Invalid content',[self]);
+  SetLength(result,len-padding);
 end;
 
 class function TAESAbstract.SimpleEncrypt(const Input,Key: RawByteString;
   Encrypt, IVAtBeginning: boolean): RawByteString;
 var instance: TAESAbstract;
-    digest: TSHA256Digest;
 begin
-  SHA256Weak(Key,digest);
-  instance := Create(digest,256);
+  instance := CreateFromSha256(Key);
   try
     if Encrypt then
       result := instance.EncryptPKCS7(Input,IVAtBeginning) else
@@ -5447,7 +5526,7 @@ var len: Cardinal;
 begin
   len := fCount and (AESBlockSize-1);
   if len<>0 then begin
-    EncryptInit; 
+    EncryptInit;
     AES.Encrypt(fCV,fCV);
     XorBlockN(pointer(fIn),pointer(fOut),@fCV,len);
   end;
