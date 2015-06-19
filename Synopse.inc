@@ -212,11 +212,14 @@
 
   {$ifdef CPU64}
     {$define PUREPASCAL}
+    {$define CPUINTEL}
+    {$ASMMODE INTEL} // as Delphi expects, and I use to write
   {$else}
     {$ifdef CPUARM}
     {$define PUREPASCAL}
     {$else}
     {$ASMMODE INTEL} // as Delphi expects, and I use to write
+    {$define CPUINTEL}
     {$endif}
     // FPC has its own RTTI layout only since late 3.x
     // when http://bugs.freepascal.org/view.php?id=26774 has been fixed
@@ -249,12 +252,12 @@
 
 {$else FPC}
 
+  {$define CPUINTEL} // no NextGen support yet
   {$ifdef CPUX64}
     {$define CPU64} // Delphi compiler for 64 bit CPU
     {$define CPU64DELPHI}
     {$undef CPU32}
     {$define PUREPASCAL}   // no x86 32 bit asm to be used
-    {$warn DUPLICATE_CTOR_DTOR OFF} // avoid W1029 unneeded hints
   {$else CPUX64}
     {$define CPU32} // Delphi compiler for 32 bit CPU
     {$undef CPU64}
@@ -278,18 +281,25 @@
       Kylix1/2 are unsupported
       {$ifend}
     {$else}
-      {$ifdef VER140} // Delphi 6
+      {$ifdef VER140} 
+        {$define ISDELPHI6ANDUP} // Delphi 6 or newer
         {$define DELPHI6OROLDER}
         {$define NOVARCOPYPROC}
         {$undef ENHANCEDRTL} // Delphi 6 doesn't have our Enhanced Runtime library
       {$else}
-        {$define WITHUXTHEME} // Delphi 7 and up handle UI theming
+        {$define ISDELPHI7ANDUP} // Delphi 7 or newer
+        {$define WITHUXTHEME}   // VCL handle UI theming
+        {$warn UNSAFE_CODE OFF} // Delphi for .Net does not exist any more!
+        {$warn UNSAFE_TYPE OFF}
+        {$warn UNSAFE_CAST OFF}
+        {$warn DUPLICATE_CTOR_DTOR OFF} // avoid W1029 unneeded hints
       {$endif}
     {$endif LINUX}
     {$if CompilerVersion >= 17}
     {$ifend}
     {$if CompilerVersion >= 18}
-      {$define HASNEWFILEAGE} // Delphi 2006 or newer
+      {$define ISDELPHI2006ANDUP} // Delphi 2006 or newer
+      {$define HASNEWFILEAGE} 
       {$define HASINLINE}
       {$define HASREGION}
       {$define HASFASTMM4}
@@ -340,6 +350,9 @@
     {$if CompilerVersion >= 29.0}
       {$define ISDELPHIXE8}
     {$ifend}
+    {$if CompilerVersion >= 30.0}
+      {$define ISDELPHIXE9}
+    {$ifend}
   {$ELSE}
     // Delphi 5 or older
     {$define DELPHI6OROLDER}
@@ -357,11 +370,7 @@
   {$define NODELPHIASM}
   {$define FPC_OR_PUREPASCAL}
   {$undef DOPATCHTRTL}
-  {$ifdef CPU64DELPHI}
-    {$define NOTPUREPASCALNORCPU64DELPHI}
-  {$endif CPU64DELPHI}
 {$else}
-  {$define NOTPUREPASCALNORCPU64DELPHI}
 {$endif PUREPASCAL}
 
 {$R-} // disable Range checking in our code

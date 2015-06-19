@@ -359,7 +359,7 @@ type
   /// handle AES cypher/uncypher with chaining
   // - use any of the inherited implementation, corresponding to the chaining
   // mode required - TAESECB, TAESCBC, TAESCFB, TAESOFB and TAESCTR classes to
-  // handle in ECB, CBC, CFB, OFB and CTR mode (including PKCS7 padding)
+  // handle in ECB, CBC, CFB, OFB and CTR mode (including PKCS7-like padding)
   TAESAbstract = class
   protected
     fKeySize: cardinal;
@@ -384,26 +384,30 @@ type
     procedure Decrypt(BufIn, BufOut: pointer; Count: cardinal); virtual; abstract;
 
     /// encrypt a memory buffer using a PKCS7 padding pattern
-    // - PKCS7 is described in RFC 5652 - it will add up to 16 bytes to
-    // the input buffer
+    // - PKCS7 padding is described in RFC 5652 - it will add up to 16 bytes to
+    // the input buffer; note this method uses the padding only, not the whole
+    // PKCS#7 Cryptographic Message Syntax
     // - if IVAtBeginning is TRUE, a random Initialization Vector will be computed,
     // and stored at the beginning of the output binary buffer
     function EncryptPKCS7(const Input: RawByteString; IVAtBeginning: boolean=false): RawByteString; overload;
     /// decrypt a memory buffer using a PKCS7 padding pattern
-    // - PKCS7 is described in RFC 5652 - it will trim up to 16 bytes from
-    // the input buffer
+    // - PKCS7 padding is described in RFC 5652 - it will trim up to 16 bytes from
+    // the input buffer; note this method uses the padding only, not the whole
+    // PKCS#7 Cryptographic Message Syntax
     // - if IVAtBeginning is TRUE, the Initialization Vector will be taken
     // from the beginning of the input binary buffer
     function DecryptPKCS7(const Input: RawByteString; IVAtBeginning: boolean=false): RawByteString; overload;
     /// encrypt a memory buffer using a PKCS7 padding pattern
-    // - PKCS7 is described in RFC 5652 - it will add up to 16 bytes to
-    // the input buffer
+    // - PKCS7 padding is described in RFC 5652 - it will add up to 16 bytes to
+    // the input buffer; note this method uses the padding only, not the whole
+    // PKCS#7 Cryptographic Message Syntax
     // - if IVAtBeginning is TRUE, a random Initialization Vector will be computed,
     // and stored at the beginning of the output binary buffer
     function EncryptPKCS7(const Input: TBytes; IVAtBeginning: boolean=false): TBytes; overload;
     /// decrypt a memory buffer using a PKCS7 padding pattern
-    // - PKCS7 is described in RFC 5652 - it will trim up to 16 bytes from
-    // the input buffer
+    // - PKCS7 padding is described in RFC 5652 - it will trim up to 16 bytes from
+    // the input buffer; note this method uses the padding only, not the whole
+    // PKCS#7 Cryptographic Message Syntax
     // - if IVAtBeginning is TRUE, the Initialization Vector will be taken
     // from the beginning of the input binary buffer
     function DecryptPKCS7(const Input: TBytes; IVAtBeginning: boolean=false): TBytes; overload;
@@ -411,12 +415,16 @@ type
     /// compute how many bytes would be needed in the output buffer, when
     // encrypte using a PKCS7 padding pattern
     // - could be used to pre-compute the OutputLength for EncryptPKCS7Buffer()
+    // - PKCS7 padding is described in RFC 5652 - it will add up to 16 bytes to
+    // the input buffer; note this method uses the padding only, not the whole
+    // PKCS#7 Cryptographic Message Syntax
     function EncryptPKCS7Length(InputLen: cardinal; IVAtBeginning: boolean): cardinal;
       {$ifdef HASINLINE}inline;{$endif}
     /// encrypt a memory buffer using a PKCS7 padding pattern
-    // - PKCS7 is described in RFC 5652 - it will add up to 16 bytes to
-    // the output buffer (+ 16 additional bytes if IVAtBeginning is true): use
-    // EncryptPKCS7Length() function to compute the actual needed length
+    // - PKCS7 padding is described in RFC 5652 - it will add up to 16 bytes to
+    // the input buffer; note this method uses the padding only, not the whole
+    // PKCS#7 Cryptographic Message Syntax
+    // - use EncryptPKCS7Length() function to compute the actual needed length
     // - if IVAtBeginning is TRUE, a random Initialization Vector will be computed,
     // and stored at the beginning of the output binary buffer
     // - returns TRUE on success, FALSE if OutputLen is not correct - you should
@@ -442,7 +450,7 @@ type
   /// handle AES cypher/uncypher with chaining
   // - use any of the inherited implementation, corresponding to the chaining
   // mode required - TAESECB, TAESCBC, TAESCFB, TAESOFB and TAESCTR classes to
-  // handle in ECB, CBC, CFB, OFB and CTR mode (including PKCS7 padding)
+  // handle in ECB, CBC, CFB, OFB and CTR mode (including PKCS7-like padding)
   // - this class will use AES-NI hardware instructions, if available
   // - those classes are re-entrant, i.e. that you can call the Encrypt*
   // or Decrypt* methods on the same instance several times
@@ -960,7 +968,7 @@ var
   /// the AES-256 encoding class used by CompressShaAes() global function
   // - use any of the implementation classes, corresponding to the chaining
   // mode required - TAESECB, TAESCBC, TAESCFB, TAESOFB and TAESCTR classes to
-  // handle in ECB, CBC, CFB, OFB and CTR mode (including PKCS7 padding)
+  // handle in ECB, CBC, CFB, OFB and CTR mode (including PKCS7-like padding)
   // - set to the secure and efficient CFB mode by default
   CompressShaAesClass: TAESAbstractClass = TAESCFB;
 
@@ -1326,13 +1334,15 @@ begin
   if not result then exit;
   SHA256Weak('lagrangehommage',Digest); // test with len=256>64
   result := Comparemem(@Digest,@D3,sizeof(Digest));
-  {$ifdef CPUX64}
+  {$ifdef CPU64}
+  {$ifdef CPUINTEL}
   if cfSSE41 in CpuFeatures then begin
     Exclude(CpuFeatures,cfSSE41);
     result := result and SingleTest('abc', D1) and
        SingleTest('abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq', D2);
     Include(CpuFeatures,cfSSE41);
-  end
+  end;
+  {$endif}
   {$endif}
 end;
 
@@ -2163,7 +2173,7 @@ begin
   end;
   Nk := KeySize div 32;
   Move(Key, ctx.RK, 4*Nk);
-  {$ifdef NOTPUREPASCALNORCPU64DELPHI}
+  {$ifdef CPUINTEL}
   ctx.AesNi := cfAESNI in CpuFeatures;
   {$else}
   ctx.AesNi := false;
@@ -3033,14 +3043,19 @@ const
   STACK_SIZE = 32{$ifndef LINUX}+7*16{$endif};
 
 procedure sha256_sse4(var input_data; var digest; num_blks: PtrUInt);
-  {$ifdef FPC}nostackframe; assembler;{$endif}
-asm // rcx=input_data rdx=digest r8=num_blks
-        {$ifdef CPUX64}
+{$ifdef FPC}nostackframe; assembler;
+asm
+{$else}
+asm // rcx=input_data rdx=digest r8=num_blks (Linux: rdi,rsi,rdx)
         .NOFRAME
-        {$endif}
+{$endif FPC}
         push    rbx
-        {$ifndef LINUX}
-        push    rsi
+        {$ifdef LINUX}
+        mov rcx,rdi
+        mov r8,rdx
+        mov rdx,rsi
+        {$else}
+        push    rsi   // Win64 expects those registers to be preserved
         push    rdi
         {$endif}
         push    rbp
@@ -3988,7 +4003,7 @@ var H: TSHAHash;
     t1, t2: cardinal;
     {$endif}
 begin
-  {$ifdef CPUX64}
+  {$ifdef CPU64}
   if cfSSE41 in CpuFeatures then begin
     if K256Aligned='' then
       SetString(K256Aligned,PAnsiChar(@K256),SizeOf(K256));
