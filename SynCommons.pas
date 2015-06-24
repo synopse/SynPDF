@@ -422,7 +422,9 @@ unit SynCommons;
     and introduced GetMimeContentTypeHeader() function
   - added MultiPartFormDataDecode() to decode multipart/form-data POST requests
   - included x64 asm of FillChar() and Move() for Win64 - Delphi RTL will be
-    patched at startup, unless the NOX64PATCHRTL conditional is defined
+    patched at startup, if the DOPATCHTRTL conditional is defined
+  - introduced FillcharFast() and MoveFast() global function variables,
+    pointing to optimized asm versions, depending on the CPU abilities 
   - FastCode-based x86 asm Move() procedure will handle source=dest
   - faster x86/x64 asm versions of StrUInt32() StrInt32() StrInt64() functions
   - new StrUInt64(), UniqueRawUTF8(), FastNewRawUTF8() and SetRawUTF8() functions
@@ -439,7 +441,9 @@ unit SynCommons;
     TSynPersistent abstract classes, allowing to define virtual constructors for
     TPersistent kind of objects (used e.g. with internal JSON serialization,
     for interface-based services, or for DDD objects)
-  - introducing TSynPersistentLocked and TInterfacedObjectLocked classes
+  - introducing TSynPersistentLocked and TInterfacedObjectLocked classes,
+    avoiding CPU cache line performance issue (so to be preferred to TMonitor or
+    TCriticalSection)
   - new TSynPersistentWithPassword class, able to store the password with
     a custom simple encryption when serialized as JSON
   - introducing TSynAuthentication class for simple generic authentication
@@ -644,7 +648,8 @@ unit SynCommons;
   - added GotoEndOfJSONString() function
   - added GetJSONPropName() and GotoNextJSONPropName() functions, able to
     understand MongoDB extended syntax
-  - added JSONArrayCount() and JSONObjectPropCount() functions
+  - added JSONArrayCount/JSONObjectPropCount, JsonArayItem and
+    JsonObjectItem/JsonObjectByPath/JsonObjectsByPath functions
   - several speedup in GetJSONField() and JSON parsing: it will now expect true,
     false or null to be in lowercase only (as in json.org specifications)
   - fixed function GetJSONField() to properly decode JSON number with exponent
@@ -700,7 +705,6 @@ unit SynCommons;
     exception mapping: to be used e.g. when mixing code between external
     libraries and Delphi code
   - added new TSynValidateNonVoidText and TSynFilterTruncate classes
-  - added new TSynCriticalSection class, avoiding CPU cache performance issue
   - added Utf8TruncateToUnicodeLength() and Utf8TruncateToLength() functions
   - added MaxAlphaCount, MaxDigitCount, MaxPunctCount, MaxLowerCount and
     MaxUpperCount properties to TSynValidateText class
@@ -1979,6 +1983,11 @@ procedure RawByteStringToBytes(const buf: RawByteString; out bytes: TBytes);
 procedure BytesToRawByteString(const bytes: TBytes; out buf: RawByteString);
   {$ifdef HASINLINE}inline;{$endif}
 
+/// creates a RawByteString memory buffer from an embedded resource
+// - returns '' if the resource is not found
+// - warning: resources size may be rounded up to alignment
+procedure ResourceToRawByteString(const ResName: string; ResType: PChar;
+  out buf: RawByteString);
 
 {$ifndef ENHANCEDRTL} { is our Enhanced Runtime (or LVCL) library not installed? }
 
@@ -2167,7 +2176,9 @@ function StrLenPas(S: pointer): PtrInt;
 {$ifdef FPC}
 /// FPC will use its internal optimized implementation
 function StrLen(S: pointer): sizeint; external name 'FPC_PCHAR_LENGTH';
+var FillcharFast: procedure(var Dest; count: PtrInt; Value: byte) = System.FillChar;
 {$else}
+
 /// our fast version of StrLen(), to be used with PUTF8Char/PAnsiChar
 // - this version will use fast SSE2 instructions (if available), on both Win32
 // and Win64 platforms: please note that in this case, it may read up to 15 bytes
@@ -2175,7 +2186,19 @@ function StrLen(S: pointer): sizeint; external name 'FPC_PCHAR_LENGTH';
 // generate a protection violation (e.g. when used over mapped files) - in this
 // case, you can use the slightly slower StrLenPas() function instead
 var StrLen: function(S: pointer): PtrInt = StrLenPas;
-{$endif}
+
+/// our fast version of FillChar()
+// - this version will use fast SSE2 instructions (if available), on both Win32
+// and Win64 platforms, or an optimized X86 revision on older CPUs
+var FillcharFast: procedure(var Dest; count: PtrInt; Value: byte);
+
+{$endif FPC}
+
+
+/// our fast version of move()
+// - this version will use fast SSE2 instructions (if available), on both Win32
+// and Win64 platforms, or an optimized X86 revision on older CPUs
+var MoveFast: procedure(const Source; var Dest; Count: PtrInt);
 
 /// our fast version of StrLen(), to be used with PWideChar
 function StrLenW(S: PWideChar): PtrInt;
@@ -2403,39 +2426,47 @@ function CSVEncode(const NameValuePairs: array of const;
   const KeySeparator: RawUTF8='='; const ValueSeparator: RawUTF8=#13#10): RawUTF8;
 
 
-/// returns TRUE if the given text buffer contains A..Z,0..9 characters
-// - use it with property names values (i.e. only including A..Z,0..9 chars)
+/// returns TRUE if the given text buffer contains A..Z,0..9,_ characters
+// - use it with property names values (i.e. only including A..Z,0..9,_ chars)
 // - i.e. can be tested via IdemPropName*() functions
 // - first char must be alphabetical or '_', following chars can be
 // alphanumerical or '_'
 function PropNameValid(P: PUTF8Char): boolean;
 
 /// case unsensitive test of P1 and P2 content
-// - use it with property names values (i.e. only including A..Z,0..9 chars)
+// - use it with property names values (i.e. only including A..Z,0..9,_ chars)
 function IdemPropName(const P1,P2: shortstring): boolean; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// case unsensitive test of P1 and P2 content
-// - use it with property names values (i.e. only including A..Z,0..9 chars)
-// - this version expect P2 to be a PAnsiChar with a specified length
+// - use it with property names values (i.e. only including A..Z,0..9,_ chars)
+// - this version expects P2 to be a PAnsiChar with a specified length
 function IdemPropName(const P1: shortstring; P2: PUTF8Char; P2Len: integer): boolean; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// case unsensitive test of P1 and P2 content
-// - use it with property names values (i.e. only including A..Z,0..9 chars)
-// - this version expect P1 and P2 to be a PAnsiChar with specified lengths
+// - use it with property names values (i.e. only including A..Z,0..9,_ chars)
+// - this version expects P1 and P2 to be a PAnsiChar with specified lengths
 function IdemPropName(P1,P2: PUTF8Char; P1Len,P2Len: integer): boolean; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// case unsensitive test of P1 and P2 content
-// - use it with property names values (i.e. only including A..Z,0..9 chars)
-// - this version expect P1 and P2 to be a PAnsiChar with specified lengths
+// - use it with property names values (i.e. only including A..Z,0..9,_ chars)
+// - this version expects P2 to be a PAnsiChar with specified length
 function IdemPropNameU(const P1: RawUTF8; P2: PUTF8Char; P2Len: integer): boolean; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
+/// case unsensitive test of P1 and P2 content of same length
+// - use it with property names values (i.e. only including A..Z,0..9,_ chars)
+// - this version expects P1 and P2 to be a PAnsiChar with an already checked
+// identical length, so may be used for a faster process, e.g. in a loop
+function IdemPropNameUSameLen(P1,P2: PUTF8Char; P1P2Len: integer): boolean; overload;
+  {$ifdef PUREPASCAL}{$ifdef HASINLINE}inline;{$endif}{$endif}
+
 /// case unsensitive test of P1 and P2 content
-// - use it with property names values (i.e. only including A..Z,0..9 chars)
+// - use it with property names values (i.e. only including A..Z,0..9,_ chars)
 function IdemPropNameU(const P1,P2: RawUTF8): boolean; overload;
+  {$ifdef PUREPASCAL}{$ifdef HASINLINE}inline;{$endif}{$endif}
 
 /// returns true if the beginning of p^ is the same as up^
 // - ignore case - up^ must be already Upper
@@ -2475,7 +2506,7 @@ function IdemPCharU(p, up: PUTF8Char): boolean;
 
 /// returns true if the beginning of p^ is same as up^
 // - ignore case - up^ must be already Upper
-// - this version expect p^ to point to an Unicode char array
+// - this version expects p^ to point to an Unicode char array
 function IdemPCharW(p: pWideChar; up: PUTF8Char): boolean;
 
 /// returns true if the file name extension contained in p^ is the same same as extup^
@@ -2520,7 +2551,10 @@ function GetLineContains(p,pEnd, up: PUTF8Char): boolean;
 // - returns final dest pointer
 // - will copy up to 255 AnsiChar (expect the dest buffer to be array[byte] of
 // AnsiChar)
-function UpperCopy255(dest: PAnsiChar; const source: RawUTF8): PAnsiChar;
+function UpperCopy255(dest: PAnsiChar; const source: RawUTF8): PAnsiChar; overload;
+
+/// copy source into dest^ with 7 bits upper case conversion
+function UpperCopy255(dest: PAnsiChar; source: PUTF8Char; sourceLen: integer): PAnsiChar; overload;
 
 /// copy source into dest^ with WinAnsi 8 bits upper case conversion
 // - returns final dest pointer
@@ -2887,7 +2921,7 @@ function GetNextItemInt64(var P: PUTF8Char; Sep: AnsiChar= ','): Int64;
 function GetNextItemCardinalStrict(var P: PUTF8Char): PtrUInt;
 
 /// return next CSV string as unsigned integer from P, 0 if no more
-// - this version expect P^ to point to an Unicode char array
+// - this version expects P^ to point to an Unicode char array
 function GetNextItemCardinalW(var P: PWideChar; Sep: WideChar= ','): PtrUInt;
 
 /// return next CSV string as double from P, 0.0 if no more
@@ -3022,7 +3056,7 @@ function FindSectionFirstLine(var source: PUTF8Char; search: PAnsiChar): boolean
 
 /// find the position of the [SEARCH] section in source
 // - return true if [SEARCH] was found, and store pointer to the line after it in source
-// - this version expect source^ to point to an Unicode char array
+// - this version expects source^ to point to an Unicode char array
 function FindSectionFirstLineW(var source: PWideChar; search: PUTF8Char): boolean;
 
 /// retrieve the whole content of a section as a string
@@ -3845,11 +3879,12 @@ type
     fTypeInfo: pointer;
     fElemSize: PtrUInt;
     fElemType: pointer;
-    fCompare: TDynArraySortCompare;
     fCountP: PInteger;
+    fCompare: TDynArraySortCompare;
+    fKnownSize: integer;
     fSorted: boolean;
     fKnownType: TDynArrayKind;
-    fKnownSize: integer;
+    fIsObjArray: (oaUnknown, oaTrue, oaFalse);
     function GetCount: integer; {$ifdef HASINLINE}inline;{$endif}
     procedure SetCount(aCount: integer);
     function GetCapacity: integer;
@@ -3858,7 +3893,8 @@ type
     function FindIndex(const Elem; aIndex: PIntegerDynArray;
       aCompare: TDynArraySortCompare): integer;
     function GetArrayTypeName: RawUTF8;
-    function IsObjArray: boolean; {$ifdef HASINLINE}inline;{$endif}
+    function GetIsObjArray: boolean; {$ifdef HASINLINE}inline;{$endif}
+    procedure SetIsObjArray(aValue: boolean);
     /// will set fKnownType and fKnownOffset/fKnownSize fields
     function ToKnownType(exactType: boolean=false): TDynArrayKind;
     /// faster than System.DynArraySetLength() function + handle T*ObjArray
@@ -4213,6 +4249,8 @@ type
     property ElemSize: PtrUInt read fElemSize;
     /// the internal type information of one element, as retrieved from RTTI
     property ElemType: pointer read fElemType;
+    /// if this dynamic aray is a T*ObjArray
+    property IsObjArray: boolean read GetIsObjArray write SetIsObjArray;
   end;
 
   /// function prototype to be used for hashing of an element
@@ -4498,6 +4536,8 @@ type
 
   /// abstract class able to use hashing to find an object in O(1) speed
   // - all protected abstract methods shall be overridden and implemented
+  // - use this class instead of a plain TDynArrayHashed, since it would
+  // feature its own dedicated hashing, and any abstract mean of value storage
   TObjectHash = class
   protected
     fHashs: TSynHashDynArray;
@@ -4520,10 +4560,10 @@ type
     /// to be called when an item is modified
     // - for Delete/Update will force a full rehash on next Find() call
     procedure Invalidate;
-    /// to be called when an item is added
+    /// to be called when an item has just been added
+    // - the index of the latest added item should be Count-1
     // - return FALSE if this item is already existing (i.e. insert error)
     // - return TRUE if has been added to the internal hash table
-    // - the index of the latest added item should be Count-1
     function JustAdded: boolean;
   end;
 
@@ -4559,45 +4599,86 @@ type
   // to manage property name fixup resolution (which we won't use outside the VCL)
   // - this class has a virtual constructor, so is a preferred alternative
   // to both TPersistent and TPersistentWithCustomCreate classes
+  // - for best performance, any type inheriting from this class will bypass
+  // some regular steps: do not implement interfaces or use TMonitor with them!
   TSynPersistent = class(TObject)
   public
     /// this virtual constructor will be called at instance creation
     // - this constructor does nothing, but is declared as virtual so that
     // inherited classes may safely override this default void implementation
     constructor Create; virtual;
+    {$ifndef FPC_OR_PUREPASCAL}
+    /// optimized x86 asm initialization code
+    // - warning: this optimized version won't initialize the vmtIntfTable
+    // for this class hierarchy: as a result, you would NOT be able to
+    // implement an interface with a TSynPersistent descendent (but you should
+    // not need to, but inherit from TInterfacedObject)
+    class function NewInstance: TObject; override;
+    /// optimized x86 asm finalization code
+    // - warning: this version won't release either any allocated TMonitor
+    // (as available since Delphi 2009) - do not use TMonitor with
+    // TSynPersistent, but rather the faster TSynPersistentLocked class
+    procedure FreeInstance; override;
+    {$endif}
   end;
   {$M-}
 
+  /// adding cross-platform locking methods to any class instance
+  // - typical use is to define a Safe: TSynLocker property, call Safe.Init
+  // and Safe.Done in constructor/destructor methods, and use
+  // - in respect to the TCriticalSection class, fix a potential CPU cache line
+  // conflict which may degrade the multi-threading performance, as reported by
+  // @http://www.delphitools.info/2011/11/30/fixing-tcriticalsection
+  {$ifdef UNICODE}
+  TSynLocker = record
+  {$else}
+  TSynLocker = object
+  {$endif}
+  private
+    fSection: TRTLCriticalSection;
+    {$HINTS OFF} // does not complain if Filler is declared but never used
+    fPadding: array[0..11] of Int64; // ensure no cache line mixup
+    {$HINTS ON}
+  public
+    /// initialize the mutex
+    procedure Init;    {$ifdef HASINLINE}inline;{$endif}
+    /// finalize the mutex
+    procedure Done;    {$ifdef HASINLINE}inline;{$endif}
+    /// lock the instance for exclusive access
+    procedure Lock;    {$ifdef HASINLINE}inline;{$endif}
+    /// release the instance for exclusive access
+    procedure UnLock;  {$ifdef HASINLINE}inline;{$endif}
+    /// will try to acquire the mutex
+    function TryLock: boolean; {$ifdef HASINLINE}inline;{$endif}
+  end;
+
   /// adding locking methods to a TSynPersistent with virtual constructor
+  // - you may use this class instead of the RTL TCriticalSection, since it
+  // would use a TSynLocker which does not suffer from CPU cache line conflit
   TSynPersistentLocked = class(TSynPersistent)
   protected
-    fLock: TRTLCriticalSection;
-    PaddingForLock: array[0..11] of Int64; // just like TSynCriticalSection
+    fSafe: TSynLocker;
   public
     /// initialize the object instance, and its associated lock
     constructor Create; override;
     /// release the instance (including the locking resource)
     destructor Destroy; override;
-    /// lock the instance for exclusive access
-    procedure Lock;    {$ifdef HASINLINE}inline;{$endif}
-    /// release the instance for exclusive access
-    procedure UnLock;  {$ifdef HASINLINE}inline;{$endif}
+    /// access to the locking methods of this instance
+    // - use Safe.Lock/TryLock with a try ... finally Safe.Unlock block
+    property Safe: TSynLocker read fSafe;
   end;
 
   /// adding locking methods to a TInterfacedObject with virtual constructor
   TInterfacedObjectLocked = class(TInterfacedObjectWithCustomCreate)
   protected
-    fLock: TRTLCriticalSection;
-    PaddingForLock: array[0..11] of Int64; // just like TSynCriticalSection
+    fSafe: TSynLocker;
   public
     /// initialize the object instance, and its associated lock
     constructor Create; override;
     /// release the instance (including the locking resource)
     destructor Destroy; override;
-    /// lock the instance for exclusive access
-    procedure Lock;    {$ifdef HASINLINE}inline;{$endif}
-    /// release the instance for exclusive access
-    procedure UnLock;  {$ifdef HASINLINE}inline;{$endif}
+    /// access to the locking methods of this instance
+    property Safe: TSynLocker read fSafe;
   end;
 
   /// used to determine the exact class type of a TInterfacedObjectWithCustomCreate
@@ -5411,8 +5492,6 @@ type
     out aValid: Boolean): PUTF8Char of object;
 
   /// the kind of variables handled by TJSONCustomParser
-  // - note that this list is expected to be sorted by alphabetic order
-  // following the TEXT type recognized at parsing
   // - the last item should be ptCustom, for non simple types
   TJSONCustomParserRTTIType = (
     ptArray, ptBoolean, ptByte, ptCardinal, ptCurrency, ptDouble,
@@ -6624,24 +6703,6 @@ function ObjectToJSON(Value: TObject;
 
 
 type
-{$ifndef LVCL}
-  /// implements a cross-platform enhanced mutex
-  // - includes a TryEnter method for older versions of Delphi (e.g. Delphi 6-7)
-  // - fix potential CPU cache conflict, as reported by
-  // @http://www.delphitools.info/2011/11/30/fixing-tcriticalsection
-  TSynCriticalSection = class(TCriticalSection)
-  protected
-    PaddingForLock: array[0..11] of Int64;
-  public
-    {$ifndef DELPHI5OROLDER}
-    {$ifndef HASINLINE}
-    /// will try to acquire the mutex
-    function TryEnter: boolean;
-    {$endif}
-    {$endif}
-  end;
-{$endif}
-
   /// implement a cache of some key/value pairs, e.g. to improve reading speed
   // - used e.g. by TSQLDataBase for caching the SELECT statements results in an
   // internal JSON format (which is faster than a query to the SQLite3 engine)
@@ -6811,7 +6872,7 @@ type
   // - this inherited class add a mutex to be thread-safe
   TPointerClassHashLocked = class(TPointerClassHash)
   protected
-    fLock: TRTLCriticalSection;
+    fSafe: TSynLocker;
   public
     /// initialize the storage list
     constructor Create;
@@ -6847,8 +6908,7 @@ type
   // execution of regular TObjectList methods (like Add/Remove/Count...)
   TObjectListLocked = class(TObjectList)
   protected
-    fLock: TRTLCriticalSection;
-    PaddingForLock: array[0..9] of Int64; // just like TSynCriticalSection
+    fSafe: TSynLocker;
   public
     /// initialize the list instance
     // - the stored TObject instances will be owned by this TObjectListLocked,
@@ -6856,10 +6916,9 @@ type
     constructor Create(AOwnsObjects: Boolean=true); reintroduce;
     /// release the list instance (including the locking resource)
     destructor Destroy; override;
-    /// lock the list for exclusive access
-    procedure Lock;    {$ifdef HASINLINE}inline;{$endif}
-    /// release the list for exclusive access
-    procedure UnLock;  {$ifdef HASINLINE}inline;{$endif}
+    /// a critical section is associated to this list instance
+    // - could be used to protect shared resources within the internal process
+    property Safe: TSynLocker read fSafe;
   end;
 
   /// This class is able to emulate a TStringList with our native UTF-8 string type
@@ -7023,18 +7082,16 @@ type
   // to explicitely call Lock/UnLock to enter or leave the critical section
   TRawUTF8ListHashedLocked = class(TRawUTF8ListHashed)
   protected
-    fLock: TRTLCriticalSection;
-    PaddingForLock: array[0..4] of Int64; // just like TSynCriticalSection
+    fSafe: TSynLocker;
   public
     /// initialize the class instance
     constructor Create(aOwnObjects: boolean=false);
     /// finalize the instance
     // - and all internal objects stored, if was created with Create(true)
     destructor Destroy; override;
-    /// lock the list for exclusive access
-    procedure Lock;    {$ifdef HASINLINE}inline;{$endif}
-    /// release the list for exclusive access
-    procedure UnLock;  {$ifdef HASINLINE}inline;{$endif}
+    /// access to the locking methods of this instance
+    // - use Safe.Lock/TryLock with a try ... finally Safe.Unlock block
+    property Safe: TSynLocker read fSafe;
     /// find a RawUTF8 item in the stored Strings[] list
     // - this overridden method will update the internal hash table (if needed),
     // then use it to retrieve the corresponding matching index
@@ -7653,7 +7710,17 @@ function GetJSONField(P: PUTF8Char; out PDest: PUTF8Char;
 // - this function will handle strict JSON property name (i.e. a "string"), but
 // also MongoDB extended syntax, e.g. {age:{$gt:18}} or {'people.age':{$gt:18}}
 // see @http://docs.mongodb.org/manual/reference/mongodb-extended-json
-function GetJSONPropName(var P: PUTF8Char): PUTF8Char;
+function GetJSONPropName(var P: PUTF8Char): PUTF8Char; overload;
+
+/// decode a JSON field name in an UTF-8 encoded shortstring variable
+// - this function would left the P^ buffer memory untouched, so may be safer
+// than the overloaded GetJSONPropName() function in some cases
+// - it will return the property name as a local UTF-8 encoded shortstring,
+// or PropName='' on error
+// - this function won't unescape the property name, as strict JSON (i.e. a "st\"ring")
+// - but it will handle MongoDB syntax, e.g. {age:{$gt:18}} or {'people.age':{$gt:18}}
+// see @http://docs.mongodb.org/manual/reference/mongodb-extended-json
+procedure GetJSONPropName(var P: PUTF8Char; out PropName: shortstring); overload;
 
 /// decode a JSON content in an UTF-8 encoded buffer
 // - GetJSONField() will only handle JSON "strings" or numbers - if
@@ -7715,7 +7782,7 @@ function GotoNextJSONPropName(P: PUTF8Char): PUTF8Char;
 // - first char is expected to be either '[' either '{' with default EndChar=#0
 // - or you can specify ']' or '}' as the expected EndChar
 // - will return nil in case of parsing error or unexpected end (#0)
-// - will return the next character after ending ] or { - i.e. may be , } ]
+// - will return the next character after ending ] or } - i.e. may be , } ]
 function GotoNextJSONObjectOrArray(P: PUTF8Char; EndChar: AnsiChar=#0): PUTF8Char;
 
 /// reach the position of the next JSON object of JSON array
@@ -7729,20 +7796,67 @@ function GotoNextJSONObjectOrArrayMax(P,PMax: PUTF8Char): PUTF8Char;
 /// compute the number of elements of a JSON array
 // - this will handle any kind of arrays, including those with nested
 // JSON objects or arrays
+// - incoming P^ should point to the first char after the initial '[' (which
+// may be a closing ']')
 function JSONArrayCount(P: PUTF8Char): integer; overload;
 
 /// compute the number of elements of a JSON array
 // - this will handle any kind of arrays, including those with nested
 // JSON objects or arrays
+// - incoming P^ should point to the first char after the initial '[' (which
+// may be a closing ']')
 // - this overloaded method will abort if P reaches a certain position: for
 // really HUGE arrays, it is faster to allocate the content within the loop,
-// not in-head
+// not ahead of time
 function JSONArrayCount(P,PMax: PUTF8Char): integer; overload;
+
+/// go to the #nth item of a JSON array
+// - implemented via a fast SAX-like approach: the input buffer is not changed,
+// nor no memory buffer allocated neither content copied
+// - returns nil if the supplied index is out of range
+// - returns a pointer to the index-nth item in the JSON array (first index=0)
+// - this will handle any kind of arrays, including those with nested
+// JSON objects or arrays
+// - incoming P^ should point to the first initial '[' char
+function JSONArrayItem(P: PUTF8Char; Index: integer): PUTF8Char;
 
 /// compute the number of fields in a JSON object
 // - this will handle any kind of objects, including those with nested
 // JSON objects or arrays
+// - incoming P^ should point to the first char after the initial '{' (which
+// may be a closing '}')
 function JSONObjectPropCount(P: PUTF8Char): integer;
+
+/// go to a named property of a JSON object
+// - implemented via a fast SAX-like approach: the input buffer is not changed,
+// nor no memory buffer allocated neither content copied
+// - returns nil if the supplied property name does not exist
+// - returns a pointer to the matching item in the JSON object
+// - this will handle any kind of objects, including those with nested
+// JSON objects or arrays
+// - incoming P^ should point to the first initial '{' char
+function JsonObjectItem(P: PUTF8Char; const PropName: RawUTF8;
+  PropNameFound: PRawUTF8=nil): PUTF8Char;
+
+/// go to a property of a JSON object, by its full path, e.g. 'parent.child'
+// - implemented via a fast SAX-like approach: the input buffer is not changed,
+// nor no memory buffer allocated neither content copied
+// - returns nil if the supplied property path does not exist
+// - returns a pointer to the matching item in the JSON object
+// - this will handle any kind of objects, including those with nested
+// JSON objects or arrays
+// - incoming P^ should point to the first initial '{' char
+function JsonObjectByPath(JsonObject,PropPath: PUTF8Char): PUTF8Char;
+
+/// return all matching properties of a JSON object
+// - here the PropPath could be a comma-separated list of full paths,
+// e.g. 'Prop1,Prop2' or 'Obj1.Obj2.Prop1,Obj1.Prop2'
+// - returns '' if no property did match
+// - returns a JSON object of all matching properties
+// - this will handle any kind of objects, including those with nested
+// JSON objects or arrays
+// - incoming P^ should point to the first initial '{' char
+function JsonObjectsByPath(JsonObject,PropPath: PUTF8Char): RawUTF8;
 
 /// remove comments from a text buffer before passing it to JSON parser
 // - handle two types of comments: starting from // till end of line
@@ -9371,7 +9485,8 @@ type
     constructor Create;
     /// retrieve the time zones from Windows registry, or from a local file
     // - under Linux, the file should be located with the executable, renamed
-    // with a .tz extension - may have been created via SaveToFile('')
+    // with a .tz extension - may have been created via SaveToFile(''), or
+    // from a 'TSynTimeZone' bound resource
     constructor CreateDefault;
     /// finalize the instance
     destructor Destroy; override;
@@ -9386,6 +9501,15 @@ type
     procedure LoadFromFile(const FileName: TFileName='');
     /// read time zone information from a compressed memory buffer
     procedure LoadFromBuffer(const Buffer: RawByteString);
+    /// read time zone information from a 'TSynTimeZone' resource
+    // - the resource should contain the SaveToBuffer compressed binary content
+    // - is no resource matching the TSynTimeZone class name and ResType=10
+    // do exist, nothing would be loaded
+    // - the resource could be created as such, from a Windows system:
+    // ! TSynTimeZone.Default.SaveToFile('TSynTimeZone.data');
+    // then compile the resource as expected, with a brcc32 .rc entry:
+    // ! TSynTimeZone 10 "TSynTimeZone.data"
+    procedure LoadFromResource;
     /// write then time zone information into a compressed file
     // - if no file name is supplied, a ExecutableName.tz file would be created
     procedure SaveToFile(const FileName: TFileName);
@@ -9468,7 +9592,7 @@ type
 procedure LogToTextFile(Msg: RawUTF8);
 
 /// log a message to a local text file
-// - this version expect the filename to be specified
+// - this version expects the filename to be specified
 // - format contains the current date and time, then the Msg on one line
 // - date and time format used is 'YYYYMMDD hh:mm:ss'
 procedure AppendToTextFile(aLine: RawUTF8; const aFileName: TFileName);
@@ -10943,11 +11067,11 @@ procedure SetVariantByRef(const Source: Variant; var Dest: Variant);
 // - will unreference any varByRef content
 procedure SetVariantByValue(const Source: Variant; var Dest: Variant);
 
-/// same as FillChar(Value,sizeof(TVarData),0)
+/// same as FillChar(Value^,sizeof(TVarData),0)
 // - so can be used for TVarData or Variant
 // - it will set V.VType := varEmpty, so Value will be Unassigned
 // - it won't call VarClear(variant(Value)): it should have been cleaned before
-procedure ZeroFill(var Value: TVarData);
+procedure ZeroFill(Value: PVarData);
   {$ifdef HASINLINE}inline;{$endif}
 
 /// retrieve a variant value from variable-length buffer
@@ -11117,6 +11241,12 @@ function VarRecToVariant(const V: TVarRec): variant; overload;
 // - will always map to a vtVariant kind of argument
 procedure VariantToVarRec(const V: variant; var result: TVarRec);
   {$ifdef HASINLINE}inline;{$endif}
+
+/// convert any Variant into a database value
+// - ftBlob kind won't be handled by this function
+// - complex variant types would be converted into ftUTF8 JSON object/array
+procedure VariantToSQLVar(const Input: variant; var temp: RawByteString;
+  var Output: TSQLVar);
 
 /// convert a dynamic array of variants into its JSON serialization
 // - will use a TDocVariantData temporary storage
@@ -11567,13 +11697,13 @@ type
     /// save a document as UTF-8 encoded Name=Value pairs
     // - will follow by default the .INI format, but you can specify your
     // own expected layout
-    procedure ToTextPairs(out result: RawUTF8; const NameValueSep: RawUTF8='=';
-      const ItemSep: RawUTF8=#13#10; Escape: TTextWriterKind=twJSONEscape); overload;
+    procedure ToTextPairsVar(out result: RawUTF8; const NameValueSep: RawUTF8='=';
+      const ItemSep: RawUTF8=#13#10; Escape: TTextWriterKind=twJSONEscape);
     /// save a document as UTF-8 encoded Name=Value pairs
     // - will follow by default the .INI format, but you can specify your
     // own expected layout
     function ToTextPairs(const NameValueSep: RawUTF8='=';
-      const ItemSep: RawUTF8=#13#10): RawUTF8; overload;
+      const ItemSep: RawUTF8=#13#10): RawUTF8;
       {$ifdef HASINLINE}inline;{$endif}
     /// save an array document as an array of TVarRec, i.e. an array of const
     // - will expect the document to be a dvArray - otherwise, will raise a
@@ -12538,11 +12668,12 @@ type
   TAutoLocker = class(TInterfacedObjectWithCustomCreate,IAutoLocker)
   {$endif DELPHI5OROLDER}
   protected
-    fLock: TRTLCriticalSection;
-    fLocked: boolean;
+    fSafe: TSynLocker;
   public
     /// initialize the mutex
     constructor Create; {$ifndef DELPHI5OROLDER} override; {$endif}
+    /// finalize the mutex
+    destructor Destroy; override;
     /// will enter the mutex until the IUnknown reference is released
     // - warning: under FPC, you should assign its result to a local lockFPC:
     // IUnknown variable - see bug http://bugs.freepascal.org/view.php?id=26602
@@ -12551,8 +12682,6 @@ type
     procedure Enter;
     /// leave the mutex
     procedure Leave;
-    /// finalize the mutex
-    destructor Destroy; override;
   end;
 
 {$ifndef DELPHI5OROLDER} // internal error C3517 under Delphi 5 :(
@@ -12926,7 +13055,7 @@ begin
     {$ifdef FPC}
     widestringmanager.Ansi2UnicodeMoveProc(Source,
       {$ifdef ISFPC27}fCodePage,{$endif}tmp,SourceChars);
-    move(Pointer(tmp)^,Dest^,length(tmp)*2);
+    MoveFast(Pointer(tmp)^,Dest^,length(tmp)*2);
     result := Dest+SourceChars;
     {$else}
     {$ifdef KYLIX3}
@@ -13202,7 +13331,7 @@ begin
     {$ifdef FPC}
     widestringmanager.Unicode2AnsiMoveProc(Source,tmp,
       {$ifdef ISFPC27}fCodePage,{$endif}SourceChars);
-    move(Pointer(tmp)^,Dest^,length(tmp));
+    MoveFast(Pointer(tmp)^,Dest^,length(tmp));
     result := Dest+length(tmp);
     {$else}
     {$ifdef KYLIX3}
@@ -13450,16 +13579,16 @@ begin
   end else begin // from Operating System returned values
     for i := 0 to 255 do
       A256[i] := AnsiChar(i);
-    fillchar(U256,sizeof(U256),0);
+    FillcharFast(U256,sizeof(U256),0);
     if PtrUInt(inherited AnsiBufferToUnicode(U256,A256,256))-PtrUInt(@U256)>512 then
       // ESynException.CreateUTF8() uses UTF8ToString() -> use CreateFmt() here
       raise ESynException.CreateFmt('OS error for %s.Create(%d)',[ClassName,aCodePage]);
-    move(U256[0],fAnsiToWide[0],512);
+    MoveFast(U256[0],fAnsiToWide[0],512);
   end;
   SetLength(fWideToAnsi,65536);
   for i := 1 to 126 do
     fWideToAnsi[i] := i;
-  fillchar(fWideToAnsi[127],65536-127,ord('?')); // '?' for unknown char
+  FillcharFast(fWideToAnsi[127],65536-127,ord('?')); // '?' for unknown char
   for i := 127 to 255 do
     if (fAnsiToWide[i]<>0) and (fAnsiToWide[i]<>ord('?')) then
       fWideToAnsi[fAnsiToWide[i]] := i;
@@ -13676,7 +13805,7 @@ end;
 function TSynAnsiUTF8.AnsiBufferToUTF8(Dest: PUTF8Char; Source: PAnsiChar;
   SourceChars: Cardinal): PUTF8Char;
 begin
-  move(Source^,Dest^,SourceChars);
+  MoveFast(Source^,Dest^,SourceChars);
   result := Dest+SourceChars;
 end;
 
@@ -13708,7 +13837,7 @@ end;
 function TSynAnsiUTF8.UTF8BufferToAnsi(Dest: PAnsiChar; Source: PUTF8Char;
   SourceChars: Cardinal): PAnsiChar;
 begin
-  move(Source^,Dest^,SourceChars);
+  MoveFast(Source^,Dest^,SourceChars);
   result := Dest+SourceChars;
 end;
 
@@ -13739,7 +13868,7 @@ end;
 function TSynAnsiUTF16.AnsiBufferToUnicode(Dest: PWideChar;
   Source: PAnsiChar; SourceChars: Cardinal): PWideChar;
 begin
-  move(Source^,Dest^,SourceChars);
+  MoveFast(Source^,Dest^,SourceChars);
   result := Pointer(PtrUInt(Dest)+SourceChars);
   result^ := #0;
 end;
@@ -13768,7 +13897,7 @@ function TSynAnsiUTF16.UnicodeBufferToAnsi(Dest: PAnsiChar;
   Source: PWideChar; SourceChars: Cardinal): PAnsiChar;
 begin
   SourceChars := SourceChars shl 1; // from WideChar count to byte count
-  move(Source^,Dest^,SourceChars);
+  MoveFast(Source^,Dest^,SourceChars);
   result := Dest+SourceChars;
 end;
 
@@ -15065,7 +15194,7 @@ asm // eax=P, edx=val
     push edi
     mov edi,eax
     mov eax,edx
-    nop; nop           // for loop alignment
+    //nop; nop           // for loop alignment
 @s: cmp eax,100
     lea edi,[edi-2]
     jb @2
@@ -15123,7 +15252,7 @@ begin // fallback to pure pascal version, since asm version below make GPFs for 
       break;
     end;
     dec(P,2);
-    c100 := val div 100;
+    c100 := val div 100; // FPC will use power of 2 reciprocal here :)
     dec(val,c100*100);
     PWord(P)^ := TwoDigitLookupW[val];
     val := c100;
@@ -15608,7 +15737,7 @@ begin
       pointer(Dest) := pointer(PAnsiChar(P)+STRRECSIZE);
       PByteArray(Dest)[len] := 0;
     end;
-    Move(pointer(text)^,pointer(Dest)^,len);
+    MoveFast(pointer(text)^,pointer(Dest)^,len);
   end;
 end;
 {$else}
@@ -15976,6 +16105,53 @@ function VariantToUTF8(const V: Variant): RawUTF8;
 var wasString: boolean;
 begin
   VariantToUTF8(V,result,wasString);
+end;
+
+procedure VariantToSQLVar(const Input: variant; var temp: RawByteString;
+  var Output: TSQLVar);
+var wasString: boolean;
+begin
+  with TVarData(Input) do
+  if VType=varVariant or varByRef then
+    VariantToSQLVar(PVariant(VPointer)^,temp,Output) else
+  case VType of
+  varEmpty, varNull:
+    Output.VType := ftNull;
+  varCurrency: begin
+    Output.VType := ftCurrency;
+    Output.VInt64 := VInt64;
+  end;
+  varString: begin // assume RawUTF8
+    Output.VType := ftUTF8;
+    Output.VText := VPointer;
+  end;
+  varInteger: begin
+    Output.VType := ftInt64;
+    Output.VInt64 := VInteger;
+  end;
+  varInt64: begin
+    Output.VType := ftInt64;
+    Output.VInt64 := VInt64;
+  end;
+  varSingle: begin
+    Output.VType := ftDouble;
+    Output.VDouble := VSingle;
+  end;
+  varDouble: begin // varDate would be converted into ISO8601 by VariantToUTF8()
+    Output.VType := ftDouble;
+    Output.VDouble := VDouble;
+  end;
+  else // handle less current cases
+    if VariantToInt64(Input,Output.VInt64) then
+      Output.VType := ftInt64 else begin
+      VariantToUTF8(Input,RawUTF8(temp),wasString);
+      if wasString then begin
+        Output.VType := ftUTF8;
+        Output.VText := pointer(temp);
+      end else
+        Output.VType := ftNull;
+    end;
+  end;
 end;
 
 procedure VariantDynArrayClear(var Value: TVariantDynArray);
@@ -16937,7 +17113,7 @@ begin
   if L<>0 then
     L := PStrRec(Pointer(L-STRRECSIZE))^.length;
   SetLength(Text,L+BufferLen);
-  move(Buffer^,pointer(PtrInt(Text)+L)^,BufferLen);
+  MoveFast(Buffer^,pointer(PtrInt(Text)+L)^,BufferLen);
 end;
 
 procedure AppendBuffersToRawUTF8(var Text: RawUTF8; const Buffers: array of PUTF8Char);
@@ -16958,7 +17134,7 @@ begin
   inc(P,TextLen);
   for i := 0 to high(Buffers) do
   if Buffers[i]<>nil then begin
-    move(Buffers[i]^,P^,lens[i]);
+    MoveFast(Buffers[i]^,P^,lens[i]);
     inc(P,lens[i]);
   end;
 end;
@@ -16969,7 +17145,7 @@ begin
   L := PtrInt(Text);
   if L<>0 then begin
     L := PStrRec(Pointer(L-STRRECSIZE))^.length;
-    Move(Pointer(Text)^,Buffer^,L);
+    MoveFast(Pointer(Text)^,Buffer^,L);
     inc(Buffer,L);
   end;
   result := Buffer;
@@ -17023,10 +17199,10 @@ begin
   P^ := Quote;
   inc(P);
   if n=0 then begin
-    Move(Text^,P^,L);
+    MoveFast(Text^,P^,L);
     inc(P,L);
   end else begin
-    Move(Text^,P^,first);
+    MoveFast(Text^,P^,first);
     n := first;
     L := first;
     goto quot;
@@ -17366,7 +17542,7 @@ var ppBeg: integer;
     wasNull: boolean;
 begin
   maxParam := 0;
-  fillchar(Nulls,sizeof(Nulls),0);
+  FillcharFast(Nulls,sizeof(Nulls),0);
   ppBeg := PosEx(RawUTF8(':('),SQL,1);
   if (ppBeg=0) or (PosEx(RawUTF8('):'),SQL,ppBeg+2)=0) then begin
     // SQL code with no valid :(...): internal parameters -> leave maxParam=0
@@ -17479,7 +17655,7 @@ begin
         '9': begin
           S[prec] := '0';
           if ((prec=2) and (S[1]='-')) or (prec=1) then begin
-            Move(S[prec],S[prec+1],result);
+            MoveFast(S[prec],S[prec+1],result);
             S[prec] := '1';
             break;
           end;
@@ -17598,7 +17774,7 @@ begin
   F := pointer(result);
   for i := 0 to blocksN-1 do
   with blocks[i] do begin
-    move(Text^,F^,Len);
+    MoveFast(Text^,F^,Len);
     inc(F,Len);
   end;
 end;
@@ -17627,7 +17803,7 @@ begin
   end;
   result := '';
   tmpN := 0;
-  FillChar(inlin,SizeOf(inlin),0);
+  FillcharFast(inlin,SizeOf(inlin),0);
   L := 0;
   A := 0;
   P := 0;
@@ -17706,7 +17882,7 @@ Txt:  len := F-FDeb;
     {$else}
     L := PInteger(PtrInt(tmp[i])-sizeof(integer))^;
     {$endif}
-    move(pointer(tmp[i])^,F^,L);
+    MoveFast(pointer(tmp[i])^,F^,L);
     inc(F,L);
     if i in inlin then begin
       PWord(F)^ := ord(')')+ord(':')shl 8;
@@ -17726,7 +17902,7 @@ begin
   P := pointer(Result);
   for i := 0 to high(Values) do begin
     L := length(Values[i]);
-    move(pointer(Values[i])^,P^,L);
+    MoveFast(pointer(Values[i])^,P^,L);
     inc(P,L);
   end;
 end;
@@ -17737,13 +17913,26 @@ begin
   L := Length(buf);
   if L<>0 then begin
     SetLength(bytes,L);
-    move(pointer(buf)^,pointer(bytes)^,L);
+    MoveFast(pointer(buf)^,pointer(bytes)^,L);
   end;
 end;
 
 procedure BytesToRawByteString(const bytes: TBytes; out buf: RawByteString);
 begin
   SetString(buf,PAnsiChar(pointer(bytes)),Length(bytes));
+end;
+
+procedure ResourceToRawByteString(const ResName: string; ResType: PChar;
+  out buf: RawByteString);
+var HResInfo: THandle;
+    HGlobal: THandle;
+begin
+  HResInfo := FindResource(HInstance,PChar(ResName),ResType);
+  if HResInfo=0 then
+    exit;
+  HGlobal := LoadResource(HInstance,HResInfo);
+  if HGlobal<>0 then
+    SetString(buf,PAnsiChar(LockResource(HGlobal)),SizeofResource(HInstance,HResInfo));
 end;
 
 function StrIComp(Str1, Str2: pointer): PtrInt;
@@ -17921,15 +18110,8 @@ function IdemPropNameU(const P1,P2: RawUTF8): boolean;
 var i,j,L: integer;
 begin
   result := false;
-  if P1='' then begin
-    if P2='' then
-      result := P2='';
-    exit;
-  end else
-    if P2='' then
-      exit;
-  L := PStrRec(PtrInt(P1)-STRRECSIZE)^.length;
-  if L<>PStrRec(PtrInt(P2)-STRRECSIZE)^.length then
+  L := length(P1);
+  if L<>length(P2) then
     exit;
   j := 1;
   for i := 1 to L shr 2 do
@@ -17951,10 +18133,10 @@ asm // eax=p1, edx=p2
         cmp ecx,[edx-4]
         jne @out1
         push ebx
-        lea edx,[edx+ecx-4]
+        lea edx,[edx+ecx-4]  // may include the length for shortest strings
         lea ebx,[eax+ecx-4]
         neg ecx
-        mov eax,[ebx] // compare last 4 chars
+        mov eax,[ebx]     // compare last 4 chars
         xor eax,[edx]
         and eax,$dfdfdfdf // case insensitive
         jne @out2
@@ -17970,16 +18152,13 @@ asm // eax=p1, edx=p2
 @match: mov al,1
         pop ebx
         ret
-@maybenil:
+@maybenil: // here we know that eax<>edx
         test eax,eax
-        jz @nil1
+        jz @nil0     // eax=nil and eax<>edx -> edx<>nil -> false
         test edx,edx
         jnz @notnil
-        cmp [eax-4],edx
-        setz al
-        ret
-@nil1:  cmp eax,[edx-4]
-        setz al
+        mov al,dl   // eax<>nil and edx=nil -> false
+@nil0:
 end;
 {$endif}
 
@@ -18054,6 +18233,59 @@ begin
   result := true;
 end;
 
+function IdemPropNameUSameLen(P1,P2: PUTF8Char; P1P2Len: integer): boolean;
+{$ifdef PUREPASCAL}
+var i,j: integer;
+begin
+  result := false;
+  j := 0;
+  for i := 1 to P1P2Len shr 2 do
+    if (PCardinal(PtrInt(P1)+j)^ xor PCardinal(@P2[j])^) and $dfdfdfdf<>0 then
+      exit else
+      inc(j,4);
+  for i := j to P1P2Len-1 do
+    if (PByteArray(P1)^[i] xor ord(P2[i])) and $df<>0 then
+      exit;
+  result := true;
+end;
+{$else}
+asm // eax=p1, edx=p2, ecx=P1P2Len
+        cmp eax,edx
+        je @out2
+        cmp ecx,4
+        jbe @sml
+        push ebx
+        lea edx,[edx+ecx-4]
+        lea ebx,[eax+ecx-4]
+        neg ecx
+        mov eax,[ebx]     // compare last 4 chars
+        xor eax,[edx]
+        and eax,$dfdfdfdf // case insensitive
+        jne @out1
+@by4:   add ecx,4
+        jns @match
+        mov eax,[ebx+ecx]
+        xor eax,[edx+ecx]
+        and eax,$dfdfdfdf // case insensitive
+        je @by4
+@out1:  pop ebx
+@out2:  setz al
+        ret
+        nop; nop
+@match: pop ebx
+        mov al,1
+        ret
+@mask:  dd 0,$df,$dfdf,$dfdfdf,$dfdfdfdf // compare 1..4 chars
+@sml:   test ecx,ecx
+        jz @smlo      // P1P2Len=0
+        mov eax,[eax]
+        xor eax,[edx]
+        and eax,dword ptr [@mask+ecx*4]
+@smlo:  setz al
+end;
+{$endif}
+
+
 {$ifdef MSWINDOWS}
 const
   // lpMinimumApplicationAddress retrieved from Windows is very low $10000
@@ -18117,7 +18349,7 @@ begin
   Res := false;
   IsWow64 := Assigned(IsWow64Process) and
     IsWow64Process(GetCurrentProcess,Res) and Res;
-  fillchar(SystemInfo,sizeof(SystemInfo),0);
+  FillcharFast(SystemInfo,sizeof(SystemInfo),0);
   if IsWow64 then // see http://msdn.microsoft.com/en-us/library/ms724381(v=VS.85).aspx
     GetNativeSystemInfo := GetProcAddress(Kernel,'GetNativeSystemInfo') else
     @GetNativeSystemInfo := nil;
@@ -18692,7 +18924,7 @@ begin
       S := P-1;
       inc(P,extra);
       inc(extra);
-      Move(S^,D[result],extra);
+      MoveFast(S^,D[result],extra);
       inc(result,extra);
     end;
   until false;
@@ -19359,7 +19591,7 @@ procedure InitConvertBase64ToBin;
 var i: integer;
 begin
   SetLength(ConvertBase64ToBin,256);
-  fillchar(ConvertBase64ToBin[0],256,255); // invalid value set to -1
+  FillcharFast(ConvertBase64ToBin[0],256,255); // invalid value set to -1
   for i := 0 to high(b64) do
     ConvertBase64ToBin[ord(b64[i])] := i;
   ConvertBase64ToBin[ord('=')] := -2; // special value for '='
@@ -19767,8 +19999,8 @@ end;
 procedure YearToPChar(Y: Word; P: PUTF8Char);
 {$ifdef PUREPASCAL}
 begin
-  PWord(P  )^ := TwoDigitLookupW[Y div 100];
-  PWord(P+2)^ := TwoDigitLookupW[Y mod 100];
+  PWordArray(P)[0] := TwoDigitLookupW[Y div 100];
+  PWordArray(P)[1] := TwoDigitLookupW[Y mod 100];
 end;
 {$else}
 asm
@@ -19896,6 +20128,7 @@ begin
       exit;
   result := true;
 end;
+
 
 { TPropNameList }
 
@@ -20992,7 +21225,7 @@ function Int64Scan(P: PInt64Array; Count: PtrInt; const Value: Int64): PInt64;
 var i: PtrInt;
 begin
   if P<>nil then begin
-    for i := 1 to Count shr 2 do      // 4 DWORD by loop - aligned read
+    for i := 1 to Count shr 2 do      // 4 Int64 by loop - aligned read
       if P^[0]<>Value then
       if P^[1]<>Value then
       if P^[2]<>Value then
@@ -21063,7 +21296,7 @@ begin
     exit; // wrong Index
   dec(n);
   if n>Index then
-    move(Values[Index+1],Values[Index],(n-Index)*sizeof(Integer));
+    MoveFast(Values[Index+1],Values[Index],(n-Index)*sizeof(Integer));
   SetLength(Values,n);
 end;
 
@@ -21075,7 +21308,7 @@ begin
     exit; // wrong Index
   dec(n,Index+1);
   if n>0 then
-    move(Values[Index+1],Values[Index],n*sizeof(Integer));
+    MoveFast(Values[Index+1],Values[Index],n*sizeof(Integer));
   dec(ValuesCount);
 end;
 
@@ -21171,15 +21404,15 @@ begin
     SetLength(result,Len);
     P := pointer(result);
     if Prefix<>'' then begin
-      move(pointer(Prefix)^,P^,length(Prefix));
+      MoveFast(pointer(Prefix)^,P^,length(Prefix));
       inc(P,length(Prefix));
     end;
     for i := 0 to ValuesCount do begin
-      Move(ints[i][1],P^,ord(ints[i][0]));
+      MoveFast(ints[i][1],P^,ord(ints[i][0]));
       inc(P,ord(ints[i][0]));
     end;
     if Suffix<>'' then
-      move(pointer(Suffix)^,P^,length(Suffix));
+      MoveFast(pointer(Suffix)^,P^,length(Suffix));
   finally
     FreeMem(ints);
   end;
@@ -21215,15 +21448,15 @@ begin
     SetLength(result,Len);
     P := pointer(result);
     if Prefix<>'' then begin
-      move(pointer(Prefix)^,P^,length(Prefix));
+      MoveFast(pointer(Prefix)^,P^,length(Prefix));
       inc(P,length(Prefix));
     end;
     for i := 0 to ValuesCount do begin
-      Move(ints[i][1],P^,ord(ints[i][0]));
+      MoveFast(ints[i][1],P^,ord(ints[i][0]));
       inc(P,ord(ints[i][0]));
     end;
     if Suffix<>'' then
-      move(pointer(Suffix)^,P^,length(Suffix));
+      MoveFast(pointer(Suffix)^,P^,length(Suffix));
   finally
     FreeMem(ints);
   end;
@@ -21471,7 +21704,7 @@ procedure CopyAndSortInteger(Values: PIntegerArray; ValuesCount: integer;
 begin
   if ValuesCount>length(Dest) then
     SetLength(Dest,ValuesCount);
-  move(Values^[0],Dest[0],ValuesCount*sizeof(Integer));
+  MoveFast(Values^[0],Dest[0],ValuesCount*sizeof(Integer));
   QuickSortInteger(pointer(Dest),0,ValuesCount-1);
 end;
 
@@ -21573,9 +21806,9 @@ begin
   n := ValuesCount;
   if PtrUInt(result)<PtrUInt(n) then begin
     n := (n-result)*sizeof(Integer);
-    move(Values[result],Values[result+1],n);
+    MoveFast(Values[result],Values[result+1],n);
     if CoValues<>nil then
-      move(CoValues^[result],CoValues^[result+1],n);
+      MoveFast(CoValues^[result],CoValues^[result+1],n);
   end else
     result := n;
   Values[result] := Value;
@@ -22487,14 +22720,21 @@ begin
 end;
 
 function UpperCopy255(dest: PAnsiChar; const source: RawUTF8): PAnsiChar;
-var i, L: integer;
 begin
-  L := PStrRec(Pointer(PtrInt(source)-STRRECSIZE))^.length;
-  if L>0 then begin
-    if L>250 then
-      L := 250; // avoid buffer overflow
-    result := dest+L;
-    for i := 0 to L-1 do
+  if source<>'' then
+    result := UpperCopy255(dest,pointer(source),
+      PStrRec(Pointer(PtrInt(source)-STRRECSIZE))^.length) else
+    result := dest;
+end;
+
+function UpperCopy255(dest: PAnsiChar; source: PUTF8Char; sourceLen: integer): PAnsiChar;
+var i: integer;
+begin
+  if sourceLen>0 then begin
+    if sourceLen>250 then
+      sourceLen := 250; // avoid buffer overflow
+    result := dest+sourceLen;
+    for i := 0 to sourceLen-1 do
       dest[i] := AnsiChar(NormToUpperAnsi7Byte[PByteArray(source)[i]]);
   end else
     result := dest;
@@ -22564,7 +22804,7 @@ Set1:   inc(Dest);
         S := Source-1; // leave UTF-8 encoding untouched
         inc(Source,extra);
         inc(extra);
-        Move(S^,Dest^,extra);
+        MoveFast(S^,Dest^,extra);
         inc(Dest,extra);
         if (PtrUInt(Source) and 3=0) and (Source<EndSourceBy4) then goto By4 else
         if Source<endSource then continue else break;
@@ -23011,11 +23251,11 @@ begin // CSVOfValue('?',3)='?,?,?'
   P := pointer(result);
   i := 1;
   repeat
-    move(Pointer(Value)^,P^,ValueLen);
+    MoveFast(Pointer(Value)^,P^,ValueLen);
     inc(P,ValueLen);
     if i=Count then
       break;
-    move(Pointer(Sep)^,P^,SepLen);
+    MoveFast(Pointer(Sep)^,P^,SepLen);
     inc(P,SepLen);
     inc(i);
   until false;
@@ -23279,13 +23519,13 @@ begin
   repeat
     L := length(Values[i]);
     if L>0 then begin
-      move(pointer(Values[i])^,P^,L);
+      MoveFast(pointer(Values[i])^,P^,L);
       inc(P,L);
     end;
     if i=high(Values) then
       Break;
     if seplen>0 then begin
-      Move(pointer(Sep)^,P^,seplen);
+      MoveFast(pointer(Sep)^,P^,seplen);
       inc(P,seplen);
     end;
     inc(i);
@@ -23885,7 +24125,7 @@ begin
     PInt64Array(@Fields)^[2] := 0;
     PInt64Array(@Fields)^[3] := 0;
   end else
-    FillChar(Fields,sizeof(Fields),0);
+    FillcharFast(Fields,sizeof(Fields),0);
 end;
 
 {$WARNINGS ON}
@@ -23930,7 +24170,7 @@ end;
 procedure FieldIndexToBits(const Index: TSQLFieldIndexDynArray; var Fields: TSQLFieldBits);
 var i: integer;
 begin
-  fillchar(Fields,sizeof(Fields),0);
+  FillcharFast(Fields,sizeof(Fields),0);
   for i := 0 to Length(Index)-1 do
     if Index[i]>=0 then
       include(Fields,Index[i]);
@@ -24692,6 +24932,8 @@ begin
       if (M=0) or (M>12) then exit;
       if P[6] in ['-','/'] then begin inc(P); dec(L); end; // allow YYYY-MM-DD
       if L>=8 then begin // YYYYMMDD
+        if not(P[8] in [#0,' ','T']) then
+          exit; // invalid date format
         D := ord(P[6])*10+ord(P[7])-(48+480);
         if (D=0) or (D>MonthDays[true][M]) then exit; // worse is leap year=true
       end;
@@ -24708,8 +24950,8 @@ begin
     with Div100(Y) do
       unaligned(result) := (146097*YDiv100) shr 2 + (1461*YMod100) shr 2 +
             (153*M+2) div 5+D-693900;
-    if (L<15) or not(P[8] in [' ','T']) then
-      exit;
+    if L<15 then
+      exit; // not enough space to retrieve the time
   end;
   H := ord(P[9])*10+ord(P[10])-(48+480);
   if P[11]=':' then inc(P); // allow hh:mm:ss
@@ -24981,14 +25223,14 @@ begin
       if P[6] in ['-','/'] then begin inc(P); dec(L); end; // allow YYYY-MM-DD
       if L>=8 then begin  // YYYYMMDD
         V := ord(P[6])*10+ord(P[7])-(48+480+1); // Day 1..31 -> 0..30
-        if V<=30 then
+        if (V<=30) and(P[8] in [#0,' ','T']) then
           inc(result,V shl 17) else begin
           result := 0;
           exit;
         end;
       end;
     end;
-    if (L<15) or not(P[8] in [' ','T']) then begin
+    if L<15 then begin // not enough place to retrieve a time
       if ContainsNoTime<>nil then
         ContainsNoTime^ := true;
       exit;
@@ -25159,21 +25401,21 @@ end;
 function TryEncodeDate(Year, Month, Day: Word; out Date: TDateTime): Boolean;
 begin // faster version by AB
   Result := False;
-  if (Month < 1) or (Month > 12) then exit;
-  if (Day <= MonthDays[((Year and 3) = 0) and
-    ((Year mod 100 > 0) or (Year mod 400 = 0))][Month]) and
-    (Year >= 1) and (Year < 10000) and
-    (Month < 13) and (Day > 0) then begin
-    if Month > 2 then
-      Dec (Month, 3) else
-    if (Month > 0) then begin
-      Inc (Month, 9);
-      Dec (Year);
+  if (Month<1) or (Month>12) then exit;
+  if (Day <= MonthDays[
+      ((Year and 3)=0) and ((Year mod 100>0) or (Year mod 400=0))][Month]) and
+     (Year>=1) and (Year<10000) and
+     (Month<13) and (Day>0) then begin
+    if Month>2 then
+      dec(Month,3) else
+    if (Month>0) then begin
+      inc(Month,9);
+      dec(Year);
     end
       else exit; // Month <= 0
     with Div100(Year) do
-      Date := (146097 * YDiv100) shr 2 + (1461 * YMod100) shr 2 +
-            (153 * Month + 2) div 5 + Day - 693900;
+      Date := (146097*YDiv100) shr 2+(1461*YMod100) shr 2+
+            (153*Month+2) div 5+Day-693900;
     result := true;
   end;
 end;
@@ -25421,6 +25663,8 @@ begin
   LoadFromRegistry;
   {$else}
   LoadFromFile;
+  if fZones.Count=0 then
+    LoadFromResource; // if no .tz file is available, try from registry
   {$endif}
   {$endif}
 end;
@@ -25475,6 +25719,14 @@ begin
   LoadFromBuffer(StringFromFile(FN));
 end;
 
+procedure TSynTimeZone.LoadFromResource;
+var buf: RawByteString;
+begin
+  ResourceToRawByteString(ClassName,PChar(10),buf);
+  if buf<>'' then
+    LoadFromBuffer(buf);
+end;
+
 {$ifdef MSWINDOWS}
 {$ifndef LVCL}
 procedure TSynTimeZone.LoadFromRegistry;
@@ -25497,7 +25749,7 @@ begin
     end;
     for i := 0 to Keys.Count-1 do begin
       Finalize(item);
-      fillchar(item.tzi,SizeOf(item.tzi),0);
+      FillcharFast(item.tzi,SizeOf(item.tzi),0);
       if Reg.OpenKeyReadOnly(REGKEY+Keys[i]) then
       try
         StringToUTF8(Keys[i],item.id);
@@ -25887,7 +26139,7 @@ function RawUTF8ToGUID(const text: RawByteString): TGUID;
 begin
   if (length(text)<>38) or (text[1]<>'{') or (text[38]<>'}') or
      (TextToGUID(@text[2],@result)=nil) then
-    fillchar(result,sizeof(result),0);
+    FillcharFast(result,sizeof(result),0);
 end;
 
 function StringToGUID(const text: string): TGUID;
@@ -25906,7 +26158,7 @@ begin
     {$endif}
       exit; // conversion OK
   end;
-  fillchar(result,sizeof(result),0);
+  FillcharFast(result,sizeof(result),0);
 end;
 
 function StrCurr64(P: PAnsiChar; const Value: Int64): PAnsiChar;
@@ -26016,7 +26268,7 @@ begin
     if Decim and $ffff0000=ord('0')shl 16+ord('0')shl 24 then
       dec(result,2); // 2 decimals
   end;
-  move(P^,Dest^,result);
+  MoveFast(P^,Dest^,result);
 end;
 
 function StrToCurr64(P: PUTF8Char; NoDecimal: PBoolean=nil): Int64;
@@ -26285,32 +26537,33 @@ begin // "out result" parameter definition already made result := ''
 end;
 
 function GetDisplayNameFromClass(C: TClass): RawUTF8;
-var DelphiName: ShortString;
+var DelphiName: PShortString;
     TrimLeft: integer;
 begin
-  result := '';
-  if C=nil then
+  if C=nil then begin
+    result := '';
     exit;
-  // new TObject.ClassName is UnicodeString (since Delphi 20009) -> inline code
+  end;
+  // new TObject.ClassName is UnicodeString (since Delphi 2009) -> inline code
   // with vmtClassName = UTF-8 encoded text stored in a shortstring = -44
-  DelphiName := PShortString(PPointer(PtrInt(C)+vmtClassName)^)^;
+  DelphiName := PPointer(PtrInt(C)+vmtClassName)^;
   TrimLeft := 0;
-  if DelphiName[0]>#4 then
-    case pInteger(@DelphiName[1])^ and $DFDFDFDF of
+  if DelphiName^[0]>#4 then
+    case pInteger(@DelphiName^[1])^ and $DFDFDFDF of
       // fast case-insensitive compare
       ord('T')+ord('S')shl 8+ord('Q')shl 16+ord('L')shl 24:
-        if (DelphiName[0]<=#10) or
-         (pInteger(@DelphiName[5])^ and $DFDFDFDF<> // fast case-insensitive compare
+        if (DelphiName^[0]<=#10) or
+         (pInteger(@DelphiName^[5])^ and $DFDFDFDF<> // fast case-insensitive compare
            ord('R')+ord('E')shl 8+ord('C')shl 16+ord('O')shl 24) or
-         (pWord(@DelphiName[9])^ and $DFDF<>ord('R')+ord('D')shl 8) then
+         (pWord(@DelphiName^[9])^ and $DFDF<>ord('R')+ord('D')shl 8) then
         TrimLeft := 4 else
         TrimLeft := 10;
       ord('T')+ord('S')shl 8+ord('Y')shl 16+ord('N')shl 24:
         TrimLeft := 4;
     end;
-  if (Trimleft=0) and (DelphiName[1]='T') then
+  if (Trimleft=0) and (DelphiName^[1]='T') then
     Trimleft := 1;
-  SetString(result,PAnsiChar(@DelphiName[TrimLeft+1]),ord(DelphiName[0])-TrimLeft);
+  SetString(result,PAnsiChar(@DelphiName^[TrimLeft+1]),ord(DelphiName^[0])-TrimLeft);
 end;
 
 function GetCaptionFromClass(C: TClass): string;
@@ -26339,7 +26592,7 @@ begin
   inc(PS);
   while (L>0) and (PS^ in ['a'..'z']) do begin inc(PS); dec(L); end;
   tmp[L] := #0; // GetCaptionFromPCharLen expect
-  move(PS^,tmp,L);
+  MoveFast(PS^,tmp,L);
   GetCaptionFromPCharLen(tmp,result);
 end;
 
@@ -26683,11 +26936,11 @@ begin
   n := ValuesCount;
   if result<n then begin
     n := (n-result)*sizeof(pointer);
-    move(Pointer(Values[result]),Pointer(Values[result+1]),n);
+    MoveFast(Pointer(Values[result]),Pointer(Values[result+1]),n);
     PtrInt(Values[result]) := 0; // avoid GPF
     if CoValues<>nil then begin
       {$ifdef CPU64}n := n shr 1;{$endif} // 64 bit pointer size is twice an integer
-      move(CoValues^[result],CoValues^[result+1],n);
+      MoveFast(CoValues^[result],CoValues^[result+1],n);
     end;
   end else
     result := n;
@@ -26765,8 +27018,8 @@ begin
     dec(n,Index);
     if n>0 then begin
       if CoValues<>nil then
-        move(CoValues^[Index+1],CoValues^[Index],n*sizeof(Integer));
-      move(pointer(Values[Index+1]),pointer(Values[Index]),n*sizeof(pointer));
+        MoveFast(CoValues^[Index+1],CoValues^[Index],n*sizeof(Integer));
+      MoveFast(pointer(Values[Index+1]),pointer(Values[Index]),n*sizeof(pointer));
       PtrUInt(Values[ValuesCount]) := 0; // avoid GPF
     end;
     result := true;
@@ -26829,7 +27082,7 @@ begin
   result := 0;
   if GetClassInfo(HInstance, pointer(aWindowName), TempClass) then
     exit; // class name already registered -> fail
-  fillchar(TempClass,sizeof(TempClass),0);
+  FillcharFast(TempClass,sizeof(TempClass),0);
   TempClass.hInstance := HInstance;
   TempClass.lpfnWndProc := @DefWindowProc;
   TempClass.lpszClassName :=  pointer(aWindowName);
@@ -27163,7 +27416,7 @@ begin
   if Count=length(Values) then
     SetLength(Values,Count+100);
   if result<Count then
-    move(Values[result],Values[result+1],(Count-result)*2) else
+    MoveFast(Values[result],Values[result+1],(Count-result)*2) else
     result := Count;
   Values[result] := aValue;
   inc(Count);
@@ -27526,7 +27779,7 @@ begin
   Len := Length(Value);
   Dest := ToVarUInt32(Len,Dest);
   if Len>0 then begin
-    Move(pointer(Value)^,Dest^,Len);
+    MoveFast(pointer(Value)^,Dest^,Len);
     result := pointer(PAnsiChar(Dest)+Len);
   end else
     result := Dest;
@@ -27592,7 +27845,7 @@ end;
 
 function RTTIManagedSize(typeInfo: Pointer): SizeInt; inline;
 begin
-  case TTypeKind(PByte(typeinfo)^) of
+  case PTypeKind(typeinfo)^ of
     tkLString,tkLStringOld,tkWString,tkUString,
     tkInterface,tkDynarray:
       result := sizeof(Pointer);
@@ -27618,7 +27871,7 @@ procedure RecordAddRef(var Data; TypeInfo : pointer);
 procedure RecordCopy(var Dest; const Source; TypeInfo: pointer);
 begin // external name 'FPC_COPY' does not work as we need
   RecordClear(Dest,TypeInfo);
-  move(Source,Dest,RTTIManagedSize(TypeInfo));
+  MoveFast(Source,Dest,RTTIManagedSize(TypeInfo));
   RecordAddRef(Dest,TypeInfo);
 end;
 
@@ -27629,7 +27882,7 @@ begin
   if size>0 then
     for i := 1 to cnt do begin
       RecordClear(dest^,TypeInfo); // inlined RecordCopy()
-      move(source^,dest^,size);
+      MoveFast(source^,dest^,size);
       RecordAddRef(dest^,TypeInfo);
       inc(PByte(source),size);
       inc(PByte(dest),size);
@@ -27848,7 +28101,7 @@ begin
   for F := 1 to FieldTable^.ManagedCount do begin
     Diff := Field^.Offset-Diff;
     if Diff<>0 then begin
-      move(R^,Dest^,Diff);
+      MoveFast(R^,Dest^,Diff);
       inc(R,Diff);
       inc(Dest,Diff);
     end;
@@ -27870,7 +28123,7 @@ begin
       {$endif}
       Dest := pointer(ToVarUInt32(LenBytes,pointer(Dest)));
       if LenBytes>0 then begin
-        move(pointer(PPtrUInt(R)^)^,Dest^,LenBytes);
+        MoveFast(pointer(PPtrUInt(R)^)^,Dest^,LenBytes);
         inc(Dest,LenBytes);
       end;
       Diff := sizeof(PtrUInt); // size of tkLString+tkWString+tkUString in record
@@ -27906,7 +28159,7 @@ begin
           if F=FieldTable^.ManagedCount then
             Diff := FieldTable.Size-Field^.Offset else
             Diff := FieldTable^.ManagedFields[F].Offset-Field^.Offset;
-          move(R^,Dest^,Diff);
+          MoveFast(R^,Dest^,Diff);
           inc(Dest,Diff);
         end;
     {$else}
@@ -27924,7 +28177,7 @@ begin
   if integer(Diff)<0 then
     raise ESynException.Create('RecordSave diff') else
   if Diff<>0 then begin
-    move(R^,Dest^,Diff);
+    MoveFast(R^,Dest^,Diff);
     result := Dest+Diff;
   end else
     result := Dest;
@@ -28060,7 +28313,7 @@ begin
   for F := 1 to FieldTable^.ManagedCount do begin
     Diff := Field^.Offset-Diff;
     if Diff<>0 then begin
-      move(Source^,R^,Diff);
+      MoveFast(Source^,R^,Diff);
       inc(Source,Diff);
       inc(R,Diff);
     end;
@@ -28117,7 +28370,7 @@ begin
           if F=FieldTable^.ManagedCount then
             Diff := FieldTable.Size-Field^.Offset else
             Diff := FieldTable^.ManagedFields[F].Offset-Field^.Offset;
-          move(Source^,R^,Diff);
+          MoveFast(Source^,R^,Diff);
           inc(Source,Diff);
         end;
     {$else}
@@ -28135,7 +28388,7 @@ begin
   if integer(Diff)<0 then
     raise ESynException.Create('RecordLoad diff') else
   if Diff<>0 then begin
-    move(Source^,R^,Diff);
+    MoveFast(Source^,R^,Diff);
     result := Source+Diff;
   end else
     result := Source;
@@ -28258,31 +28511,36 @@ asm // faster version by AB
         pop ebx
 end;
 
-{$ifndef UNICODE} // TMonitor.Destroy is not available ! -> no simple patch
+{$ifndef UNICODE} // TMonitor.Destroy is not available ! -> apply to D2007 only
 procedure TObjectCleanupInstance;
 asm // faster version by AB
         push ebx
         mov ebx,eax
-@@loop: mov ebx,[ebx] // handle two VMT levels per iteration
+@@loop: mov ebx,[ebx] // handle three VMT levels per iteration
         mov edx,[ebx].vmtInitTable
         mov ebx,[ebx].vmtParent
         test edx,edx
-        jne @@fin
+        jnz @@clr
         test ebx,ebx
         jz @@end
         mov ebx,[ebx]
         mov edx,[ebx].vmtInitTable
         mov ebx,[ebx].vmtParent
         test edx,edx
-        jne @@fin
+        jnz @@clr
         test ebx,ebx
-        jne @@loop
+        jz @@end
+        mov ebx,[ebx]
+        mov edx,[ebx].vmtInitTable
+        mov ebx,[ebx].vmtParent
+        test edx,edx
+        jnz @@clr
+        test ebx,ebx
+        jnz @@loop
 @@end:  pop ebx
         ret
-@@fin:  call RecordClear // eax=data edx=typeinfo
-        test ebx,ebx
-        jne @@loop
-        pop ebx
+@@clr:  push offset @@loop // TObject has no vmtInitTable -> safe
+        jmp RecordClear // eax=self edx=typeinfo
 end;
 {$endif}
 
@@ -29165,45 +29423,32 @@ end;
 {$endif CPU64}
 
 procedure InitRedirectCode;
-{$ifdef DOPATCHTRTL}
-var FillCharAddr, MoveAddr: pointer;
-{$endif}
 begin
   {$ifdef DELPHI5OROLDER}
   StrLen := @StrLenX86;
+  FillcharFast := @FillCharX87;
+  MoveFast := @MoveX87;
   {$else}
   {$ifdef CPU64}
   StrLen := @StrLenSSE2;
+  FillcharFast := @FillCharSSE2;
+  MoveFast := @MoveSSE2;
   {$else}
-  if SupportsSSE2 then
-    StrLen := @StrLenSSE2 else
+  if SupportsSSE2 then begin
+    StrLen := @StrLenSSE2;
+    FillcharFast := @FillCharSSE2;
+  end else begin
     StrLen := @StrLenX86;
+    FillcharFast := @FillCharX87;
+  end;
+  MoveFast := @MoveX87; // SSE2 is not faster than X87 version on 32 bit CPU
   {$endif CPU64}
   {$endif DELPHI5OROLDER}
   // do redirection from RTL to our fastest version
   {$ifdef DOPATCHTRTL}
   if DebugHook=0 then begin // patch only outside debugging
-    {$ifdef DELPHI5OROLDER}
-    FillCharAddr := @FillCharX87;
-    MoveAddr := @MoveX87;
-    {$else}
-    {$ifdef CPU64}
-    {$ifdef NOX64PATCHRTL}
-    FillCharAddr := nil;
-    MoveAddr := nil;
-    {$else}
-    FillCharAddr := @FillCharSSE2;
-    MoveAddr := @MoveSSE2;
-    {$endif NOX64PATCHRTL}
-    {$else}
-    MoveAddr := @MoveX87; // SSE2 is not faster than X87 version on 32 bit CPU
-    if SupportsSSE2 then
-      FillCharAddr := @FillCharSSE2 else
-      FillCharAddr := @FillCharX87;
-    {$endif CPU64}
-    {$endif DELPHI5OROLDER}
-    RedirectCode(SystemFillCharAddress,FillCharAddr);
-    RedirectCode(@System.Move,MoveAddr);
+    RedirectCode(SystemFillCharAddress,@FillcharFast);
+    RedirectCode(@System.Move,@MoveFast);
     RedirectCode(SystemRecordCopyAddress,@RecordCopy);
     RedirectCode(SystemFinalizeRecordAddress,@RecordClear);
     RedirectCode(SystemInitializeRecordAddress,@_InitializeRecord);
@@ -29459,7 +29704,7 @@ var added: boolean;
 begin
   if (aTypeInfo=nil) or (self=nil) then
     raise ESynException.CreateUTF8('%.Search(%)',[self,aTypeInfo]);
-  fillchar(Reg,sizeof(Reg),0);
+  FillcharFast(Reg,sizeof(Reg),0);
   case PDynArrayTypeInfo(aTypeInfo)^.kind of
   tkDynArray: begin
     Reg.DynArrayTypeInfo := aTypeInfo;
@@ -29700,7 +29945,7 @@ begin
   *)
   ktEnumeration, ktSet: begin
     int := 0;
-    move(aValue,int,fDataSize);
+    MoveFast(aValue,int,fDataSize);
     aWriter.AddU(int); // storing the value as binary/integer is safe and fast
     //aWriter.AddShort(GetEnumName(fCustomTypeInfo,byte(aValue))^);
   end;
@@ -29767,7 +30012,7 @@ begin
         V := GetInteger(PropValue);
       if V<0 then
         exit;
-      Move(V,aValue,fDataSize);
+      MoveFast(V,aValue,fDataSize);
       result := P;
     end;
     ktFixedArray:
@@ -29886,33 +30131,37 @@ begin
   fPropertyType := aPropertyType;
 end;
 
-class function TJSONCustomParserRTTI.TypeNameToSimpleRTTIType(
-  TypeName: PUTF8Char; TypeNameLen: Integer; var ItemTypeName: RawUTF8): TJSONCustomParserRTTIType;
-const // we rely on TJSONCustomParserRTTIType enumeration to be sorted by name
-  JSONCUSTOMPARSERRTTITYPE_NAMES: array[TJSONCustomParserRTTIType] of PUTF8Char =
-    ('ARRAY','BOOLEAN','BYTE','CARDINAL','CURRENCY','DOUBLE','INT64','INTEGER',
-     'RAWBYTESTRING','RAWJSON','RAWUTF8','RECORD','SINGLE','STRING','SYNUNICODE',
-     'TDATETIME','TGUID','TID','TTIMELOG',{$ifndef NOVARIANTS}'VARIANT',{$endif}
-     'WIDESTRING','WORD',nil); // latest ptCustom=nil
+class function TJSONCustomParserRTTI.TypeNameToSimpleRTTIType(TypeName: PUTF8Char;
+  TypeNameLen: Integer; var ItemTypeName: RawUTF8): TJSONCustomParserRTTIType;
+const
+  SORTEDMAX = {$ifdef NOVARIANTS}29{$else}30{$endif};
+  SORTEDNAMES: array[0..SORTEDMAX] of PUTF8Char =
+    ('ARRAY','BOOLEAN','BYTE','CARDINAL','CURRENCY',
+     'DOUBLE','INT64','INTEGER','PTRINT','PTRUINT',
+     'RAWBYTESTRING','RAWJSON','RAWUTF8','RECORD','SINGLE',
+     'STRING','SYNUNICODE','TCREATETIME','TDATETIME','TGUID',
+     'TID','TMODTIME','TRECORDREFERENCE','TRECORDREFERENCETOBEDELETED',
+     'TRECORDVERSION','TSQLRAWBLOB','TTIMELOG','UTF8STRING',
+     {$ifndef NOVARIANTS}'VARIANT',{$endif}
+     'WIDESTRING','WORD');
+   // warning: recognized types should match at binary storage level!
+   SORTEDTYPES: array[0..SORTEDMAX] of TJSONCustomParserRTTIType =
+     (ptArray,ptBoolean,ptByte,ptCardinal,ptCurrency,
+      ptDouble,ptInt64,ptInteger,ptPtrInt,ptPtrUInt,
+      ptRawByteString,ptRawJSON,ptRawUTF8,ptRecord,ptSingle,
+      ptString,ptSynUnicode,ptTimeLog,ptDateTime,ptGUID,
+      ptID,ptTimeLog,ptInt64,ptInt64,
+      ptInt64,ptRawByteString,ptTimeLog,ptRawUTF8,
+      {$ifndef NOVARIANTS}ptVariant,{$endif}
+      ptWideString,ptWord);
 var ndx: integer;
 begin
   UpperCaseCopy(TypeName,TypeNameLen,ItemTypeName);
-  ndx := FastFindPUTF8CharSorted(@JSONCUSTOMPARSERRTTITYPE_NAMES,
-    ord(pred(ptCustom)),pointer(ItemTypeName));
+//for ndx := 1 to SORTEDMAX do assert(StrComp(SORTEDNAMES[ndx],SORTEDNAMES[ndx-1])>0,SORTEDNAMES[ndx]);
+  ndx := FastFindPUTF8CharSorted(@SORTEDNAMES,SORTEDMAX,pointer(ItemTypeName));
   if ndx>=0 then
-    result := TJSONCustomParserRTTIType(ndx) else
-    // recognize some simple type aliases (.. = type ..) as defined in mORMot.pas
-    case IdemPCharArray(pointer(ItemTypeName),['TSQLRAWBLOB','TRECORDREFERENCE',
-      'TRECORDREFERENCETOBEDELETED','TMODTIME','TCREATETIME','PTRINT','PTRUINT']) of
-      // see also PT_COMPLEXTYPES
-      0:   result := ptRawByteString;
-      1,2: result := ptPtrUInt;
-      3,4: result := ptTimeLog;
-      5:   result := ptPtrInt;
-      6:   result := ptPtrUInt;
-      else result := ptCustom;
-      // warning: recognized types should match at binary storage level!
-    end;
+    result := SORTEDTYPES[ndx] else
+    result := ptCustom;
 end;
 
 class function TJSONCustomParserRTTI.TypeNameToSimpleRTTIType(
@@ -30074,8 +30323,8 @@ const // binary size (in bytes) of each kind of property - 0 for ptRecord/ptCust
   JSONRTTI_SIZE: array[TJSONCustomParserRTTIType] of byte = (
     SizeOf(PtrUInt),SizeOf(Boolean),SizeOf(Byte),SizeOf(Cardinal),SizeOf(Currency),
     SizeOf(Double),SizeOf(Int64),SizeOf(Integer),SizeOf(RawByteString),
-    SizeOf(RawJSON),SizeOf(RawUTF8),0,SizeOf(Single), SizeOf(String),SizeOf(SynUnicode),
-    SizeOf(TDateTime),SizeOf(TGUID),SizeOf(Int64), SizeOf(TTimeLog),
+    SizeOf(RawJSON),SizeOf(RawUTF8),0,SizeOf(Single),SizeOf(String),SizeOf(SynUnicode),
+    SizeOf(TDateTime),SizeOf(TGUID),SizeOf(Int64),SizeOf(TTimeLog),
     {$ifndef NOVARIANTS}SizeOf(Variant),{$endif}
     SizeOf(WideString),SizeOf(Word),0);
 var i: integer;
@@ -30164,7 +30413,7 @@ begin
   ReAllocMem(pointer(Data),sizeof(TDynArrayRec)+fNestedDataSize*NewLength);
   OldLength := PDynArrayRec(Data)^.length;
   if NewLength>OldLength then
-    fillchar(PByteArray(Data)[sizeof(TDynArrayRec)+fNestedDataSize*OldLength],
+    FillcharFast(PByteArray(Data)[sizeof(TDynArrayRec)+fNestedDataSize*OldLength],
       fNestedDataSize*(NewLength-OldLength),0);
   PDynArrayRec(Data)^.length := NewLength;
   inc(Data,sizeof(TDynArrayRec));
@@ -30335,7 +30584,7 @@ begin
     inc(P);
   end else
   for i := 0 to High(NestedProperty) do begin
-    PropName := GetJSONPropName(P);
+    PropName := RawUTF8(GetJSONPropName(P));
     if PropName='' then
       exit;  // invalid JSON content
     if IdemPropNameU(NestedProperty[i].PropertyName,PropName) then begin
@@ -30361,7 +30610,7 @@ begin
         P := GotoNextJSONItem(P,1,@EndOfObject);
         if EndOfObject='}' then
           break;
-        PropName := GetJSONPropName(P); // next name
+        PropName := RawUTF8(GetJSONPropName(P)); // next name
         if PropName='' then
           exit;  // invalid JSON content
       until false;
@@ -30922,13 +31171,13 @@ begin
       Dest := Source;
 end;
 
-procedure ZeroFill(var Value: TVarData);
+procedure ZeroFill(Value: PVarData);
 begin // slightly faster than FillChar(Value,sizeof(Value),0);
-  PInt64Array(@Value)^[0] := 0;
-  PInt64Array(@Value)^[1] := 0;
+  PInt64Array(Value)^[0] := 0;
+  PInt64Array(Value)^[1] := 0;
   {$ifdef CPU64}
-  assert(SizeOf(TVarData)=24);
-  PInt64Array(@Value)^[2] := 0;
+  //assert(SizeOf(TVarData)=24);
+  PInt64Array(Value)^[2] := 0;
   {$endif}
 end;
 
@@ -31046,7 +31295,7 @@ begin
       end;
       Dest := pointer(ToVarUInt32(LenBytes,pointer(Dest)));
       if LenBytes>0 then begin
-        move(PPtrUInt(VAny)^,Dest^,LenBytes); // direct raw copy
+        MoveFast(PPtrUInt(VAny)^,Dest^,LenBytes); // direct raw copy
         inc(Dest,LenBytes);
       end;
     end;
@@ -31457,7 +31706,7 @@ end;
 
 procedure TSynInvokeableVariantType.Clear(var V: TVarData);
 begin
-  ZeroFill(V); // will set V.VType := varEmpty
+  ZeroFill(@V); // will set V.VType := varEmpty
 end;
 
 procedure TSynInvokeableVariantType.Copy(var Dest: TVarData;
@@ -31523,12 +31772,12 @@ procedure GetJSONToAnyVariant(var Value: variant; var JSON: PUTF8Char;
 // internal method used by VariantLoadJSON(), GetVariantFromJSON() and
 // TDocVariantData.InitJSON()
 var wasString: boolean;
-procedure ProcessSimple(Val: PUTF8Char);
-begin
-  GetVariantFromJSON(Val,wasString,Value);
-  if JSON=nil then
-    JSON := @NULCHAR;
-end;
+  procedure ProcessSimple(Val: PUTF8Char);
+  begin
+    GetVariantFromJSON(Val,wasString,Value);
+    if JSON=nil then
+      JSON := @NULCHAR;
+  end;
 var i: integer;
     VariantType: ^TSynInvokeableVariantType;
     ToBeParsed: PUTF8Char;
@@ -31588,7 +31837,7 @@ begin
         inc(json);
       '.':
         if (json[1] in ['0'..'9']) and (json[2] in [#0,'0'..'9']) then
-          if (json[3]=#0) or
+          if (json[2]=#0) or (json[3]=#0) or
              ((json[3] in ['0'..'9']) and
               (json[4]=#0) or
               ((json[4] in ['0'..'9']) and (json[5]=#0))) then begin
@@ -31741,7 +31990,7 @@ var Size: Cardinal;
 const TYPE_BYREF = 128;
       TYPE_BYREF_MASK = TYPE_BYREF-1;
 begin // this code should copy parameters without any reference count handling
-  ZeroFill(Value); // TVarData is expected to be bulk stack: no VarClear needed
+  ZeroFill(@Value); // TVarData is expected to be bulk stack: no VarClear needed
   ByRef := (aType and TYPE_BYREF)<>0;
   Size := sizeof(pointer);
   case aType and TYPE_BYREF_MASK of
@@ -31976,7 +32225,7 @@ procedure TDocVariantData.Init(aOptions: TDocVariantOptions; aKind: TDocVariantK
 begin
   if DocVariantType=nil then
     DocVariantType := SynRegisterCustomVariantType(TDocVariant);
-  ZeroFill(TVarData(self));
+  ZeroFill(@self);
   VType := DocVariantType.VarType;
   VOptions := aOptions;
   VKind := aKind;
@@ -31986,7 +32235,7 @@ procedure TDocVariantData.InitFast;
 begin
   if DocVariantType=nil then
     DocVariantType := SynRegisterCustomVariantType(TDocVariant);
-  ZeroFill(TVarData(self));
+  ZeroFill(@self);
   VType := DocVariantType.VarType;
   VOptions := JSON_OPTIONS[true];
 end;
@@ -32080,7 +32329,7 @@ begin
   case JSON^ of
   '[': begin
     repeat inc(JSON) until not(JSON^ in [#1..' ']);
-    n := JSONArrayCount(JSON);
+    n := JSONArrayCount(JSON); // may be slow if JSON is huge (not very common)
     if n<0 then
       exit; // invalid content
     VKind := dvArray;
@@ -32101,7 +32350,7 @@ begin
   end;
   '{': begin
     repeat inc(JSON) until not(JSON^ in [#1..' ']);
-    n := JSONObjectPropCount(JSON);
+    n := JSONObjectPropCount(JSON); // may be slow if JSON is huge (not very common)
     if n<0 then
       exit; // invalid content
     VKind := dvObject;
@@ -32146,7 +32395,7 @@ end;
 function TDocVariantData.InitJSON(const JSON: RawUTF8;
   aOptions: TDocVariantOptions): boolean;
 var tmp: pointer;
-    buf: array[0..511] of AnsiChar; // avoid memory allocation in most cases
+    buf: array[0..4095] of AnsiChar; // avoid memory allocation in most cases
     L: integer;
 begin
   L := length(JSON);
@@ -32154,10 +32403,11 @@ begin
     result := false;
     exit;
   end;
-  if L<sizeof(buf) then
+  inc(L); // include ending #0
+  if L<=sizeof(buf) then
     tmp := @buf else
-    GetMem(tmp,L+1); // +1 to include ending #0
-  Move(Pointer(JSON)^,tmp^,L+1); // make private copy
+    GetMem(tmp,L);
+  MoveFast(Pointer(JSON)^,tmp^,L); // make private copy
   try
     result := InitJSONInPlace(tmp,aOptions)<>nil;
   finally
@@ -32169,6 +32419,7 @@ end;
 procedure TDocVariantData.InitCSV(CSV: PUTF8Char; aOptions: TDocVariantOptions;
   const NameValueSep, ItemSep: AnsiChar; DoTrim: boolean);
 var n,v: RawUTF8;
+    val: variant;
 begin
   Init(aOptions,dvObject);
   while CSV<>nil do begin
@@ -32178,7 +32429,8 @@ begin
       v := trim(v);
     if n='' then
       break;
-    AddValue(n,RawUTF8ToVariant(v));
+    RawUTF8ToVariant(v,val);
+    AddValue(n,val);
   end;
 end;
 
@@ -32321,6 +32573,8 @@ end;
 function TDocVariantData.SearchItemByProp(const aPropName,aPropValue: RawUTF8;
   aCaseSensitive: boolean): integer;
 var i: integer;
+    v: RawUTF8;
+    wasString: boolean;
 begin
   if VKind=dvArray then
     for result := 0 to VCount-1 do
@@ -32331,9 +32585,11 @@ begin
             if aCaseSensitive then begin
               if VValue[i]=aPropValue then
                 exit;
-            end else
-            if IdemPropNameU(VariantToUTF8(VValue[i]),aPropValue) then
-              exit;
+            end else begin
+              VariantToUTF8(VValue[i],v,wasString);
+              if IdemPropNameU(v,aPropValue) then
+                exit;
+            end;
         end;
   result := -1;
 end;
@@ -32470,10 +32726,10 @@ begin
     VarClear(VValue[Index]);
     if Index<VCount then begin
       if VName<>nil then begin
-        move(VName[Index+1],VName[Index],(VCount-Index)*sizeof(pointer));
+        MoveFast(VName[Index+1],VName[Index],(VCount-Index)*sizeof(pointer));
         PtrUInt(VName[VCount]) := 0; // avoid GPF
       end;
-      move(VValue[Index+1],VValue[Index],(VCount-Index)*sizeof(variant));
+      MoveFast(VValue[Index+1],VValue[Index],(VCount-Index)*sizeof(variant));
       TVarData(VValue[VCount]).VType := varEmpty; // avoid GPF
     end;
     result := true;
@@ -32516,7 +32772,8 @@ begin
         exit;
   end else
     for result := 0 to VCount-1 do
-      if IdemPropNameU(VName[result],aName,aNameLen) then
+      if (length(VName[result])=aNameLen) and
+         IdemPropNameUSameLen(pointer(VName[result]),aName,aNameLen) then
         exit;
   result := -1;
 end;
@@ -32853,7 +33110,7 @@ begin
   ToRawUTF8DynArray(result);
 end;
 
-procedure TDocVariantData.ToTextPairs(out result: RawUTF8;
+procedure TDocVariantData.ToTextPairsVar(out result: RawUTF8;
   const NameValueSep, ItemSep: RawUTF8; Escape: TTextWriterKind);
 var i: integer;
 begin
@@ -32885,7 +33142,7 @@ end;
 function TDocVariantData.ToTextPairs(const NameValueSep: RawUTF8='=';
   const ItemSep: RawUTF8=#13#10): RawUTF8;
 begin
-  ToTextPairs(result,NameValueSep,ItemSep);
+  ToTextPairsVar(result,NameValueSep,ItemSep);
 end;
 
 procedure TDocVariantData.ToArrayOfConst(out Result: TTVarRecDynArray);
@@ -33071,8 +33328,8 @@ procedure TDocVariant.Clear(var V: TVarData);
 begin
   //Assert(V.VType=DocVariantType.VarType);
   VariantDynArrayClear(TDocVariantData(V).VValue);
-  Finalize(TDocVariantData(V).VName,1);
-  ZeroFill(V); // will set V.VType := varEmpty and VCount=0
+  TDocVariantData(V).VName := nil;
+  ZeroFill(@V); // will set V.VType := varEmpty and VCount=0
 end;
 
 procedure TDocVariant.Copy(var Dest: TVarData; const Source: TVarData;
@@ -33651,9 +33908,9 @@ begin
   SetCount(n+1);
   if cardinal(Index)<cardinal(n) then begin
     P := pointer(PtrUInt(fValue^)+PtrUInt(Index)*ElemSize);
-    Move(P[0],P[ElemSize],cardinal(n-Index)*ElemSize);
+    MoveFast(P[0],P[ElemSize],cardinal(n-Index)*ElemSize);
     if ElemType<>nil then
-      fillchar(P[0],ElemSize,0); // avoid GPF in ElemCopy() below
+      FillcharFast(P[0],ElemSize,0); // avoid GPF in ElemCopy() below
   end else
     // Index>=Count -> add at the end
     P := pointer(PtrUInt(fValue^)+PtrUInt(n)*ElemSize);
@@ -33678,13 +33935,13 @@ begin
   P := pointer(PtrUInt(fValue^)+PtrUInt(aIndex)*ElemSize);
   if ElemType<>nil then
     _Finalize(P,ElemType) else
-    if IsObjArray then
+    if GetIsObjArray then
       FreeAndNil(PObject(P)^);
   if n>aIndex then begin
     len := cardinal(n-aIndex)*ElemSize;
-    move(P[ElemSize],P[0],len);
+    MoveFast(P[ElemSize],P[0],len);
     if ElemType<>nil then // avoid GPF
-      fillchar(P[len],ElemSize,0);
+      FillcharFast(P[len],ElemSize,0);
   end;
   SetCount(n);
 end;
@@ -33852,12 +34109,12 @@ begin
   // store dynamic array elements content
   P := fValue^;
   if ElemType=nil then
-    if IsObjArray then
+    if GetIsObjArray then
       raise ESynException.CreateUTF8('TDynArray.SaveTo(%) is a T*ObjArray',
         [PShortString(@PDynArrayTypeInfo(ArrayType).NameLen)^]) else begin
       // binary types: store as once
       n := n*integer(ElemSize);
-      move(P^,Dest^,n);
+      MoveFast(P^,Dest^,n);
       inc(Dest,n);
     end else
     case PTypeKind(ElemType)^ of
@@ -33874,7 +34131,7 @@ begin
         end;
         Dest := pointer(ToVarUInt32(LenBytes,pointer(Dest)));
         if LenBytes>0 then begin
-          move(pointer(PPtrUInt(P)^)^,Dest^,LenBytes);
+          MoveFast(pointer(PPtrUInt(P)^)^,Dest^,LenBytes);
           inc(Dest,LenBytes);
         end;
         inc(P,sizeof(PtrUInt));
@@ -33900,7 +34157,7 @@ begin
         assert(FieldTable^.Size=ElemSize);
         {$endif}
         n := n*integer(ElemSize);
-        move(P^,Dest^,n);
+        MoveFast(P^,Dest^,n);
         inc(Dest,n);
       end else begin
         for i := 1 to n do begin
@@ -33938,7 +34195,7 @@ begin
   if n=0 then
     exit;
   if ElemType=nil then
-    if IsObjArray then
+    if GetIsObjArray then
       raise ESynException.CreateUTF8('TDynArray.SaveToLength(%) is a T*ObjArray',
         [PShortString(@PDynArrayTypeInfo(ArrayType).NameLen)^]) else
       inc(result,integer(ElemSize)*n) else begin
@@ -34039,6 +34296,40 @@ begin
     result := n;
 end;
 
+function JSONArrayItem(P: PUTF8Char; Index: integer): PUTF8Char;
+begin
+  if P<>nil then begin
+    P := GotoNextNotSpace(P);
+    if P^='[' then begin
+      P := GotoNextNotSpace(P+1);
+      while P^<>']' do begin
+        if Index<=0 then begin
+          result := P;
+          exit;
+        end;
+        case P^ of
+        '"': begin
+          P := GotoEndOfJSONString(P);
+          if P^<>'"' then
+            break; // invalid content
+          inc(P);
+        end;
+        '{','[': begin
+          P := GotoNextJSONObjectOrArray(P);
+          if P=nil then
+            break; // invalid content
+        end;
+        end;
+        while not (P^ in [#0,',',']']) do inc(P);
+        if P^<>',' then break;
+        repeat inc(P) until not(P^ in [#1..' ']);
+        dec(Index);
+      end;
+    end;
+  end;
+  result := nil;
+end;
+
 function JSONArrayCount(P,PMax: PUTF8Char): integer;
 var n: integer;
 begin
@@ -34100,6 +34391,149 @@ begin
   until false;
   if P^='}' then
     result := n;
+end;
+
+function JsonObjectItem(P: PUTF8Char; const PropName: RawUTF8;
+  PropNameFound: PRawUTF8): PUTF8Char;
+var name: shortstring; // no memory allocation nor P^ modification
+    PropNameLen: integer;
+    PropNameUpper: array[byte] of AnsiChar;
+begin
+  if P<>nil then begin
+    P := GotoNextNotSpace(P);
+    PropNameLen := length(PropName);
+    if PropNameLen<>0 then begin
+      if PropName[PropNameLen]='*' then begin
+        UpperCopy255(PropNameUpper,pointer(PropName),PropNameLen-1)^ := #0;
+        PropNameLen := 0;
+      end;
+      if P^='{' then
+        P := GotoNextNotSpace(P+1);
+      while P^<>'}' do begin
+        GetJSONPropName(P,name);
+        if (name[0]=#0) or (name[0]>#200) then
+          break;
+        if PropNameLen=0 then begin
+          name[ord(name[0])+1] := #0; // make ASCIIZ
+          if IdemPChar(@name[1],@PropNameUpper) then begin
+            if PropNameFound<>nil then
+              PropNameFound^ := name;
+            result := P;
+            exit;
+          end;
+        end else
+        if IdemPropName(name,pointer(PropName),PropNameLen) then begin
+          result := P;
+          exit;
+        end;
+        case P^ of
+        '"': begin
+          P := GotoEndOfJSONString(P);
+          if P^<>'"' then
+            break; // invalid content
+          inc(P);
+        end;
+        '{','[': begin
+          P := GotoNextJSONObjectOrArray(P);
+          if P=nil then
+            break; // invalid content
+        end;
+        end;
+        while not (P^ in [#0,',',']']) do inc(P);
+        if P^<>',' then break;
+        repeat inc(P) until not(P^ in [#1..' ']);
+      end;
+    end;
+  end;
+  result := nil;
+end;
+
+function JsonObjectByPath(JsonObject,PropPath: PUTF8Char): PUTF8Char;
+var objName: RawUTF8;
+begin
+  result := nil;
+  if (JsonObject=nil) or (PropPath=nil) then
+    exit;
+  repeat
+    objName := GetNextItem(PropPath,'.');
+    if objName='' then
+      exit;
+    JsonObject := JsonObjectItem(JsonObject,objName);
+    if JsonObject=nil then
+      exit;
+    if PropPath=nil then
+      break; // found full name scope
+  until false;
+  result := JsonObject;
+end;
+
+function JsonObjectsByPath(JsonObject,PropPath: PUTF8Char): RawUTF8;
+var itemName,objName,propNameFound,objPath: RawUTF8;
+    start,ending,obj: PUTF8Char;
+    WR: TTextWriter;
+  procedure AddFromStart(const name: RaWUTF8);
+  begin
+    start := GotoNextNotSpace(start);
+    ending := GotoEndJSONItem(start);
+    if ending=nil then
+      exit;
+    if WR=nil then begin
+      WR := TTextWriter.CreateOwnedStream;
+      WR.Add('{');
+    end else
+      WR.Add(',');
+    WR.AddFieldName(name);
+    while (ending>start) and (ending[-1]<=' ') do dec(ending); // trim right
+    WR.AddNoJSONEscape(start,ending-start);
+  end;
+begin
+  result := '';
+  if (JsonObject=nil) or (PropPath=nil) then
+    exit;
+  WR := nil;
+  try
+    repeat
+      itemName := GetNextItem(PropPath,',');
+      if itemName='' then
+        break;
+      if itemName[length(itemName)]<>'*' then begin
+        start := JsonObjectByPath(JsonObject,pointer(itemName));
+        if start<>nil then
+          AddFromStart(itemName);
+      end else begin
+        objPath := '';
+        obj := pointer(itemName);
+        repeat
+          objName := GetNextItem(obj,'.');
+          if objName='' then
+            exit;
+          propNameFound := '';
+          JsonObject := JsonObjectItem(JsonObject,objName,@propNameFound);
+          if JsonObject=nil then
+            exit;
+          if obj=nil then begin // found full name scope
+            start := JsonObject;
+            repeat
+              AddFromStart(objPath+propNameFound);
+              ending := GotoNextNotSpace(ending);
+              if ending^<>',' then
+                break;
+              propNameFound := '';
+              start := JsonObjectItem(GotoNextNotSpace(ending+1),objName,@propNameFound);
+            until start=nil;
+            break;
+          end else
+            objPath := objPath+objName+'.';
+        until false;
+      end;
+    until PropPath=nil;
+    if WR<>nil then begin
+      WR.Add('}');
+      WR.SetText(result);
+    end;
+  finally
+    WR.Free;
+  end;
 end;
 
 const
@@ -34267,9 +34701,9 @@ begin // code below must match TTextWriter.AddDynArrayJSON()
        (LoadFrom(pointer(Base64ToBin(Val+3)))=nil) then
       exit; // invalid content
   end else begin
-    if IsObjArray then
+    if GetIsObjArray then
       for i := 0 to Count-1 do // force release any previous instance
-        FreeAndNil(PObjectArray(fValue^)[i]);
+        FreeAndNil(PObjectArray(fValue^)^[i]);
     SetCount(n); // fast allocation of the whole dynamic array memory at once
     case T of
     {$ifndef NOVARIANTS}
@@ -34423,12 +34857,12 @@ begin
   // retrieve dynamic array elements content
   P := fValue^;
   if ElemType=nil then
-  if IsObjArray then
+  if GetIsObjArray then
     raise ESynException.CreateUTF8('TDynArray.LoadFrom(%) is a T*ObjArray',
       [PShortString(@PDynArrayTypeInfo(ArrayType).NameLen)^]) else begin
     // binary type was stored as once
     n := n*integer(ElemSize);
-    move(Source^,P^,n);
+    MoveFast(Source^,P^,n);
     inc(Source,n);
   end else
   case PTypeKind(ElemType)^ of
@@ -34468,7 +34902,7 @@ begin
         assert(FieldTable^.Size=ElemSize);
         {$endif}
         n := n*integer(ElemSize);
-        move(Source^,P^,n);
+        MoveFast(Source^,P^,n);
         inc(Source,n);
       end else begin
         for i := 1 to n do begin
@@ -34837,13 +35271,14 @@ end;
 procedure TDynArray.Copy(const Source: TDynArray);
 var n: Cardinal;
 begin
-  if (fValue=nil) or (Source.fValue=nil) or (ArrayType<>Source.ArrayType) then
-    Exit;
+  if (fValue=nil) or (ArrayType<>Source.ArrayType) then
+    exit;
   SetCapacity(Source.Capacity);
   n := Source.Count;
-  if ElemType=nil then
-    move(Source.fValue^^,fValue^^,n*ElemSize) else
-    CopyArray(fValue^,Source.fValue^,ElemType,n);
+  if n<>0 then
+    if ElemType=nil then
+      MoveFast(Source.fValue^^,fValue^^,n*ElemSize) else
+      CopyArray(fValue^,Source.fValue^,ElemType,n);
 end;
 
 procedure TDynArray.CopyFrom(const Source; MaxElem: integer);
@@ -34914,37 +35349,37 @@ begin
 end;
 
 procedure TDynArray.Init(aTypeInfo: pointer; var aValue; aCountPointer: PInteger=nil);
-var Typ: PDynArrayTypeInfo absolute aTypeInfo;
 begin
-  fTypeInfo := aTypeInfo;
   fValue := @aValue;
-  if Typ^.Kind<>tkDynArray then
-    raise ESynException.CreateUTF8('Not a dynamic array: %',[PShortString(@Typ^.NameLen)^]);
-  {$ifdef FPC_REQUIRES_PROPER_ALIGNMENT}
-  Typ := GetFPCAlignPtr(Typ);
-  {$else}
-  inc(PtrUInt(Typ),Typ^.NameLen);
-  {$endif}
-  with Typ^ do begin
-    fElemSize := elSize;
-    if elType=nil then
-      fElemType := nil else
-      {$ifndef FPC}
-      fElemType := elType^;
-      {$else} begin
-      if TTypeKind(PByte(elType)^) in tkManagedTypes then
-        fElemType := elType else
-        fElemType := nil;
-      end;
-      {$endif}
+  fTypeInfo := aTypeInfo;
+  with PDynArrayTypeInfo(aTypeInfo)^ do begin
+    if kind<>tkDynArray then
+      raise ESynException.CreateUTF8('Not a dynamic array: %',[PShortString(@NameLen)^]);
+    {$ifdef FPC_REQUIRES_PROPER_ALIGNMENT}
+    aTypeInfo := GetFPCAlignPtr(aTypeInfo);
+    {$else}
+    inc(PtrUInt(aTypeInfo),NameLen);
+    {$endif}
   end;
-  fSorted := false;
-  fCompare := nil;
-  fKnownType := djNone;
-  fKnownSize := 0;
+  with PDynArrayTypeInfo(aTypeInfo)^ do begin
+    fElemSize := elSize;
+    fElemType := elType;
+  end;
+  if fElemType<>nil then
+    {$ifndef FPC}
+    fElemType := PPointer(fElemType)^;
+    {$else} 
+    if not (PTypeKind(fElemType)^ in tkManagedTypes) then
+      fElemType := nil; // as with Delphi
+    {$endif}
   fCountP := aCountPointer;
   if fCountP<>nil then
     fCountP^ := 0;
+  fCompare := nil;
+  fKnownSize := 0;
+  fSorted := false;
+  fKnownType := djNone;
+  fIsObjArray := oaUnknown;
 end;
 
 procedure TDynArray.InitSpecific(aTypeInfo: pointer; var aValue; aKind: TDynArrayKind;
@@ -34999,10 +35434,19 @@ asm
 end;
 {$endif}
 
-function TDynArray.IsObjArray: boolean;
+function TDynArray.GetIsObjArray: boolean;
 begin
-  result := Assigned(DynArrayIsObjArray) and (fElemSize=sizeof(pointer)) and
-    (fElemType=nil) and DynArrayIsObjArray(fTypeInfo);
+  if fIsObjArray=oaUnknown then
+    SetIsObjArray((fElemSize=sizeof(pointer)) and (fElemType=nil) and
+          Assigned(DynArrayIsObjArray) and DynArrayIsObjArray(fTypeInfo));
+  result := fIsObjArray=oaTrue;
+end;
+
+procedure TDynArray.SetIsObjArray(aValue: boolean);
+begin
+  if aValue then
+    fIsObjArray := oaTrue else
+    fIsObjArray := oaFalse; 
 end;
 
 procedure TDynArray.InternalSetLength(NewLength: PtrUInt);
@@ -35020,9 +35464,9 @@ begin // this method is faster than default System.DynArraySetLength() function
       exit;
     end;
     {$endif}
-    if IsObjArray then
+    if GetIsObjArray then
       for i := 0 to Count-1 do
-        PObjectArray(fValue^)[i].Free;
+        PObjectArray(fValue^)^[i].Free;
     _DynArrayClear(fValue^,ArrayType);
     exit;
   end;
@@ -35043,9 +35487,9 @@ begin // this method is faster than default System.DynArraySetLength() function
     if NewLength<OldLength then
       if ElemType<>nil then
         _FinalizeArray(pa+NeededSize,ElemType,OldLength-NewLength) else
-        if IsObjArray then
+        if GetIsObjArray then
           for i := NewLength to OldLength-1 do
-            PObjectArray(fValue^)[i].Free;
+            PObjectArray(fValue^)^[i].Free;
     ReallocMem(p,neededSize);
   end else begin
     InterlockedDecrement(PInteger(@p^.refCnt)^); // FPC has refCnt: PtrInt
@@ -35055,10 +35499,10 @@ begin // this method is faster than default System.DynArraySetLength() function
       minLength := newLength;
     if ElemType<>nil then begin
       pp := pa+Sizeof(TDynArrayRec);
-      FillChar(pp^,minLength*elemSize,0);
+      FillcharFast(pp^,minLength*elemSize,0);
       CopyArray(pp,fValue^,ElemType,minLength)
     end else
-      Move(fValue^,pa[Sizeof(TDynArrayRec)],minLength*elemSize);
+      MoveFast(fValue^,pa[Sizeof(TDynArrayRec)],minLength*elemSize);
   end;
   // set refCnt=1 and new length to the heap memory structure
   with p^ do begin
@@ -35071,8 +35515,10 @@ begin // this method is faster than default System.DynArraySetLength() function
   end;
   Inc(PtrUInt(p),Sizeof(p^));
   // reset new allocated elements content to zero
-  OldLength := OldLength*elemSize;
-  FillChar(pa[OldLength],neededSize-OldLength-Sizeof(TDynArrayRec),0);
+  if NewLength>OldLength then begin
+    OldLength := OldLength*elemSize;
+    FillcharFast(pa[OldLength],neededSize-OldLength-Sizeof(TDynArrayRec),0);
+  end;
   fValue^ := p;
 end;
 
@@ -35159,7 +35605,7 @@ begin
   if aCount>0 then begin
     P := PAnsiChar(fValue^)+aFirstIndex*ElemSize;
     if ElemType=nil then
-      move(P^,D^^,aCount*ElemSize) else
+      MoveFast(P^,D^^,aCount*ElemSize) else
       CopyArray(D^,P,ElemType,aCount);
   end;
 end;
@@ -35182,7 +35628,7 @@ begin
   PS := pointer(PtrUInt(DynArrayVar)+cardinal(aStartIndex)*ElemSize);
   PD := pointer(PtrUInt(fValue^)+cardinal(n)*ElemSize);
   if ElemType=nil then
-    move(PS^,PD^,cardinal(aCount)*ElemSize) else
+    MoveFast(PS^,PD^,cardinal(aCount)*ElemSize) else
     CopyArray(PD,PS,ElemType,aCount);
 end;
 
@@ -35223,13 +35669,13 @@ begin
       {$endif}
       else exit;
     end;
-  fillchar(Elem,ElemSize,0); // always fill with zero binary content
+  FillcharFast(Elem,ElemSize,0); // always fill with zero binary content
 end;
 
 procedure TDynArray.ElemCopy(const A; var B);
 begin
   if ElemType=nil then begin
-    move(A,B,ElemSize);
+    MoveFast(A,B,ElemSize);
     exit;
   end else begin
     case PTypeKind(ElemType)^ of
@@ -35264,7 +35710,7 @@ begin
       else begin
         {$ifdef FPC}
         RecordClear(B,ElemType); // inlined CopyArray()
-        move(A,B,RTTIManagedSize(ElemType));
+        MoveFast(A,B,RTTIManagedSize(ElemType));
         RecordAddRef(B,ElemType);
         {$else}
         CopyArray(@B,@A,ElemType,1);
@@ -35280,7 +35726,7 @@ begin
   if (Source<>nil) and (ElemType=nil) then
     SetString(result,Source,ElemSize) else begin
     SetString(result,nil,ElemSize);
-    FillChar(pointer(result)^,ElemSize,0);
+    FillcharFast(pointer(result)^,ElemSize,0);
     ElemLoad(Source,pointer(result)^);
   end;
 end;
@@ -35290,7 +35736,7 @@ begin
   if Source=nil then
     exit; // avoid GPF
   if ElemType=nil then
-    move(Source^,Elem,ElemSize) else
+    MoveFast(Source^,Elem,ElemSize) else
     case PTypeKind(ElemType)^ of
     tkLString{$ifdef FPC},tkLStringOld{$endif}: begin
       SetString(RawByteString(Elem),Source+4,PInteger(Source)^);
@@ -35583,7 +36029,7 @@ begin
     // copy from dynamic array found entry into Elem = Fill
     P := PAnsiChar(fValue^)+cardinal(result)*ElemSize;
     if ElemType=nil then
-      move(P^,Elem,ElemSize) else
+      MoveFast(P^,Elem,ElemSize) else
       CopyArray(@Elem,P,ElemType,1);
   end;
 end;
@@ -35602,14 +36048,14 @@ begin
       HashAdd(Elem,aHashCode,result); // ReHash only if necessary
       P := PAnsiChar(fValue^)+cardinal(result)*ElemSize;
       if ElemType=nil then
-        move(Elem,P^,ElemSize) else
+        MoveFast(Elem,P^,ElemSize) else
         CopyArray(P,@Elem,ElemType,1);
     end else
       result := -1 else begin
     // copy from Elem into dynamic array found entry = Update
     P := PAnsiChar(fValue^)+cardinal(result)*ElemSize;
     if ElemType=nil then
-      move(Elem,P^,ElemSize) else
+      MoveFast(Elem,P^,ElemSize) else
       CopyArray(P,@Elem,ElemType,1);
     ReHash;
   end;
@@ -35639,7 +36085,7 @@ var tmp: array[byte] of AnsiChar; // avoid slow heap allocation
 begin
   if PtrUInt(Elem)=0 then
     result := HASH_ONVOIDCOLISION else
-    result := Hasher(0,tmp,UpperCopy255(tmp,RawUTF8(Elem))-tmp);
+    result := Hasher(0,tmp,UpperCopy255(tmp,pointer(Elem),length(RawUTF8(Elem)))-tmp);
 end;
 
 {$ifdef UNICODE}
@@ -35969,7 +36415,7 @@ begin
   TObjectDynArray(fValue^)[Index].Free;
   dec(fCount);
   if fCount>Index then
-    move(TObjectDynArray(fValue^)[Index+1],TObjectDynArray(fValue^)[Index],
+    MoveFast(TObjectDynArray(fValue^)[Index+1],TObjectDynArray(fValue^)[Index],
       (fCount-Index)*sizeof(pointer));
 end;
 
@@ -35983,7 +36429,7 @@ begin
     except
       on Exception do;
     end;
-    Finalize(TObjectDynArray(fValue^)); // set capacity to 0
+    TObjectDynArray(fValue^) := nil; // set capacity to 0
     fCount := 0;
   end else
     if fCount>0 then
@@ -36061,7 +36507,7 @@ begin
   a[aItemIndex].Free;
   dec(n);
   if n>aItemIndex then
-    Move(a[aItemIndex+1],a[aItemIndex],(n-aItemIndex)*sizeof(TObject));
+    MoveFast(a[aItemIndex+1],a[aItemIndex],(n-aItemIndex)*sizeof(TObject));
   SetLength(a,n);
 end;
 
@@ -36135,7 +36581,7 @@ begin
   a[aItemIndex] := nil;
   dec(n);
   if n>aItemIndex then
-    Move(a[aItemIndex+1],a[aItemIndex],(n-aItemIndex)*sizeof(IInterface));
+    MoveFast(a[aItemIndex+1],a[aItemIndex],(n-aItemIndex)*sizeof(IInterface));
   TPointerDynArray(aInterfaceArray)[n] := nil; // avoid GPF in SetLength()
   SetLength(a,n);
 end;
@@ -36277,28 +36723,47 @@ constructor TInterfacedObjectWithCustomCreate.Create;
 begin // nothing to do by default - overridden constructor may add custom code
 end;
 
+
+{ TSynLocker }
+
+procedure TSynLocker.Init;
+begin
+  InitializeCriticalSection(fSection);
+end;
+
+procedure TSynLocker.Done;
+begin
+  DeleteCriticalSection(fSection);
+end;
+
+procedure TSynLocker.Lock;
+begin
+  EnterCriticalSection(fSection);
+end;
+
+procedure TSynLocker.UnLock;
+begin
+  LeaveCriticalSection(fSection);
+end;
+
+function TSynLocker.TryLock: boolean;
+begin
+  result := TryEnterCriticalSection(fSection);
+end;
+
+
 { TInterfacedObjectLocked }
 
 constructor TInterfacedObjectLocked.Create;
 begin
   inherited Create;
-  InitializeCriticalSection(fLock);
+  fSafe.Init;
 end;
 
 destructor TInterfacedObjectLocked.Destroy;
 begin
   inherited Destroy;
-  DeleteCriticalSection(fLock);
-end;
-
-procedure TInterfacedObjectLocked.Lock;
-begin
-  EnterCriticalSection(fLock);
-end;
-
-procedure TInterfacedObjectLocked.UnLock;
-begin
-  LeaveCriticalSection(fLock);
+  fSafe.Done;
 end;
 
 
@@ -36315,29 +36780,71 @@ constructor TSynPersistent.Create;
 begin // nothing to do by default - overridden constructor may add custom code
 end;
 
+{$ifndef FPC_OR_PUREPASCAL}
+
+class function TSynPersistent.NewInstance: TObject;
+asm
+        push eax  // class
+        mov eax,[eax].vmtInstanceSize
+        push eax  // size
+        call System.@GetMem
+        pop edx   // size
+        push eax  // self
+        mov cl,0
+        call dword ptr [FillcharFast]
+        pop eax   // self
+        pop edx   // class
+        mov [eax],edx // store VMT
+end; // TSynPersistent has no interface -> bypass vmtIntfTable 
+
+procedure TSynPersistent.FreeInstance;
+asm
+        push ebx
+        mov ebx,eax
+@@loop: mov ebx,[ebx] // handle three VMT levels per iteration
+        mov edx,[ebx].vmtInitTable
+        mov ebx,[ebx].vmtParent
+        test edx,edx
+        jnz @@clr
+        test ebx,ebx
+        jz @@end
+        mov ebx,[ebx]
+        mov edx,[ebx].vmtInitTable
+        mov ebx,[ebx].vmtParent
+        test edx,edx
+        jnz @@clr
+        test ebx,ebx
+        jz @@end
+        mov ebx,[ebx]
+        mov edx,[ebx].vmtInitTable
+        mov ebx,[ebx].vmtParent
+        test edx,edx
+        jnz @@clr
+        test ebx,ebx
+        jnz @@loop
+@@end:  pop ebx
+        jmp System.@FreeMem
+        // TSynPersistent has no TMonitor -> bypass TMonitor.Destroy(self)
+        // BTW, TMonitor.Destroy is private, so unreachable 
+@@clr:  push offset @@loop // parent has never any vmtInitTable -> @@loop
+        jmp RecordClear // eax=self edx=typeinfo
+end;
+
+{$endif FPC_OR_PUREPASCAL}
+
 
 { TSynPersistentLocked }
 
 constructor TSynPersistentLocked.Create;
 begin
   inherited Create;
-  InitializeCriticalSection(fLock);
+  fSafe.Init;
 end;
 
 destructor TSynPersistentLocked.Destroy;
 begin
   inherited Destroy;
-  DeleteCriticalSection(fLock);
-end;
-
-procedure TSynPersistentLocked.Lock;
-begin
-  EnterCriticalSection(fLock);
-end;
-
-procedure TSynPersistentLocked.UnLock;
-begin
-  LeaveCriticalSection(fLock);
+  fSafe.Done;
 end;
 
 
@@ -36354,7 +36861,7 @@ begin
     FlushToStream;
   P := StrInt32(@tmp[23],value);
   Len := @tmp[23]-P;
-  move(P[0],B[1],Len);
+  MoveFast(P[0],B[1],Len);
   inc(B,Len);
 end;
 
@@ -36376,7 +36883,7 @@ begin
             dec(Len,3) else
           dec(Len,2) else
         dec(Len);
-  move(P[0],B[1],Len);
+  MoveFast(P[0],B[1],Len);
   inc(B,Len);
 end;
 
@@ -36447,7 +36954,7 @@ begin
     FlushToStream;
   P := StrUInt32(@tmp[15],Value);
   Len := @tmp[15]-P;
-  move(P[0],B[1],Len);
+  MoveFast(P[0],B[1],Len);
   inc(B,Len);
 end;
 
@@ -36475,7 +36982,7 @@ begin
     AddNoJSONEscape(@S[1],ExtendedToString(S,Value,SINGLE_PRECISION));
 end;
 
-{$ifndef CPU64}
+{$ifndef CPU64} // Add(Value: PtrInt) already implemented it
 procedure TTextWriter.Add(Value: Int64);
 var tmp: array[0..23] of AnsiChar;
     P: PAnsiChar;
@@ -36483,9 +36990,13 @@ var tmp: array[0..23] of AnsiChar;
 begin
   if BEnd-B<=24 then
     FlushToStream;
-  P := StrInt64(@tmp[23],Value);
+  if Value<0 then begin
+    P := StrUInt64(@tmp[23],-Value)-1;
+    P^ := '-';
+  end else
+    P := StrUInt64(@tmp[23],Value);
   Len := @tmp[23]-P;
-  move(P[0],B[1],Len);
+  MoveFast(P[0],B[1],Len);
   inc(B,Len);
 end;
 {$endif}
@@ -36509,7 +37020,7 @@ begin
       B^ := '0'; // '.5' -> '0.5'
       inc(B);
     end;
-    move(P^,B^,L);
+    MoveFast(P^,B^,L);
     inc(B,L-1);
   end;
 end;
@@ -36582,7 +37093,7 @@ begin
   if BEnd-B<=Integer(ntabs)+1 then
     FlushToStream;
   pWord(B+1)^ := 13+10 shl 8; // CR + LF
-  fillchar(B[3],ntabs,9); // indentation using tabs
+  FillcharFast(B[3],ntabs,9); // indentation using tabs
   inc(B,ntabs+2);
 end;
 
@@ -36592,7 +37103,7 @@ begin
     exit; // avoid buffer overflow
   if BEnd-B<=aCount then
     FlushToStream;
-  fillchar(B[1],aCount,ord(aChar));
+  FillcharFast(B[1],aCount,ord(aChar));
   inc(B,aCount);
 end;
 
@@ -37381,7 +37892,7 @@ begin
   if BEnd-B<=ord(Text[0])+2 then
     FlushToStream;
   inc(B);
-  move(Text[1],B[0],ord(Text[0]));
+  MoveFast(Text[1],B[0],ord(Text[0]));
   inc(B,ord(Text[0]));
   pWord(B)^ := 13+10 shl 8; // CR + LF
   inc(B);
@@ -37708,7 +38219,7 @@ begin
       if Len<i then
         i := Len;
       // add UTF-8 bytes
-      move(P^,B^,i);
+      MoveFast(P^,B^,i);
       inc(B,i);
       if i=Len then
         break;
@@ -38206,7 +38717,7 @@ begin
   if BEnd-B<=ord(PropName[0])+3 then
     FlushToStream;
   B[1] := '"';
-  move(PropName[1],B[2],ord(PropName[0]));
+  MoveFast(PropName[1],B[2],ord(PropName[0]));
   inc(B,ord(PropName[0])+2);
   PWord(B)^ := ord('"')+ord(':')shl 8;
   inc(B);
@@ -38222,7 +38733,7 @@ begin
   if BEnd-B<=FieldNameLen+3 then
     FlushToStream;
   B[1] := '"';
-  move(FieldName^,B[2],FieldNameLen);
+  MoveFast(FieldName^,B[2],FieldNameLen);
   inc(B,FieldNameLen+2);
   PWord(B)^ := ord('"')+ord(':')shl 8;
   inc(B);
@@ -38263,7 +38774,7 @@ begin
     exit;
   if BEnd-B<=ord(Text[0]) then
     FlushToStream;
-  move(Text[1],B[1],ord(Text[0]));
+  MoveFast(Text[1],B[1],ord(Text[0]));
   inc(B,ord(Text[0]));
 end;
 
@@ -38321,7 +38832,7 @@ begin
   if L<fTempBufSize then begin
     if BEnd-B<=L then
       FlushToStream;
-    move(pointer(Text)^,B[1],L);
+    MoveFast(pointer(Text)^,B[1],L);
     inc(B,L);
   end else
     AddNoJSONEscape(pointer(Text),L);
@@ -38365,7 +38876,7 @@ begin
     if BEnd-B<=L*count then
       FlushToStream;
     for i := 1 to count do begin
-      move(pointer(Text)^,B[1],L);
+      MoveFast(pointer(Text)^,B[1],L);
       inc(B,L);
     end;
   end;
@@ -38602,7 +39113,7 @@ begin
     dec(L);
   LI := length(fEchoBuf); // faster append to fEchoBuf
   SetLength(fEchoBuf,LI+L);
-  Move(P^,PByteArray(fEchoBuf)[LI],L);
+  MoveFast(P^,PByteArray(fEchoBuf)[LI],L);
 end;
 
 procedure TTextWriter.EchoReset;
@@ -38709,7 +39220,7 @@ begin
   if P=nil then exit; // unexpected end
   // trim first row data
   if P^<>#0 then
-    move(P^,PBegin^,PEnd-P); // erase content
+    MoveFast(P^,PBegin^,PEnd-P); // erase content
   fStream.Seek(PBegin-P,soCurrent); // adjust current stream position
 end;
 
@@ -38827,7 +39338,7 @@ begin
   NewValues := pointer(Values)=nil;
   SetLength(Values,n);
   if not NewValues then
-    fillchar(Values[0],n*sizeof(PUTF8Char),0); // SetLength() could leave it not void
+    FillcharFast(Values[0],n*sizeof(PUTF8Char),0); // SetLength() could leave it not void
   dec(n);
   if P=nil then
     exit;
@@ -39142,6 +39653,56 @@ begin  // should match GotoNextJSONObjectOrArray()
   result := Name;
 end;
 
+procedure GetJSONPropName(var P: PUTF8Char; out PropName: shortstring);
+var Name: PAnsiChar;
+begin // match GotoNextJSONObjectOrArray() and overloaded GetJSONPropName()
+  PropName[0] := #0;
+  if P=nil then
+    exit;
+  if P^ in [#1..' '] then repeat inc(P) until not(P^ in [#1..' ']);
+  Name := pointer(P);
+  case P^ of
+  '_','A'..'Z','a'..'z','0'..'9','$': begin // e.g. '{age:{$gt:18}}'
+    repeat
+      inc(P);
+    until not (P^ in ['_','A'..'Z','a'..'z','0'..'9','.']);
+    if P^ in [#1..' '] then begin
+      SetString(PropName,Name,P-Name);
+      inc(P);
+    end;
+    if P^ in [#1..' '] then repeat inc(P) until not(P^ in [#1..' ']);
+    if not (P^ in [':','=']) then // allow both age:18 and age=18 pairs
+      exit;
+    inc(P);
+  end;
+  '''': begin // single quotes won't handle nested quote character
+    inc(P);
+    inc(Name);
+    while P^<>'''' do
+      if P^<' ' then
+        exit else
+        inc(P);
+    SetString(PropName,Name,P-Name);
+    repeat inc(P) until not(P^ in [#1..' ']);
+    if P^<>':' then
+      exit;
+    inc(P);
+  end;
+  '"': begin
+    inc(Name);
+    P := GotoEndOfJSONString(P); // won't unescape JSON strings
+    if P^<>'"' then
+      exit;
+    SetString(PropName,Name,P-Name);
+    repeat inc(P) until not(P^ in [#1..' ']);
+    if P^<>':' then
+      exit;
+    inc(P);
+  end else
+    exit;
+  end;
+end;
+
 function GotoNextJSONPropName(P: PUTF8Char): PUTF8Char;
 label s;
 begin  // should match GotoNextJSONObjectOrArray()
@@ -39188,6 +39749,8 @@ var Value: PUTF8Char;
     wStr: boolean;
 begin
   result := nil;
+  if P=nil then
+    exit;
   while ord(P^) in [1..32] do inc(P);
   if HandleValuesAsObjectOrArray and (P^ in ['{','[']) then begin
     Value := P;
@@ -39279,32 +39842,32 @@ end;
 function GotoEndJSONItem(P: PUTF8Char): PUTF8Char;
 label next;
 begin
- result := nil; // to notify unexpected end
- if P^ in [#1..' '] then repeat inc(P) until not(P^ in [#1..' ']);
- // get a field
- case P^ of
- #0: exit;
- '"': begin
-   P := GotoEndOfJSONString(P);
-   if P^<>'"' then
-     exit; // P^ should be '"' here -> execute repeat.. below
- end;
- '[','{': begin
-   P := GotoNextJSONObjectOrArray(P);
-   if P=nil then
-     exit;
-   if P^ in [#1..' '] then repeat inc(P) until not(P^ in [#1..' ']);
-   goto next;
- end;
- end;
- repeat // numeric or true/false/null or MongoDB extended {age:{$gt:18}}
-   inc(P);
-   if P^=#0 then exit; // unexpected end
- until P^ in [':',',',']','}'];
+  result := nil; // to notify unexpected end
+  if P^ in [#1..' '] then repeat inc(P) until not(P^ in [#1..' ']);
+  // get a field
+  case P^ of
+  #0: exit;
+  '"': begin
+    P := GotoEndOfJSONString(P);
+    if P^<>'"' then
+      exit; // P^ should be '"' here -> execute repeat.. below
+  end;
+  '[','{': begin
+    P := GotoNextJSONObjectOrArray(P);
+    if P=nil then
+      exit;
+    if P^ in [#1..' '] then repeat inc(P) until not(P^ in [#1..' ']);
+    goto next;
+  end;
+  end;
+  repeat // numeric or true/false/null or MongoDB extended {age:{$gt:18}}
+    inc(P);
+    if P^=#0 then exit; // unexpected end
+  until P^ in [':',',',']','}'];
 next:
- if P^=#0 then
-   exit;
- result := P;
+  if P^=#0 then
+    exit;
+  result := P;
 end;
 
 function GetJSONItemAsRawJSON(var P: PUTF8Char; EndOfObject: PAnsiChar=nil): RawJSON;
@@ -39363,7 +39926,7 @@ end;
 
 function GotoNextJSONObjectOrArrayInternal(P,PMax: PUTF8Char; EndChar: AnsiChar): PUTF8Char;
 label Prop;
-begin
+begin // should match GetJSONPropName()
   result := nil;
   repeat
     case P^ of
@@ -40182,7 +40745,7 @@ begin
     InvalidTextLengthMin(MinLength,ErrorMsg) else
   if L>MaxLength then
     ErrorMsg := Format(sInvalidTextLengthMax,[MaxLength,Character01n(MaxLength)]) else begin
-    fillchar(Min,sizeof(Min),0);
+    FillcharFast(Min,sizeof(Min),0);
     L := length(Value);
     for i := 1 to L do
     case Value[i] of
@@ -40498,12 +41061,12 @@ end;
 
 procedure TPrecisionTimer.Init;
 begin
-  FillChar(self,sizeof(self),0);
+  FillcharFast(self,sizeof(self),0);
 end;
 
 procedure TPrecisionTimer.Start;
 begin
-  FillChar(self,sizeof(self),0);
+  FillcharFast(self,sizeof(self),0);
   QueryPerformanceCounter(iStart);
   iLast := iStart;
 end;
@@ -40762,7 +41325,7 @@ procedure RetrieveInfo;
 {$ifdef MSWINDOWS}
 var MemoryStatus: TMemoryStatusEx;
 begin
-  FillChar(MemoryStatus,SizeOf(MemoryStatus),0);
+  FillcharFast(MemoryStatus,SizeOf(MemoryStatus),0);
   MemoryStatus.dwLength := SizeOf(MemoryStatus);
   GlobalMemoryStatusEx(MemoryStatus);
   FMemoryLoadPercent := MemoryStatus.dwMemoryLoad;
@@ -40958,12 +41521,12 @@ end;
 
 constructor TAutoLocker.Create;
 begin
-  InitializeCriticalSection(fLock);
+  fSafe.Init;
 end;
 
 destructor TAutoLocker.Destroy;
 begin
-  DeleteCriticalSection(fLock);
+  fSafe.Done;
   inherited;
 end;
 
@@ -40974,12 +41537,12 @@ end;
 
 procedure TAutoLocker.Enter;
 begin
-  EnterCriticalSection(fLock);
+  fSafe.Lock;
 end;
 
 procedure TAutoLocker.Leave;
 begin
-  LeaveCriticalSection(fLock);
+  fSafe.UnLock;
 end;
 
 
@@ -41135,20 +41698,6 @@ begin
 {$endif}
 end;
 
-{$ifndef LVCL}
-
-{ TSynCriticalSection }
-
-{$ifndef DELPHI5OROLDER}
-{$ifndef HASINLINE}
-function TSynCriticalSection.TryEnter: boolean;
-begin
-  result := TryEnterCriticalSection(FSection);
-end;
-{$endif}
-{$endif}
-
-{$endif LVCL}
 
 { TSynCache }
 
@@ -41342,10 +41891,10 @@ begin
   if (fObjects<>nil) and fObjectsOwned then
     FreeAndNil(fObjects[Index]);
   if Index<fCount then begin
-    move(fList[Index+1],fList[Index],(fCount-Index)*sizeof(fList[0]));
+    MoveFast(fList[Index+1],fList[Index],(fCount-Index)*sizeof(fList[0]));
     PPointer(@fList[fCount])^ := nil; // avoid GPF
     if fObjects<>nil then begin
-      move(fObjects[Index+1],fObjects[Index],(fCount-Index)*sizeof(fObjects[0]));
+      MoveFast(fObjects[Index+1],fObjects[Index],(fCount-Index)*sizeof(fObjects[0]));
       fObjects[fCount] := nil; // avoid GPF if fObjectsOwned is set
     end;
   end;
@@ -41455,13 +42004,13 @@ begin
   repeat
     Len := length(fList[i]);
     if Len>0 then begin
-      Move(pointer(fList[i])^,P^,Len);
+      MoveFast(pointer(fList[i])^,P^,Len);
       inc(P,Len);
     end;
     inc(i);
     if i>=fCount then
       Break;
-    Move(pointer(Delimiter)^,P^,DelimLen);
+    MoveFast(pointer(Delimiter)^,P^,DelimLen);
     inc(P,DelimLen);
   until false;
 end;
@@ -41893,18 +42442,18 @@ function TPointerClassHash.Find(aInfo: pointer): TPointerClassHashed;
 var i: integer;
 begin
   if self<>nil then begin
-    if fHashed then begin
+    if not fHashed then begin // Count<TOBJECTLISTHASHED_START_HASHING_COUNT
+      for i := 0 to fCount-1 do begin
+        result := TPointerClassHashed(List[i]);
+        if result.Info=aInfo then
+          exit;
+      end;
+      result := nil;
+    end else begin
       i := IndexOf(aInfo);
       if i>=0 then
         result := TPointerClassHashed(List[i]) else
         result := nil;
-    end else begin
-      for i := 0 to fCount-1 do // Count<TOBJECTLISTHASHED_START_HASHING_COUNT
-        if TPointerClassHashed(List[i]).Info=aInfo then begin
-          result := TPointerClassHashed(List[i]);
-          exit;
-        end;
-      result := nil;
     end;
   end else
     result := nil;
@@ -41916,12 +42465,12 @@ end;
 constructor TPointerClassHashLocked.Create;
 begin
   inherited Create;
-  InitializeCriticalSection(fLock);
+  fSafe.Init;
 end;
 
 destructor TPointerClassHashLocked.Destroy;
 begin
-  DeleteCriticalSection(fLock);
+  fSafe.Done;
   inherited Destroy;
 end;
 
@@ -41929,11 +42478,11 @@ function TPointerClassHashLocked.FindLocked(aInfo: pointer): TPointerClassHashed
 begin
   if self=nil then
     result := nil else begin
-    EnterCriticalSection(fLock);
+    fSafe.Lock;
     try
       result := inherited Find(aInfo);
     finally
-      LeaveCriticalSection(fLock);
+      fSafe.UnLock;
     end;
   end;
 end;
@@ -41943,20 +42492,20 @@ function TPointerClassHashLocked.TryAddLocked(aInfo: pointer;
 var wasAdded: boolean;
     i: integer;
 begin
-  EnterCriticalSection(fLock);
+  fSafe.Lock;
   i := inherited Add(aInfo,wasAdded);
   if wasAdded then begin
     aNewEntry := @List[i];
     result := true; // caller should call Unlock
   end else begin
-    LeaveCriticalSection(fLock);
+    fSafe.UnLock;
     result := false;
   end;
 end;
 
 procedure TPointerClassHashLocked.Unlock;
 begin
-  LeaveCriticalSection(fLock);
+  fSafe.UnLock;
 end;
 
 
@@ -41965,24 +42514,15 @@ end;
 constructor TObjectListLocked.Create(AOwnsObjects: Boolean=true);
 begin
   inherited Create(AOwnsObjects);
-  InitializeCriticalSection(fLock);
+  fSafe.Init;
 end;
 
 destructor TObjectListLocked.Destroy;
 begin
   inherited Destroy;
-  DeleteCriticalSection(fLock);
+  fSafe.Done;
 end;
 
-procedure TObjectListLocked.Lock;
-begin
-  EnterCriticalSection(fLock);
-end;
-
-procedure TObjectListLocked.UnLock;
-begin
-  LeaveCriticalSection(fLock);
-end;
 
 
 { TRawUTF8ListHashed }
@@ -42044,32 +42584,22 @@ end;
 constructor TRawUTF8ListHashedLocked.Create(aOwnObjects: boolean);
 begin
   inherited Create(aOwnObjects);
-  InitializeCriticalSection(fLock);
+  fSafe.Init;
 end;
 
 destructor TRawUTF8ListHashedLocked.Destroy;
 begin
-  DeleteCriticalSection(fLock);
+  fSafe.Done;
   inherited;
-end;
-
-procedure TRawUTF8ListHashedLocked.Lock;
-begin
-  EnterCriticalSection(fLock);
-end;
-
-procedure TRawUTF8ListHashedLocked.UnLock;
-begin
-  LeaveCriticalSection(fLock);
 end;
 
 function TRawUTF8ListHashedLocked.LockedIndexOf(const aText: RawUTF8): PtrInt;
 begin
-  Lock;
+  fSafe.Lock;
   try
     result := IndexOf(aText);
   finally
-    UnLock;
+    fSafe.UnLock;
   end;
 end;
 
@@ -42095,7 +42625,7 @@ procedure TRawUTF8MethodList.Delete(Index: PtrInt);
 begin
   inherited Delete(Index);
   if Index<length(fEvents) then
-    move(fEvents[Index+1],fEvents[Index],(length(fEvents)-Index)*sizeof(TMethod));
+    MoveFast(fEvents[Index+1],fEvents[Index],(length(fEvents)-Index)*sizeof(TMethod));
 end;
 
 function TRawUTF8MethodList.GetEvent(aIndex: PtrInt;
@@ -42363,7 +42893,7 @@ begin
       exit;
     end;
   end;
-  move(Data^,PByteArray(fBuf)^[fPos],DataLen);
+  MoveFast(Data^,PByteArray(fBuf)^[fPos],DataLen);
   inc(fPos,DataLen);
   inc(fTotalWritten,PtrUInt(DataLen));
 end;
@@ -42379,7 +42909,7 @@ begin
       fStream.Write(pointer(fBuf)^,fPos);
       fPos := 0;
     end;
-    FillChar(PByteArray(fBuf)^[fPos],len,Data);
+    FillcharFast(PByteArray(fBuf)^[fPos],len,Data);
     inc(fPos,len);
     inc(fTotalWritten,len);
     dec(Count,len);
@@ -42530,7 +43060,7 @@ begin
             break; // avoid buffer overflow
           end;
           P := ToVarUInt32(len,P);
-          Move(pointer(PI^[i])^,P^,len);
+          MoveFast(pointer(PI^[i])^,P^,len);
           inc(P,len);
         end else
       // fixed size strings case
@@ -42539,7 +43069,7 @@ begin
           n := i;
           break; // avoid buffer overflow
         end;
-        Move(pointer(PI^[i])^,P^,fixedsize);
+        MoveFast(pointer(PI^[i])^,P^,fixedsize);
         inc(P,fixedsize);
       end;
       len := PAnsiChar(P)-PBeg; // format: Isize+varUInt32s*strings
@@ -42750,7 +43280,7 @@ begin
         n := (fBufLen-fPos)shr 2;
         if ValuesCount<n then
           n := ValuesCount;
-        Move(PI^,P^,n*4);
+        MoveFast(PI^,P^,n*4);
         inc(P,n*4);
       end;
       wkVarInt32, wkVarUInt32, wkOffsetU, wkOffsetI: begin
@@ -42967,7 +43497,7 @@ begin
       if len>DataLen then
         len := DataLen;
       if Data<>nil then
-        move(fMap.fBuf[fCurrentPos],Data^,len);
+        MoveFast(fMap.fBuf[fCurrentPos],Data^,len);
       inc(fCurrentPos,len);
       result := len;
     end else
@@ -43779,9 +44309,9 @@ begin
   OldSize :=  F.GetLength(Dest);
   dec(RecordBufferLen,OldSize);
   SetLength(Result,RecordBufferLen+NewSize);
-  move(RecordBuffer^,PByteArray(result)[0],DestOffset);
-  move(NewData^,PByteArray(result)[DestOffset],NewSize);
-  move(Dest[OldSize],PByteArray(result)[DestOffset+NewSize],RecordBufferLen-DestOffset);
+  MoveFast(RecordBuffer^,PByteArray(result)[0],DestOffset);
+  MoveFast(NewData^,PByteArray(result)[DestOffset],NewSize);
+  MoveFast(Dest[OldSize],PByteArray(result)[DestOffset+NewSize],RecordBufferLen-DestOffset);
 end;
 
 constructor TSynTable.Create(const aTableName: RawUTF8);
@@ -44039,10 +44569,10 @@ begin
       dec(Offs);
     end;
     SetLength(fDefaultFieldData,fDefaultFieldLength);
-    FillChar(pointer(fDefaultFieldData)^,fDefaultFieldLength,0);
+    FillcharFast(pointer(fDefaultFieldData)^,fDefaultFieldLength,0);
   end;
   SetLength(fDefaultRecordData,fDefaultRecordLength);
-  FillChar(pointer(fDefaultRecordData)^,fDefaultRecordLength,0);
+  FillcharFast(pointer(fDefaultRecordData)^,fDefaultRecordLength,0);
 end;
 
 procedure TSynTable.FieldIndexModify(aOldIndex, aNewIndex: integer;
@@ -44166,11 +44696,11 @@ begin
   with TSynTableFieldProperties(fField.List[F]) do
     if F in AvailableFields then begin
       Len := Lens[F];
-      move(P^,Dest^,Len);
+      MoveFast(P^,Dest^,Len);
       inc(P,Len);
       inc(Dest,Len);
     end else begin
-      FillChar(Dest^,fDefaultFieldLength,0);
+      FillcharFast(Dest^,fDefaultFieldLength,0);
       inc(Dest,fDefaultFieldLength);
     end;
   Assert(PtrUInt(Dest)-PtrUInt(result)=PtrUInt(TotalLen));
@@ -44441,7 +44971,7 @@ begin
       // void OrderedIndexReverse[]
       nrev := MaxInteger(OrderedIndex,OrderedIndexCount,n)+1;
       SetLength(OrderedIndexReverse,nrev);
-      FillChar(OrderedIndexReverse[0],nrev*4,255); // all to -1
+      FillcharFast(OrderedIndexReverse[0],nrev*4,255); // all to -1
       Reverse(OrderedIndex,OrderedIndexCount,pointer(OrderedIndexReverse));
     end;
   if PtrUInt(aOrderedIndex)>=PtrUInt(OrderedIndexCount) then
@@ -44800,8 +45330,8 @@ begin
                 {$else}PInteger(PtrUInt(Value)-sizeof(integer))^{$endif};
     Head := PAnsiChar(ToVarUInt32(Len,@tmp))-tmp;
     SetLength(Result,Len+Head);
-    Move(tmp,PByteArray(Result)[0],Head);
-    Move(pointer(Value)^,PByteArray(Result)[Head],Len);
+    MoveFast(tmp,PByteArray(Result)[0],Head);
+    MoveFast(pointer(Value)^,PByteArray(Result)[Head],Len);
   end;
 end;
 
@@ -44827,8 +45357,8 @@ begin
     result := #0 else begin // inlined ToSBFStr() code
     Head := PAnsiChar(ToVarUInt32(ValueLen,@tmp))-tmp;
     SetString(Result,nil,ValueLen+Head);
-    Move(tmp,PByteArray(Result)[0],Head);
-    Move(Value^,PByteArray(Result)[Head],ValueLen);
+    MoveFast(tmp,PByteArray(Result)[0],Head);
+    MoveFast(Value^,PByteArray(Result)[Head],ValueLen);
   end;
 end;
 
@@ -45297,7 +45827,7 @@ begin
           cmp := high(SoundExtTmp) else
           cmp := L;
         SoundExtTmp[cmp] := #0; // TSynSoundEx expect the buffer to be #0 terminated
-        move(SBF^,SoundExtTmp,cmp);
+        MoveFast(SBF^,SoundExtTmp,cmp);
         case FieldType of
         tftWinAnsi:
           if PSynSoundEx(Value)^.Ansi(SoundExtTmp) then
@@ -45422,7 +45952,7 @@ function SetFields: boolean;
 var select: TSynTableStatementSelect;
 begin
   result := false;
-  fillchar(select,sizeof(select),0);
+  FillcharFast(select,sizeof(select),0);
   select.Field := GetPropIndex; // 0 = ID, otherwise PropertyIndex+1
   if select.Field<0 then begin
     if P^<>'(' then // Field not found -> try function(field)
@@ -45753,7 +46283,7 @@ end;
 procedure TSynTableStatement.SelectFieldBits(var Fields: TSQLFieldBits; var withID: boolean);
 var i: integer;
 begin
-  fillchar(Fields,sizeof(Fields),0);
+  FillcharFast(Fields,sizeof(Fields),0);
   withID := false;
   for i := 0 to Length(Select)-1 do
     if Select[i].Field=0 then
@@ -45819,7 +46349,7 @@ begin
   VTable := aTable;
   VID := aID;
   VValue := VTable.DefaultRecordData;
-  {$ifdef UNICODE}FillChar(Filler,sizeof(Filler),0);{$endif}
+  {$ifdef UNICODE}FillcharFast(Filler,sizeof(Filler),0);{$endif}
 end;
 
 procedure TSynTableData.Init(aTable: TSynTable; aID: Integer;
@@ -45863,7 +46393,7 @@ begin
   CheckVTableInitialized;
   if (aField.FieldSize>0) and (VValue<>'') then begin
     // fixed size content: fast in-place update
-    Move(pointer(Value)^,VValue[aField.Offset+1],aField.FieldSize)
+    MoveFast(pointer(Value)^,VValue[aField.Offset+1],aField.FieldSize)
     // VValue[F.Offset+1] above will call UniqueString(VValue), even under FPC
   end else begin
     // variable-length update
@@ -46209,7 +46739,7 @@ begin
     PCardinal(R)^ := crc;
     R[4] := SYNLZCOMPRESS_STORED;
     PCardinal(R+5)^ := crc;
-    move(P^,R[9],PLen);
+    MoveFast(P^,R[9],PLen);
   end else begin
     SetString(result,nil,SynLZcompressdestlen(PLen)+9);
     R := pointer(result);
@@ -46266,7 +46796,7 @@ begin
     PCardinal(R)^ := crc;
     R[4] := SYNLZCOMPRESS_STORED;
     PCardinal(R+5)^ := crc;
-    move(P^,R[9],PLen);
+    MoveFast(P^,R[9],PLen);
   end else begin
     SetLength(result,SynLZcompressdestlen(PLen)+9);
     R := pointer(result);
@@ -46539,7 +47069,7 @@ begin
     Result := Length(fDataString)-fPosition;
     if Result>Count then
       Result := Count;
-    move(PByteArray(fDataString)[fPosition],Buffer,Result);
+    MoveFast(PByteArray(fDataString)[fPosition],Buffer,Result);
     inc(fPosition, Result);
   end;
 end;
@@ -46571,7 +47101,7 @@ begin
     Result := 0 else begin
     Result := Count;
     SetLength(fDataString,(fPosition+Result));
-    move(Buffer,PByteArray(fDataString)[fPosition],Result);
+    MoveFast(Buffer,PByteArray(fDataString)[fPosition],Result);
     inc(FPosition,Result);
   end;
 end;
@@ -46617,7 +47147,7 @@ procedure TSynNameValue.InitFromIniSection(Section: PUTF8Char;
 var s: RawUTF8;
     i: integer;
 begin
-  Init(false);
+  Init(false);                         
   fOnAdd := OnAdd;
   while (Section<>nil) and (Section^<>'[') do begin
     s := GetNextLine(Section,Section);
@@ -46631,11 +47161,11 @@ end;
 
 procedure TSynNameValue.Init(aCaseSensitive: boolean);
 begin
-  List := nil;
+  List := nil; // release dynamic arrays memory before Fillchar()
   fDynArray.fHashs := nil;
-  fillchar(self,sizeof(self),0);
-  fDynArray.Init(
-    TypeInfo(TSynNameValueItemDynArray),List,nil,nil,nil,@Count,not aCaseSensitive);
+  FillcharFast(self,sizeof(self),0);
+  fDynArray.InitSpecific(TypeInfo(TSynNameValueItemDynArray),List,
+    djRawUTF8,@Count,not aCaseSensitive);
 end;
 
 function TSynNameValue.Find(const aName: RawUTF8): integer;
@@ -47323,7 +47853,7 @@ begin
   max := length(Events);
   if cardinal(index)<cardinal(max) then begin
     dec(max);
-    move(Events[index+1],Events[index],(max-index)*sizeof(Events[index]));
+    MoveFast(Events[index+1],Events[index],(max-index)*sizeof(Events[index]));
     SetLength(Events,max);
   end;
 end;
@@ -47424,8 +47954,8 @@ begin
     dec(NormToUpperAnsi7Byte[i],32);
 {$ifdef OWNNORMTOUPPER}
   // initialize custom NormToUpper[] and NormToLower[] arrays
-  move(NormToUpperAnsi7,NormToUpper,138);
-  move(n2u,NormToUpperByte[138],sizeof(n2u));
+  MoveFast(NormToUpperAnsi7,NormToUpper,138);
+  MoveFast(n2u,NormToUpperByte[138],sizeof(n2u));
   for i := 0 to 255 do begin
     d := NormToUpperByte[i];
     if d in [ord('A')..ord('Z')] then
@@ -47434,7 +47964,7 @@ begin
   end;
 {$endif OWNNORMTOUPPER}
   // code below is 55 bytes long, therefore shorter than a const array
-  fillchar(ConvertHexToBin[0],sizeof(ConvertHexToBin),255); // all to 255
+  FillcharFast(ConvertHexToBin[0],sizeof(ConvertHexToBin),255); // all to 255
   v := 0;
   for i := ord('0') to ord('9') do begin
     ConvertHexToBin[i] := v;
@@ -47464,7 +47994,7 @@ begin
     end;
   end;
   {$ifdef CPUINTEL}
-  fillchar(regs,sizeof(regs),0);
+  FillcharFast(regs,sizeof(regs),0);
   GetCPUID(1,regs);
   PIntegerArray(@CpuFeatures)^[0] := regs.edx;
   PIntegerArray(@CpuFeatures)^[1] := regs.ecx;
@@ -47480,9 +48010,16 @@ initialization
   // initialization of global variables
   GarbageCollectorFreeAndNilList := TList.Create;
   GarbageCollectorFreeAndNil(GarbageCollector,TObjectList.Create);
-  {$ifndef FPC}
-  {$ifndef CPUARM}
-  {$ifndef USEPACKAGES}
+  MoveFast := @System.Move;
+  {$ifdef FPC}
+  FillCharFast := @System.FillChar;
+  {$else}
+  {$ifdef CPUARM}
+  FillCharFast := @System.FillChar;
+  {$else}
+  {$ifdef USEPACKAGES}
+  Pointer(@FillCharFast) := SystemFillCharAddress;
+  {$else}
   InitRedirectCode;
   {$endif USEPACKAGES}
   {$endif CPUARM}
