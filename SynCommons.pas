@@ -477,7 +477,7 @@ unit SynCommons;
   - added IsHTMLContentTypeTextual() function, and modified ExistsIniNameValue()
   - added ShortStringToAnsi7String() and UpperCopyWin255() functions
   - added IsEqualGUID/IsNullGuid/GUIDToText/GUIDToRawUTF8/GUIDToString functions
-  - added TextToGUID, RawUTF8ToGUID and StringToGUID functions
+  - added RandomGUID, TextToGUID, RawUTF8ToGUID and StringToGUID functions
   - added TDynArray.ElemPtr() low-level method
   - let TDynArray.LoadFrom() accept Win32/Win64 cross platform binary content
   - new TDynArray.CopyFrom() method and associated procedure DynArrayCopy()
@@ -1746,6 +1746,13 @@ function VariantToUTF8(const V: Variant): RawUTF8; overload;
 procedure VariantToUTF8(const V: Variant; var result: RawUTF8;
   var wasString: boolean); overload;
 
+/// convert any Variant into UTF-8 encoded String
+// - use VariantSaveJSON() instead if you need a conversion to JSON with
+// custom parameters
+// - returns TRUE if the V value was a text, FALSE if was not (e.g. a number)
+// - custom variant types will be stored as JSON
+function VariantToUTF8(const V: Variant; var Text: RawUTF8): boolean; overload;
+
 /// fast comparison of a Variant and UTF-8 encoded String
 // - slightly faster than plain V=Str, which computes a temporary variant 
 function VariantEquals(const V: Variant; const Str: RawUTF8): boolean; overload;
@@ -1943,6 +1950,25 @@ function FormatUTF8(const Format: RawUTF8; const Args, Params: array of const;
 // - any supplied TObject instance will be written as their class name
 procedure VarRecToUTF8(const V: TVarRec; var result: RawUTF8;
   wasString: PBoolean=nil);
+
+type
+  /// a memory structure which avoid a temporary RawUTF8 allocation
+  // - used by VarRecToTempUTF8() and FormatUTF8()
+  TTempUTF8 = record
+    Text: PUTF8Char;
+    Len: integer;
+    Temp: array[0..23] of AnsiChar;
+  end;
+
+/// convert an open array (const Args: array of const) argument to an UTF-8
+// encoded text, using a specified temporary buffer
+// - this function would allocate a RawUTF8 in tmpStr only if needed,
+// but use the supplied Res.Temp[] buffer for numbers to text conversion
+// - it would return the number of UTF-8 bytes, i.e. Res.Len 
+// - note that cardinal values should be type-casted to Int64() (otherwise
+// the signed integer mapped value will be transmitted, therefore wrongly)
+// - any supplied TObject instance will be written as their class name
+function VarRecToTempUTF8(const V: TVarRec; var tmpStr: RawUTF8; var Res: TTempUTF8): integer;
 
 /// convert an open array (const Args: array of const) argument to an UTF-8
 // encoded text, returning FALSE if the argument was not a string value
@@ -5078,6 +5104,18 @@ function GUIDToRawUTF8(const guid: TGUID): RawUTF8;
 // - will return e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
 // - this version is faster than the one supplied by SysUtils
 function GUIDToString(const guid: TGUID): string;
+
+/// fill some memory buffer with random values
+// - the destination buffer is expected to be allocated as 32 bit items
+procedure FillRandom(Dest: PCardinalArray; CardinalCount: integer);
+
+/// compute a random GUID value
+procedure RandomGUID(out result: TGUID); overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// compute a random GUID value
+function RandomGUID: TGUID; overload;
+  {$ifdef HASINLINE}inline;{$endif}
 
 type
   TGUIDShortString = string[38];
@@ -12514,7 +12552,14 @@ function _Json(const JSON: RawUTF8;
 // propagated into another place, add dvoValueCopiedByReference in Options
 // will increase the process speed a lot, or use _JsonFast()
 function _JsonFmt(const Format: RawUTF8; const Args,Params: array of const;
-  Options: TDocVariantOptions=[dvoReturnNullForUnknownProperty]): variant;
+  Options: TDocVariantOptions=[dvoReturnNullForUnknownProperty]): variant; overload;
+
+/// initialize a variant instance to store some document-based content
+// from a supplied (extended) JSON content, with parameters formating
+// - this overload function will set directly a local variant variable,
+// and would be used by inlined _JsonFmt/_JsonFastFmt functions 
+procedure _JsonFmt(const Format: RawUTF8; const Args,Params: array of const;
+  Options: TDocVariantOptions; out result: variant); overload;
 
 /// initialize a variant instance to store some document-based content
 // from a supplied (extended) JSON content
@@ -12859,6 +12904,11 @@ type
     constructor Create; override;
     /// finalize the class, and its nested TSynMonitorSize instances
     destructor Destroy; override;
+    {$ifndef NOVARIANTS}
+    /// fill a TDocVariant with the current system memory information
+    // - numbers would be given in MB (Bytes shl 20)
+    class function ToVariant: variant;
+    {$endif}
   published
     /// Percent of memory in use
     property MemoryLoadPercent: integer read GetMemoryLoadPercent;
@@ -15275,6 +15325,113 @@ begin
   result := true;
 end;
 
+function VarRecToTempUTF8(const V: TVarRec; var tmpStr: RawUTF8; var Res: TTempUTF8): integer;
+{$ifndef NOVARIANTS}
+var isString: boolean;
+{$endif}
+begin
+  case V.VType of
+    vtString: begin
+      Res.Text := @V.VString^[1];
+      Res.Len := ord(V.VString^[0]);
+      result := Res.Len;
+      exit;
+    end;
+    vtAnsiString: begin // expect UTF-8 content
+      Res.Text := pointer(V.VAnsiString);
+      Res.Len := length(RawUTF8(V.VAnsiString));
+      result := Res.Len;
+      exit;
+    end;
+    {$ifdef UNICODE}
+    vtUnicodeString:
+      RawUnicodeToUtf8(V.VPWideChar,length(UnicodeString(V.VUnicodeString)),tmpStr);
+    {$endif}
+    vtWideString:
+      RawUnicodeToUtf8(V.VPWideChar,length(WideString(V.VWideString)),tmpStr);
+    vtPChar: begin
+      Res.Text := V.VPointer;
+      Res.Len := StrLen(V.VPointer);
+      result := Res.Len;
+      exit;
+    end;
+    vtChar: begin
+      Res.Text := @V.VChar;
+      Res.Len := 1;
+      result := 1;
+      exit;
+    end;
+    vtPWideChar:
+      RawUnicodeToUtf8(V.VPWideChar,StrLenW(V.VPWideChar),tmpStr);
+    vtWideChar:
+      RawUnicodeToUtf8(@V.VWideChar,1,tmpStr);
+    vtBoolean: begin
+      Res.Temp[0] := AnsiChar(ord(V.VBoolean)+48);
+      Res.Text := @Res.Temp;
+      Res.Len := 1;
+      result := 1;
+      exit;
+    end;
+    vtInteger: begin
+      Res.Text := PUTF8Char(StrInt32(@Res.Temp[23],V.VInteger));
+      Res.Len := @Res.Temp[23]-Res.Text;
+      result := Res.Len;
+      exit;
+    end;
+    vtInt64: begin
+      Res.Text := PUTF8Char(StrInt64(@Res.Temp[23],V.VInt64^));
+      Res.Len := @Res.Temp[23]-Res.Text;
+      result := Res.Len;
+      exit;
+    end;
+    vtCurrency: begin
+      Res.Text := @Res.Temp;
+      Res.Len := Curr64ToPChar(V.VInt64^,Res.Temp);
+      result := Res.Len;
+      exit;
+    end;
+    vtExtended:
+      ExtendedToStr(V.VExtended^,DOUBLE_PRECISION,tmpStr);
+    vtPointer,vtInterface: begin
+      Res.Text := @Res.Temp;
+      Res.Len := sizeof(pointer)*2;
+      BinToHexDisplay(V.VPointer,@Res.Temp,sizeof(Pointer));
+      result := sizeof(pointer)*2;
+      exit;
+    end;
+    vtClass: begin
+      if V.VClass<>nil then begin
+        Res.Text := PUTF8Char(PPointer(PtrInt(V.VClass)+vmtClassName)^)+1;
+        Res.Len := ord(Res.Text[-1]);
+      end else
+        Res.Len := 0;
+      result := Res.Len;
+      exit;
+    end;
+    vtObject: begin
+      if V.VObject<>nil then begin
+        Res.Text := PUTF8Char(PPointer(PPtrInt(V.VObject)^+vmtClassName)^)+1;
+        Res.Len := ord(Res.Text[-1]);
+      end else
+        Res.Len := 0;
+      result := Res.Len;
+      exit;
+    end;
+    {$ifndef NOVARIANTS}
+    vtVariant:
+      VariantToUTF8(V.VVariant^,tmpStr,isString);
+    {$endif}
+    else begin
+      Res.Len := 0;
+      result := 0;
+      exit;
+    end;
+  end;
+  Res.Text := pointer(tmpStr);
+  Res.Len := length(tmpStr);
+  result := Res.Len;
+end;
+
 procedure VarRecToUTF8(const V: TVarRec; var result: RawUTF8; wasString: PBoolean=nil);
 var isString: boolean;
 begin
@@ -16545,6 +16702,11 @@ begin
   VariantToUTF8(V,result,wasString);
 end;
 
+function VariantToUTF8(const V: Variant; var Text: RawUTF8): boolean;
+begin
+  VariantToUTF8(V,Text,result);
+end;
+
 function VariantEquals(const V: Variant; const Str: RawUTF8): boolean;
   function Complex(const V: Variant; const Str: RawUTF8): boolean;
   var wasString: boolean;
@@ -16651,20 +16813,29 @@ begin
     InterlockedDecrement(PInteger(@p^.refCnt)^); // FPC has refCnt: PtrInt
     exit;
   end;
-  if (V^.VType>varNativeString) and
-     FindCustomVariantType(V^.VType,handler) then begin
-    for i := 1 to p^.length do begin
-      // faster clear of custom variant uniformous array
+  handler := nil;
+  for i := 1 to p^.length do begin
+    case V^.VType of
+    varEmpty..varDate,varError,varBoolean,varShortInt..varWord64: ;
+    varString: RawUTF8(V^.VAny) := '';
+    varOleStr: WideString(V^.VAny) := '';
+    {$ifdef HASVARUSTRING}
+    varUString: UnicodeString(V^.VAny) := '';
+    {$endif}
+    else
+    if V^.VType=word(DocVariantVType) then
+      DocVariantType.Clear(V^) else
+    if V^.VType=varVariant or varByRef then
+      VarClear(PVariant(V^.VPointer)^) else
+    if handler=nil then
+      if (V^.VType and varByRef=0) and
+         FindCustomVariantType(V^.VType,handler) then
+        handler.Clear(V^) else 
+        VarClear(variant(V^)) else
       if V^.VType=handler.VarType then
         handler.Clear(V^) else
-      if V^.VType and VTYPE_STATIC<>0 then
         VarClear(variant(V^));
-      inc(V);
     end;
-  end else
-  for i := 1 to p^.length do begin
-    if V^.VType and VTYPE_STATIC<>0 then
-      VarClear(variant(V^));
     inc(V);
   end;
   FreeMem(p);
@@ -18197,24 +18368,9 @@ end;
 function FormatUTF8(const Format: RawUTF8; const Args: array of const): RawUTF8;
 // only supported token is %, with any const arguments
 var i, blocksN, L, argN: PtrInt;
-    blocks: array of record
-      Text: PUTF8Char;
-      Len: integer;
-    end;
-    Arg: TRawUTF8DynArray;
+    tmpStr: TRawUTF8DynArray;
     F,FDeb: PUTF8Char;
-procedure Add(aText: PUTF8Char; aLen: Integer);
-begin
-  if aLen>0 then begin
-    inc(L,aLen);
-    assert(blocksN<length(blocks));
-    with blocks[blocksN] do begin // add inbetween text
-      Text := aText;
-      Len := aLen;
-    end;
-    inc(blocksN);
-  end;
-end;
+    blocks: array[0..49] of TTempUTF8;
 begin
   if (Format='') or (high(Args)<0) then begin
     result := Format; // no formatting to process
@@ -18225,8 +18381,9 @@ begin
     exit;
   end;
   result := '';
-  SetLength(Arg,length(Args));
-  SetLength(blocks,length(Args)*2+1);
+  SetLength(tmpStr,length(Args));
+  if length(Args)*2+1>high(blocks) then
+    raise ESynException.Create('FormatUTF8!');
   blocksN := 0;
   argN := 0;
   L := 0;
@@ -18235,17 +18392,27 @@ begin
     if F^<>'%' then begin
       FDeb := F;
       while (F^<>'%') and (F^<>#0) do inc(F);
-      Add(FDeb,F-FDeb);
+      with blocks[blocksN] do begin
+        Text := FDeb;
+        Len := F-FDeb;
+        inc(L,Len);
+        inc(blocksN);
+      end;
     end;
     if F^=#0 then break;
     inc(F); // jump '%'
     if argN<=high(Args) then begin
-      VarRecToUTF8(Args[argN],arg[argN]);
-      Add(pointer(arg[argN]),length(arg[argN]));
+      inc(L,VarRecToTempUTF8(Args[argN],tmpStr[argN],blocks[blocksN]));
+      inc(blocksN);
       inc(argN);
     end else
     if F^<>#0 then begin // no more available Args -> add all remaining text
-      Add(F,StrLen(F));
+      with blocks[blocksN] do begin
+        Text := F;
+        Len := StrLen(F);
+        inc(L,Len);
+        inc(blocksN);
+      end;
       break;
     end;
   end;
@@ -18253,15 +18420,13 @@ begin
     exit;
   SetLength(result,L);
   F := pointer(result);
-  for i := 0 to blocksN-1 do
-  with blocks[i] do begin
-    MoveFast(Text^,F^,Len);
-    inc(F,Len);
+  for i := 0 to blocksN-1 do begin
+    MoveFast(blocks[i].Text^,F^,blocks[i].Len);
+    inc(F,blocks[i].Len);
   end;
 end;
 
 function FormatUTF8(const Format: RawUTF8; const Args, Params: array of const; JSONFormat: boolean): RawUTF8; overload;
-// supports both % and ? tokens
 var i, tmpN, L, A, P, len: PtrInt;
     isParam: AnsiChar;
     tmp: TRawUTF8DynArray;
@@ -18274,8 +18439,17 @@ const QUOTECHAR: array[boolean] of AnsiChar = ('''','"');
         [vtBoolean,vtInteger,vtInt64,vtCurrency,vtExtended,vtVariant]);
 label Txt;
 begin
-  if (Format='') or ((high(Args)<0)and(high(Params)<0)) then begin
-    result := Format; // no formatting to process
+  if Format='' then begin
+    result := '';
+    exit;
+  end;
+  if (high(Args)<0) and (high(Params)<0) then begin
+    // no formatting to process, but may be a const -> make unique
+    SetString(result,PAnsiChar(pointer(Format)),length(Format));
+    exit; // e.g. _JsonFmt() will parse it in-place
+  end;
+  if high(Params)<0 then begin
+    result := FormatUTF8(Format,Args); // slightly faster overloaded function
     exit;
   end;
   if Format='%' then begin
@@ -26923,6 +27097,27 @@ begin
 end;
 {$endif}
 
+procedure FillRandom(Dest: PCardinalArray; CardinalCount: integer);
+var i: integer;
+    c: cardinal;
+begin
+  c := GetTickCount64+Random(maxInt);
+  for i := 0 to CardinalCount-1 do begin
+    c := c xor crc32ctab[0,(c+cardinal(i)) and 1023];
+    Dest^[i] := Dest^[i] xor c;
+  end;
+end;
+
+function RandomGUID: TGUID;
+begin
+  FillRandom(@result,sizeof(TGUID) shr 2);
+end;
+
+procedure RandomGUID(out result: TGUID); overload;
+begin
+  FillRandom(@result,sizeof(TGUID) shr 2);
+end;
+
 function RawUTF8ToGUID(const text: RawByteString): TGUID;
 begin
   if (length(text)<>38) or (text[1]<>'{') or (text[38]<>'}') or
@@ -31959,7 +32154,7 @@ begin
         result := PPointer(VAny)^=nil else
       {$endif}
       {$ifndef NOVARIANTS}
-      if VType=DocVariantVType then
+      if VType=word(DocVariantVType) then
         result := TDocVariantData(V).Count=0 else
       {$endif}
         result := false;
@@ -32619,6 +32814,8 @@ var i: integer;
 begin
   if TVarData(Value).VType and VTYPE_STATIC<>0 then
     VarClear(Value);
+  if EndOfObject<>nil then
+    EndOfObject^ := ' ';
   if JSON^ in [#1..' '] then repeat inc(JSON) until not(JSON^ in [#1..' ']);
   if (Options=nil) or (JSON^ in ['1'..'9']) then begin // obvious simple type
     ProcessSimple(GetJSONField(JSON,JSON,@wasString,EndOfObject));
@@ -34619,7 +34816,7 @@ end;
 function DocVariantData(const DocVariant: variant): PDocVariantData;
 begin
   with TVarData(DocVariant) do
-    if VType=DocVariantVType then
+    if VType=word(DocVariantVType) then
       result := @DocVariant else
     if VType=varByRef or varVariant then
       result := DocVariantData(PVariant(VPointer)^) else
@@ -34646,11 +34843,17 @@ end;
 {$else}
 begin
   with TVarData(DocVariant) do
-    if VType=DocVariantVType then
-      result := @DocVariant else
-    if VType=varByRef or varVariant then
-      result := _Safe(PVariant(VPointer)^) else
+    if VType=word(DocVariantVType) then begin
+      result := @DocVariant;
+      exit;
+    end else
+    if VType=varByRef or varVariant then begin
+      result := _Safe(PVariant(VPointer)^);
+      exit;
+    end else begin
       result := @DocVariantDataFake;
+      exit;
+    end;
 end;
 {$endif}
 
@@ -34684,7 +34887,7 @@ begin
     TVarData(Obj) := PVarData(TVarData(Obj).VPointer)^;
   // add name,value pairs
   if (DocVariantType=nil) or
-     (TVarData(Obj).VType<>DocVariantVType) or
+     (TVarData(Obj).VType<>word(DocVariantVType)) or
      (TDocVariantData(Obj).Kind<>dvObject) then begin
     // Obj is not a valid TDocVariant object -> create new
     if TVarData(Obj).VType and VTYPE_STATIC<>0 then
@@ -34701,7 +34904,7 @@ begin
   while TVarData(Obj).VType=varByRef or varVariant do
     TVarData(Obj) := PVarData(TVarData(Obj).VPointer)^;
   if (DocVariantType=nil) or
-     (TVarData(Obj).VType<>DocVariantVType) or
+     (TVarData(Obj).VType<>word(DocVariantVType)) or
      (TDocVariantData(Obj).Kind<>dvObject) or
      (TVarData(Document).VType<>DocVariantVType) or
      (TDocVariantData(Document).Kind<>dvObject) then
@@ -34738,12 +34941,20 @@ end;
 function _JsonFmt(const Format: RawUTF8; const Args,Params: array of const;
   Options: TDocVariantOptions): variant;
 begin
-  _Json(FormatUTF8(Format,Args,Params,true),result,Options);
+  _JsonFmt(Format,Args,Params,Options,result);
+end;
+
+procedure _JsonFmt(const Format: RawUTF8; const Args,Params: array of const;
+  Options: TDocVariantOptions; out result: variant); overload;
+begin
+  if TDocVariantData(result).InitJSONInPlace(
+     pointer(FormatUTF8(Format,Args,Params,true)),Options)=nil then
+    TDocVariantData(result).Clear;
 end;
 
 function _JsonFastFmt(const Format: RawUTF8; const Args,Params: array of const): variant;
 begin
-  _Json(FormatUTF8(Format,Args,Params,true),result,JSON_OPTIONS[true]);
+  _JsonFmt(Format,Args,Params,JSON_OPTIONS[true],result);
 end;
 
 function _Json(const JSON: RawUTF8; var Value: variant;
@@ -42524,6 +42735,24 @@ begin
   FPagingFileFree.Free;
   inherited Destroy;
 end;
+
+{$ifndef NOVARIANTS}
+class function TSynMonitorMemory.ToVariant: variant;
+begin
+  with TSynMonitorMemory.Create do
+  try
+    result := _JsonFastFmt('{Physical:{total:%,free:%},'+
+      'Virtual:{total:%,free:%},Paged:{total:%,free:%}}',
+      [PhysicalMemoryTotal.Bytes shr 20,PhysicalMemoryFree.Bytes shr 20,
+      {$ifdef MSWINDOWS}
+      VirtualMemoryTotal.Bytes shr 20,VirtualMemoryFree.Bytes shr 20,
+      {$endif}
+      PagingFileTotal.Bytes shr 20,PagingFileFree.Bytes shr 20],[]);
+  finally
+    Free;
+  end;
+end;
+{$endif}
 
 function TSynMonitorMemory.GetMemoryLoadPercent: integer;
 begin
