@@ -1,16 +1,19 @@
 SynPDF
 ======
 
-Synopse PDF engine is a fully featured *Open Source* PDF document creation library for Delphi, embedded in one unit.
+Synopse PDF engine is a fully featured *Open Source* PDF document creation library for Delphi and FPC, embedded in one unit.
 
 It's used e.g. in our [*mORMot* framework](https://github.com/synopse/mORMot), for creating PDF files from generated reports. 
 But you can use it stand-alone, without our main ORM/SOA framework.
+
+If you download the whole *mORMot* source code, you do not need this separate package: ensure you get rid of any existing separated *SynPDF* installation, and use the PDF units as available in the main *mORMot* trunk.
+This *SynPDF* distribution/GitHub account targets only people needing PDF writing, without other *mORMot* features.
 
 Features
 --------
 
   * Pure Delphi code, with no external .dll, and adding very small code size to your executable;
-  * Targets Delphi 5 up to XE8, for Win32 and Win64 platforms, with full source code provided;
+  * Targets Delphi 5 up to XE8 (and latest version of FPC), for Win32 and Win64 platforms, with full source code provided;
   * Includes most vectorial drawing commands, including text,lines or curves;
   * Renders bitmaps, and metafiles (even most .emf files with clipping and regioning);
   * Introduce metadata, bookmarks and outline information;
