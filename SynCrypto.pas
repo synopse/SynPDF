@@ -216,6 +216,7 @@ unit SynCrypto;
    - added AES-NI hardware support on newer CPUs, for huge performance boost
      and enhanced security
    - AES encryption will compute its own tables, to get rid of 4KB of const
+   - optimized x86 asm version for MD5
    - tested compilation for Win64 platform
    - run with FPC under Win32 and Linux (including AES-NI support), and Kylix
    - added Intel's SSE4 x64 optimized asm for SHA-256 on Win64
@@ -474,6 +475,9 @@ type
     // - this abstract method will set CV from AES.Context, and fIn/fOut
     // from BufIn/BufOut
     procedure Decrypt(BufIn, BufOut: pointer; Count: cardinal); override;
+    /// read-only access to the internal CV block, which may be have just been
+    // used by Encrypt/Decrypt methods
+    property CV: TAESBlock read fCV;
   end;
 
   /// handle AES cypher/uncypher without chaining (ECB)
@@ -677,23 +681,27 @@ type
   end;
 
   TMD5In = array[0..15] of cardinal;
+  PMD5In = ^TMD5In;
   /// 128 bits memory block for MD5 hash digest storage
   TMD5Digest = array[0..15] of Byte;
+  PMD5Digest = ^TMD5Digest;
   PMD5 = ^TMD5;
   TMD5Buf = array[0..3] of cardinal;
 
   /// handle MD5 hashing
   TMD5 = {$ifndef UNICODE}object{$else}record{$endif}
   private
-    buf: TMD5Buf;
-    bytes: array[0..1] of cardinal;
     in_: TMD5In;
-    procedure Finalize;
+    bytes: array[0..1] of cardinal;
   public
+    buf: TMD5Buf;
     /// initialize MD5 context for hashing
     procedure Init;
     /// update the MD5 context with some data
     procedure Update(const buffer; Len: cardinal);
+    /// finalize the MD5 hash process
+    // - the resulting hash digest would be stored in buf public variable
+    procedure Finalize;
     /// finalize and compute the resulting MD5 hash Digest of all data
     // affected to Update() method
     procedure Final(out result: TMD5Digest); overload;
@@ -932,7 +940,16 @@ function MD5DigestToString(const D: TMD5Digest): RawUTF8;
 
 /// fill a block of 16 bytes with some random values
 // - is used internally by this unit to compute an AES Initialization Vector
-procedure FillRandom(var IV: TAESBlock);
+procedure FillRandom(var IV: TAESBlock); overload;
+
+/// apply the XOR operation to the supplied binary buffers of 16 bytes
+procedure XorBlock16(A,B: {$ifdef CPU64}PInt64Array{$else}PCardinalArray{$endif}); {$ifdef HASINLINE}inline;{$endif} overload;
+
+/// apply the XOR operation to the supplied binary buffers of 16 bytes
+procedure XorBlock16(A,B,C: {$ifdef CPU64}PInt64Array{$else}PCardinalArray{$endif}); {$ifdef HASINLINE}inline;{$endif} overload;
+
+/// apply the XOR operation to the supplied binary buffers
+procedure XorBlockN(A,B,C: PByteArray; Count: integer); {$ifdef HASINLINE}inline;{$endif}
 
 /// compute the HTDigest for a user and a realm, according to a supplied password
 // - apache-compatible: 'agent007:download area:8364d0044ef57b3defcfa141e8f77b65'
@@ -1009,7 +1026,7 @@ var
 // - the key is global to the whole process
 procedure CompressShaAesSetKey(const Key: RawByteString; AesClass: TAESAbstractClass=nil);
 
-/// encrypt data content using the AES-256/CTR algorithm, after SynLZ compression
+/// encrypt data content using the AES-256/CFB algorithm, after SynLZ compression
 // - as expected by THttpSocket.RegisterCompress()
 // - will return 'synshaaes' as ACCEPT-ENCODING: header parameter
 // - will use global CompressShaAesKey / CompressShaAesClass variables to be set
@@ -1379,8 +1396,11 @@ begin
 end;
 
 function MD5(const s: RawByteString): RawUTF8;
+var MD5: TMD5;
+    D: TMD5Digest;
 begin
-  result := MD5DigestToString(MD5Buf(s[1],length(s)));
+  MD5.Full(pointer(s),Length(s),D);
+  result := MD5DigestToString(D);
 end;
 
 function SHA1(const s: RawByteString): RawUTF8;
@@ -5034,6 +5054,7 @@ end;
 { TMD5 }
 
 procedure MD5Transform(var buf: TMD5Buf; const in_: TMD5In);
+{$ifdef PUREPASCAL}
 var a,b,c,d: cardinal; // unrolled -> compiler will only use cpu registers :)
 // the code below is very fast, and can be compared proudly against C or ASM
 begin
@@ -5110,6 +5131,558 @@ begin
   inc(buf[2],c);
   inc(buf[3],d);
 end;
+{$else} // MD5 don't use CPU pipelines: this optimized asm is only 10-15% faster
+asm // eax=buf:TMD5Buf edx=in_:TMD5In
+  push ebx
+  push esi
+  push edi
+  push ebp
+  push eax
+  mov esi,eax
+  mov ebp,edx
+  mov eax,[esi]
+  mov ebx,[esi+4H]
+  mov ecx,[esi+8H]
+  mov edx,[esi+0CH]
+  mov esi,ecx
+  add eax,[ebp]
+  xor esi,edx
+  and esi,ebx
+  xor esi,edx
+  lea eax,[esi+eax-28955B88H]
+  rol eax,7
+  add eax,ebx
+  mov esi,ebx
+  add edx,[ebp+4H]
+  xor esi,ecx
+  and esi,eax
+  xor esi,ecx
+  lea edx,[esi+edx-173848AAH]
+  rol edx,12
+  add edx,eax
+  mov esi,eax
+  add ecx,[ebp+8H]
+  xor esi,ebx
+  and esi,edx
+  xor esi,ebx
+  lea ecx,[esi+ecx+242070DBH]
+  rol ecx,17
+  add ecx,edx
+  mov esi,edx
+  add ebx,[ebp+0CH]
+  xor esi,eax
+  and esi,ecx
+  xor esi,eax
+  lea ebx,[esi+ebx-3E423112H]
+  rol ebx,22
+  add ebx,ecx
+  mov esi,ecx
+  add eax,[ebp+10H]
+  xor esi,edx
+  and esi,ebx
+  xor esi,edx
+  lea eax,[esi+eax-0A83F051H]
+  rol eax,7
+  add eax,ebx
+  mov esi,ebx
+  add edx,[ebp+14H]
+  xor esi,ecx
+  and esi,eax
+  xor esi,ecx
+  lea edx,[esi+edx+4787C62AH]
+  rol edx,12
+  add edx,eax
+  mov esi,eax
+  add ecx,[ebp+18H]
+  xor esi,ebx
+  and esi,edx
+  xor esi,ebx
+  lea ecx,[esi+ecx-57CFB9EDH]
+  rol ecx,17
+  add ecx,edx
+  mov esi,edx
+  add ebx,[ebp+1CH]
+  xor esi,eax
+  and esi,ecx
+  xor esi,eax
+  lea ebx,[esi+ebx-2B96AFFH]
+  rol ebx,22
+  add ebx,ecx
+  mov esi,ecx
+  add eax,[ebp+20H]
+  xor esi,edx
+  and esi,ebx
+  xor esi,edx
+  lea eax,[esi+eax+698098D8H]
+  rol eax,7
+  add eax,ebx
+  mov esi,ebx
+  add edx,[ebp+24H]
+  xor esi,ecx
+  and esi,eax
+  xor esi,ecx
+  lea edx,[esi+edx-74BB0851H]
+  rol edx,12
+  add edx,eax
+  mov esi,eax
+  add ecx,[ebp+28H]
+  xor esi,ebx
+  and esi,edx
+  xor esi,ebx
+  lea ecx,[esi+ecx-0A44FH]
+  rol ecx,17
+  add ecx,edx
+  mov esi,edx
+  add ebx,[ebp+2CH]
+  xor esi,eax
+  and esi,ecx
+  xor esi,eax
+  lea ebx,[esi+ebx-76A32842H]
+  rol ebx,22
+  add ebx,ecx
+  mov esi,ecx
+  add eax,[ebp+30H]
+  xor esi,edx
+  and esi,ebx
+  xor esi,edx
+  lea eax,[esi+eax+6B901122H]
+  rol eax,7
+  add eax,ebx
+  mov esi,ebx
+  add edx,[ebp+34H]
+  xor esi,ecx
+  and esi,eax
+  xor esi,ecx
+  lea edx,[esi+edx-2678E6DH]
+  rol edx,12
+  add edx,eax
+  mov esi,eax
+  add ecx,[ebp+38H]
+  xor esi,ebx
+  and esi,edx
+  xor esi,ebx
+  lea ecx,[esi+ecx-5986BC72H]
+  rol ecx,17
+  add ecx,edx
+  mov esi,edx
+  add ebx,[ebp+3CH]
+  xor esi,eax
+  and esi,ecx
+  xor esi,eax
+  lea ebx,[esi+ebx+49B40821H]
+  rol ebx,22
+  add ebx,ecx
+  mov esi,edx
+  mov edi,edx
+  add eax,[ebp+4H]
+  not esi
+  and edi,ebx
+  and esi,ecx
+  or  esi,edi
+  lea eax,[esi+eax-9E1DA9EH]
+  rol eax,5
+  add eax,ebx
+  mov esi,ecx
+  mov edi,ecx
+  add edx,[ebp+18H]
+  not esi
+  and edi,eax
+  and esi,ebx
+  or  esi,edi
+  lea edx,[esi+edx-3FBF4CC0H]
+  rol edx,9
+  add edx,eax
+  mov esi,ebx
+  mov edi,ebx
+  add ecx,[ebp+2CH]
+  not esi
+  and edi,edx
+  and esi,eax
+  or  esi,edi
+  lea ecx,[esi+ecx+265E5A51H]
+  rol ecx,14
+  add ecx,edx
+  mov esi,eax
+  mov edi,eax
+  add ebx,[ebp]
+  not esi
+  and edi,ecx
+  and esi,edx
+  or  esi,edi
+  lea ebx,[esi+ebx-16493856H]
+  rol ebx,20
+  add ebx,ecx
+  mov esi,edx
+  mov edi,edx
+  add eax,[ebp+14H]
+  not esi
+  and edi,ebx
+  and esi,ecx
+  or  esi,edi
+  lea eax,[esi+eax-29D0EFA3H]
+  rol eax,5
+  add eax,ebx
+  mov esi,ecx
+  mov edi,ecx
+  add edx,[ebp+28H]
+  not esi
+  and edi,eax
+  and esi,ebx
+  or  esi,edi
+  lea edx,[esi+edx+2441453H]
+  rol edx,9
+  add edx,eax
+  mov esi,ebx
+  mov edi,ebx
+  add ecx,[ebp+3CH]
+  not esi
+  and edi,edx
+  and esi,eax
+  or  esi,edi
+  lea ecx,[esi+ecx-275E197FH]
+  rol ecx,14
+  add ecx,edx
+  mov esi,eax
+  mov edi,eax
+  add ebx,[ebp+10H]
+  not esi
+  and edi,ecx
+  and esi,edx
+  or  esi,edi
+  lea ebx,[esi+ebx-182C0438H]
+  rol ebx,20
+  add ebx,ecx
+  mov esi,edx
+  mov edi,edx
+  add eax,[ebp+24H]
+  not esi
+  and edi,ebx
+  and esi,ecx
+  or  esi,edi
+  lea eax,[esi+eax+21E1CDE6H]
+  rol eax,5
+  add eax,ebx
+  mov esi,ecx
+  mov edi,ecx
+  add edx,[ebp+38H]
+  not esi
+  and edi,eax
+  and esi,ebx
+  or  esi,edi
+  lea edx,[esi+edx-3CC8F82AH]
+  rol edx,9
+  add edx,eax
+  mov esi,ebx
+  mov edi,ebx
+  add ecx,[ebp+0CH]
+  not esi
+  and edi,edx
+  and esi,eax
+  or  esi,edi
+  lea ecx,[esi+ecx-0B2AF279H]
+  rol ecx,14
+  add ecx,edx
+  mov esi,eax
+  mov edi,eax
+  add ebx,[ebp+20H]
+  not esi
+  and edi,ecx
+  and esi,edx
+  or  esi,edi
+  lea ebx,[esi+ebx+455A14EDH]
+  rol ebx,20
+  add ebx,ecx
+  mov esi,edx
+  mov edi,edx
+  add eax,[ebp+34H]
+  not esi
+  and edi,ebx
+  and esi,ecx
+  or  esi,edi
+  lea eax,[esi+eax-561C16FBH]
+  rol eax,5
+  add eax,ebx
+  mov esi,ecx
+  mov edi,ecx
+  add edx,[ebp+8H]
+  not esi
+  and edi,eax
+  and esi,ebx
+  or  esi,edi
+  lea edx,[esi+edx-3105C08H]
+  rol edx,9
+  add edx,eax
+  mov esi,ebx
+  mov edi,ebx
+  add ecx,[ebp+1CH]
+  not esi
+  and edi,edx
+  and esi,eax
+  or  esi,edi
+  lea ecx,[esi+ecx+676F02D9H]
+  rol ecx,14
+  add ecx,edx
+  mov esi,eax
+  mov edi,eax
+  add ebx,[ebp+30H]
+  not esi
+  and edi,ecx
+  and esi,edx
+  or  esi,edi
+  lea ebx,[esi+ebx-72D5B376H]
+  rol ebx,20
+  add ebx,ecx
+  mov esi,ecx
+  add eax,[ebp+14H]
+  xor esi,edx
+  xor esi,ebx
+  lea eax,[esi+eax-5C6BEH]
+  rol eax,4
+  add eax,ebx
+  mov esi,ebx
+  add edx,[ebp+20H]
+  xor esi,ecx
+  xor esi,eax
+  lea edx,[esi+edx-788E097FH]
+  rol edx,11
+  add edx,eax
+  mov esi,eax
+  add ecx,[ebp+2CH]
+  xor esi,ebx
+  xor esi,edx
+  lea ecx,[esi+ecx+6D9D6122H]
+  rol ecx,16
+  add ecx,edx
+  mov esi,edx
+  add ebx,[ebp+38H]
+  xor esi,eax
+  xor esi,ecx
+  lea ebx,[esi+ebx-21AC7F4H]
+  rol ebx,23
+  add ebx,ecx
+  mov esi,ecx
+  add eax,[ebp+4H]
+  xor esi,edx
+  xor esi,ebx
+  lea eax,[esi+eax-5B4115BCH]
+  rol eax,4
+  add eax,ebx
+  mov esi,ebx
+  add edx,[ebp+10H]
+  xor esi,ecx
+  xor esi,eax
+  lea edx,[esi+edx+4BDECFA9H]
+  rol edx,11
+  add edx,eax
+  mov esi,eax
+  add ecx,[ebp+1CH]
+  xor esi,ebx
+  xor esi,edx
+  lea ecx,[esi+ecx-944B4A0H]
+  rol ecx,16
+  add ecx,edx
+  mov esi,edx
+  add ebx,[ebp+28H]
+  xor esi,eax
+  xor esi,ecx
+  lea ebx,[esi+ebx-41404390H]
+  rol ebx,23
+  add ebx,ecx
+  mov esi,ecx
+  add eax,[ebp+34H]
+  xor esi,edx
+  xor esi,ebx
+  lea eax,[esi+eax+289B7EC6H]
+  rol eax,4
+  add eax,ebx
+  mov esi,ebx
+  add edx,[ebp]
+  xor esi,ecx
+  xor esi,eax
+  lea edx,[esi+edx-155ED806H]
+  rol edx,11
+  add edx,eax
+  mov esi,eax
+  add ecx,[ebp+0CH]
+  xor esi,ebx
+  xor esi,edx
+  lea ecx,[esi+ecx-2B10CF7BH]
+  rol ecx,16
+  add ecx,edx
+  mov esi,edx
+  add ebx,[ebp+18H]
+  xor esi,eax
+  xor esi,ecx
+  lea ebx,[esi+ebx+4881D05H]
+  rol ebx,23
+  add ebx,ecx
+  mov esi,ecx
+  add eax,[ebp+24H]
+  xor esi,edx
+  xor esi,ebx
+  lea eax,[esi+eax-262B2FC7H]
+  rol eax,4
+  add eax,ebx
+  mov esi,ebx
+  add edx,[ebp+30H]
+  xor esi,ecx
+  xor esi,eax
+  lea edx,[esi+edx-1924661BH]
+  rol edx,11
+  add edx,eax
+  mov esi,eax
+  add ecx,[ebp+3CH]
+  xor esi,ebx
+  xor esi,edx
+  lea ecx,[esi+ecx+1FA27CF8H]
+  rol ecx,16
+  add ecx,edx
+  mov esi,edx
+  add ebx,[ebp+8H]
+  xor esi,eax
+  xor esi,ecx
+  lea ebx,[esi+ebx-3B53A99BH]
+  rol ebx,23
+  add ebx,ecx
+  mov esi,edx
+  not esi
+  add eax,[ebp]
+  or  esi,ebx
+  xor esi,ecx
+  lea eax,[esi+eax-0BD6DDBCH]
+  rol eax,6
+  add eax,ebx
+  mov esi,ecx
+  not esi
+  add edx,[ebp+1CH]
+  or  esi,eax
+  xor esi,ebx
+  lea edx,[esi+edx+432AFF97H]
+  rol edx,10
+  add edx,eax
+  mov esi,ebx
+  not esi
+  add ecx,[ebp+38H]
+  or  esi,edx
+  xor esi,eax
+  lea ecx,[esi+ecx-546BDC59H]
+  rol ecx,15
+  add ecx,edx
+  mov esi,eax
+  not esi
+  add ebx,[ebp+14H]
+  or  esi,ecx
+  xor esi,edx
+  lea ebx,[esi+ebx-36C5FC7H]
+  rol ebx,21
+  add ebx,ecx
+  mov esi,edx
+  not esi
+  add eax,[ebp+30H]
+  or  esi,ebx
+  xor esi,ecx
+  lea eax,[esi+eax+655B59C3H]
+  rol eax,6
+  add eax,ebx
+  mov esi,ecx
+  not esi
+  add edx,[ebp+0CH]
+  or  esi,eax
+  xor esi,ebx
+  lea edx,[esi+edx-70F3336EH]
+  rol edx,10
+  add edx,eax
+  mov esi,ebx
+  not esi
+  add ecx,[ebp+28H]
+  or  esi,edx
+  xor esi,eax
+  lea ecx,[esi+ecx-100B83H]
+  rol ecx,15
+  add ecx,edx
+  mov esi,eax
+  not esi
+  add ebx,[ebp+4H]
+  or  esi,ecx
+  xor esi,edx
+  lea ebx,[esi+ebx-7A7BA22FH]
+  rol ebx,21
+  add ebx,ecx
+  mov esi,edx
+  not esi
+  add eax,[ebp+20H]
+  or  esi,ebx
+  xor esi,ecx
+  lea eax,[esi+eax+6FA87E4FH]
+  rol eax,6
+  add eax,ebx
+  mov esi,ecx
+  not esi
+  add edx,[ebp+3CH]
+  or  esi,eax
+  xor esi,ebx
+  lea edx,[esi+edx-1D31920H]
+  rol edx,10
+  add edx,eax
+  mov esi,ebx
+  not esi
+  add ecx,[ebp+18H]
+  or  esi,edx
+  xor esi,eax
+  lea ecx,[esi+ecx-5CFEBCECH]
+  rol ecx,15
+  add ecx,edx
+  mov esi,eax
+  not esi
+  add ebx,[ebp+34H]
+  or  esi,ecx
+  xor esi,edx
+  lea ebx,[esi+ebx+4E0811A1H]
+  rol ebx,21
+  add ebx,ecx
+  mov esi,edx
+  not esi
+  add eax,[ebp+10H]
+  or  esi,ebx
+  xor esi,ecx
+  lea eax,[esi+eax-8AC817EH]
+  rol eax,6
+  add eax,ebx
+  mov esi,ecx
+  not esi
+  add edx,[ebp+2CH]
+  or  esi,eax
+  xor esi,ebx
+  lea edx,[esi+edx-42C50DCBH]
+  rol edx,10
+  add edx,eax
+  mov esi,ebx
+  not esi
+  add ecx,[ebp+8H]
+  or  esi,edx
+  xor esi,eax
+  lea ecx,[esi+ecx+2AD7D2BBH]
+  rol ecx,15
+  add ecx,edx
+  mov esi,eax
+  not esi
+  add ebx,[ebp+24H]
+  or  esi,ecx
+  xor esi,edx
+  lea ebx,[esi+ebx-14792C6FH]
+  rol ebx,21
+  add ebx,ecx
+  pop esi
+  add [esi],eax
+  add [esi+4H],ebx
+  add [esi+8H],ecx
+  add [esi+0CH],edx
+  pop ebp
+  pop edi
+  pop esi
+  pop ebx
+end;
+{$endif}
 
 function TMD5.Final: TMD5Digest;
 begin
@@ -5127,21 +5700,21 @@ procedure TMD5.Finalize;
 var count: Integer;
     p: ^Byte;
 begin
-  count := bytes[0] and $3f;  // Number of bytes in
+  count := bytes[0] and $3f;  // number of pending bytes in
   p := @in_;
-  Inc(p, count);
+  Inc(p,count);
   // Set the first char of padding to 0x80.  There is always room
   p^ := $80;
   Inc(p);
   // Bytes of padding needed to make 56 bytes (-8..55)
-  count := 56 - 1 - count;
-  if count < 0 then begin  //  Padding forces an extra block
-    FillcharFast(p^,count + 8, 0);
+  count := 55-count;
+  if count<0 then begin  //  Padding forces an extra block
+    FillcharFast(p^,count+8,0);
     MD5Transform(buf,in_);
     p := @in_;
     count := 56;
   end;
-  FillcharFast(p^, count, 0);
+  FillcharFast(p^,count,0);
   // Append length in bits and transform
   in_[14] := bytes[0] shl 3;
   in_[15] := (bytes[1] shl 3) or (bytes[0] shr 29);
@@ -5150,10 +5723,32 @@ end;
 
 procedure TMD5.Full(Buffer: pointer; Len: integer; out Digest: TMD5Digest);
 begin
-  Init;
-  Update(Buffer^,Len);
-  Finalize;
-  MoveFast(buf,Digest,sizeof(Digest));
+  buf[0] := $67452301;
+  buf[1] := $efcdab89;
+  buf[2] := $98badcfe;
+  buf[3] := $10325476;
+  bytes[0] := Len;
+  while Len>=SizeOf(TMD5In) do begin
+    MD5Transform(buf,PMD5In(Buffer)^);
+    inc(PMD5In(Buffer));
+    dec(Len,SizeOf(TMD5In));
+  end;
+  MoveFast(Buffer^,in_,Len);
+  Buffer := PAnsiChar(@in_)+Len;
+  PByte(Buffer)^ := $80;
+  inc(PByte(Buffer));
+  Len := 55-Len;
+  if Len>=0 then
+    FillcharFast(Buffer^,Len,0) else begin
+    FillcharFast(Buffer^,Len+8,0);
+    MD5Transform(buf,in_);
+    FillcharFast(in_,56,0);
+  end;
+  Len := bytes[0];
+  in_[14] := Len shl 3;
+  in_[15] := Len shr 29;
+  MD5Transform(buf,in_);
+  Digest := TMD5Digest(buf);
 end;
 
 procedure TMD5.Init;
@@ -5174,26 +5769,26 @@ begin
   p := @buffer;
   // Update byte count
   t := bytes[0];
-  Inc(bytes[0], len);
+  Inc(bytes[0],len);
   if bytes[0]<t then
-    Inc(bytes[1]);  // Carry from low to high
-  t := 64 - (t and $3f);  // Space available in in_ (at least 1)
+    Inc(bytes[1]);  // 64 bit carry from low to high
+  t := 64-(t and 63);  // space available in in_ (at least 1)
   if t>len then begin
-    MoveFast(p^, Pointer(PtrUInt(@in_) + 64 - t)^, len);
+    MoveFast(p^,Pointer(PtrUInt(@in_)+64-t)^,len);
     exit;
   end;
   // First chunk is an odd size
-  MoveFast(p^, Pointer(PtrUInt(@in_) + 64 - t)^, t);
-  MD5Transform(buf, in_);
-  inc(PtrUInt(p), t);
-  dec(len, t);
+  MoveFast(p^,Pointer(PtrUInt(@in_)+64-t)^,t);
+  MD5Transform(buf,in_);
+  inc(PtrUInt(p),t);
+  dec(len,t);
   // Process data in 64-byte chunks
-  for i := 1 to len div 64 do begin
-    MD5Transform(buf, p^);
+  for i := 1 to len shr 6 do begin
+    MD5Transform(buf,p^);
     inc(p);
   end;
   // Handle any remaining bytes of data.
-  MoveFast(p^, in_, len mod 64);
+  MoveFast(p^,in_,len and 63);
 end;
 
 function MD5Buf(const Buffer; Len: Cardinal): TMD5Digest;
@@ -5202,7 +5797,7 @@ begin
   MD5.Full(@Buffer,Len,result);
 end;
 
-function MD5DigestsEqual(const A, B: TMD5Digest): Boolean;
+function MD5DigestsEqual(const A,B: TMD5Digest): Boolean;
 begin
   result := CompareMem(@A,@B,sizeof(TMD5Digest));
 end;
@@ -5260,8 +5855,11 @@ end;
 
 function MD5SelfTest: boolean;
 begin
-  result := htdigest('agent007','download area','secret')=
-    'agent007:download area:8364d0044ef57b3defcfa141e8f77b65';
+  result := (htdigest('agent007','download area','secret')=
+    'agent007:download area:8364d0044ef57b3defcfa141e8f77b65') and
+    (MD5('')='d41d8cd98f00b204e9800998ecf8427e') and
+    (MD5('a')='0cc175b9c0f1b6a831c399e269772661') and
+    (MD5('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789')='d174ab98d277d9f5a5611c2c9f419d9f');
 end;
 
 
@@ -5457,19 +6055,19 @@ end;
 { TAESAbstract }
 
 {$ifdef CPU64}
-procedure XorBlock16(A,B: PInt64Array); inline; overload;
+procedure XorBlock16(A,B: PInt64Array);
 begin
   A[0] := A[0] xor B[0];
   A[1] := A[1] xor B[1];
 end;
 
-procedure XorBlock16(A,B,C: PInt64Array); inline; overload;
+procedure XorBlock16(A,B,C: PInt64Array);
 begin
   B[0] := A[0] xor C[0];
   B[1] := A[1] xor C[1];
 end;
 {$else}
-procedure XorBlock16(A,B: PCardinalArray); {$ifdef HASINLINE}inline;{$endif} overload;
+procedure XorBlock16(A,B: PCardinalArray);
 begin
   A[0] := A[0] xor B[0];
   A[1] := A[1] xor B[1];
@@ -5477,7 +6075,7 @@ begin
   A[3] := A[3] xor B[3];
 end;
 
-procedure XorBlock16(A,B,C: PCardinalArray); {$ifdef HASINLINE}inline;{$endif} overload;
+procedure XorBlock16(A,B,C: PCardinalArray);
 begin
   B[0] := A[0] xor C[0];
   B[1] := A[1] xor C[1];
@@ -5486,7 +6084,7 @@ begin
 end;
 {$endif}
 
-procedure XorBlockN(A,B,C: PByteArray; Count: integer); {$ifdef HASINLINE}inline;{$endif}
+procedure XorBlockN(A,B,C: PByteArray; Count: integer);
 var i: integer;
 begin
   for i := 0 to Count-1 do
