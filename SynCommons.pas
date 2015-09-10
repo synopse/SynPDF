@@ -6402,7 +6402,7 @@ type
     procedure AddChars(aChar: AnsiChar; aCount: integer);
     /// append an Integer Value as a 2 digits String with comma
     procedure Add2(Value: integer);
-    /// append the current date and time, in a log-friendly format
+    /// append the current UTC date and time, in a log-friendly format
     // - e.g. append '20110325 19241502 '
     // - this method is very fast, and avoid most calculation or API calls
     procedure AddCurrentLogTime;
@@ -7215,7 +7215,7 @@ type
     /// initialize the instance
     constructor Create(aInfo: pointer);
     /// the associated information of this instance
-    // - may be a PTypeInfo value, when caching RTTI information
+    // - may be e.g. a PTypeInfo value, when caching RTTI information
     property Info: pointer read fInfo write fInfo;
   end;
   /// a reference to a TPointerClassHashed instance
@@ -17129,7 +17129,7 @@ begin
     case VType of
     varEmpty,varNull:
       result := ''; // default VariantToUTF8(null)='null'
-    {$ifdef UNICODE}
+    {$ifdef UNICODE} // not HASVARUSTRING: here we handle string=UnicodeString
     varUString:
       result := UnicodeString(VAny);
     else
@@ -33202,7 +33202,6 @@ function TSynInvokeableVariantType.SetProperty(const V: TVarData;
   const Name: string; const Value: TVarData): Boolean;
 {$endif}
 var ValueSet: TVarData;
-    WS: PWideString;
     PropName: PAnsiChar;
 {$ifdef UNICODE}
     Buf: array[byte] of AnsiChar; // to avoid heap allocation
@@ -33214,10 +33213,21 @@ begin
 {$else}
   PropName := pointer(Name);
 {$endif}
+  ValueSet.VString := nil; // to avoid GPF in RawUTF8(ValueSet.VString) below
   if Value.VType=varByRef or varOleStr then
-    WS := Value.VPointer else
+    RawUnicodeToUtf8(PPointer(Value.VAny)^,length(PWideString(Value.VAny)^),
+      RawUTF8(ValueSet.VString)) else
   if Value.VType=varOleStr then
-    WS := @Value.VPointer else
+    RawUnicodeToUtf8(Value.VAny,length(WideString(Value.VAny)),
+      RawUTF8(ValueSet.VString)) else
+  {$ifdef HASVARUSTRING}
+  if Value.VType=varByRef or varUString then
+    RawUnicodeToUtf8(PPointer(Value.VAny)^,length(PUnicodeString(Value.VAny)^),
+      RawUTF8(ValueSet.VString)) else
+  if Value.VType=varUString then
+    RawUnicodeToUtf8(Value.VAny,length(UnicodeString(Value.VAny)),
+      RawUTF8(ValueSet.VString)) else
+  {$endif}
   if SetVariantUnRefSimpleValue(variant(Value),ValueSet) then begin
     IntSet(V,ValueSet,PropName);
     result := true;
@@ -33227,10 +33237,8 @@ begin
     result := true;
     exit;
   end;
-  ValueSet.VType := varString; // unpatched RTL do not like WideString values
-  ValueSet.VString := nil; // to avoid GPF in RawUTF8(ValueSet.VString) below
-  RawUnicodeToUtf8(pointer(WS^),length(WS^),RawUTF8(ValueSet.VString));
-  try
+  try // unpatched RTL does not like Unicode values :( -> transmit a RawUTF8
+    ValueSet.VType := varString;
     IntSet(V,ValueSet,PropName);
   finally
     RawUTF8(ValueSet.VString) := ''; // avoid memory leak
@@ -39305,7 +39313,7 @@ begin
 end;
 
 var // can be safely made global since timing is multi-thread safe
-  GlobalTime: TSystemTime;
+  GlobalTimeUTC: TSystemTime;
   GlobalClock: cardinal;
 
 procedure TTextWriter.AddCurrentLogTime;
@@ -39317,10 +39325,10 @@ begin
   Ticks := GetTickCount; // this call is very fast (just one integer mul)
   if GlobalClock<>Ticks then begin // typically in range of 10-16 ms
     GlobalClock := Ticks;
-    GetLocalTime(GlobalTime); // avoid slower API call
+    GetSystemTime(GlobalTimeUTC); // avoid slower API call
   end;
-  YearToPChar({$ifdef MSWINDOWS}GlobalTime.wYear{$else}GlobalTime.Year{$endif},B);
-  with GlobalTime do begin
+  YearToPChar({$ifdef MSWINDOWS}GlobalTimeUTC.wYear{$else}GlobalTimeUTC.Year{$endif},B);
+  with GlobalTimeUTC do begin
     PWord(B+4)^ := TwoDigitLookupW[{$ifdef MSWINDOWS}wMonth{$else}Month{$endif}];
     PWord(B+6)^ := TwoDigitLookupW[{$ifdef MSWINDOWS}wDay{$else}Day{$endif}];
     B[8] := ' ';
