@@ -181,6 +181,7 @@
   {$MINENUMSIZE 1}
   {$PACKSET 1}
   {$PACKENUM 1}
+
   {$undef ENHANCEDRTL}    // there is no version of our Enhanced RTL for FPC
   {$undef DOPATCHTRTL}
   {$define USETYPEINFO}  // will use SynFPCTypInfo.pas wrapper
@@ -189,12 +190,13 @@
   {$define HASAESNI}
   {$define HASTTHREADSTART}
   {$define FPC_OR_UNICODE}
+  {$define DELPHI5ORFPC}
 
-  {.$define FPCSQLITE3STATIC}
+  {$define FPCSQLITE3STATIC}
   // allow static linking of the SQlite3 engine (including crypto) to the project
-  // -> disabled by default, for direct compilation of mORMot, e.g. from fpcup
-  // -> enable it to support static-linked SQLite3 engine, after retrieval of
+  // -> enabled to support static-linked SQLite3 engine, after retrieval of
   // the needed .o files from http://synopse.info/files/sqlite3fpc.7z
+  // -> could be disabled to force external .so/.dll linking
   // -> only available for Win32 and Linux32 platforms by now
 
   {$ifdef ANDROID}
@@ -216,10 +218,13 @@
     {$ASMMODE INTEL} // as Delphi expects, and I use to write
     {$define CPUINTEL}
     {$endif}
-    // FPC has its own RTTI layout only since late 3.x
-    // when http://bugs.freepascal.org/view.php?id=26774 has been fixed
-    {.$define HASINTERFACERTTI}
   {$endif CPU64}
+
+  // FPC has its own RTTI layout only since late 3.x
+  // when http://bugs.freepascal.org/view.php?id=26774 has been fixed
+  {$ifdef FPC_HAS_EXTENDEDINTERFACERTTI} // use dedicated trunk conditional
+    {$define HASINTERFACERTTI}
+  {$endif}
 
   {$define FPC_OR_PUREPASCAL}
   {$define FPC_OR_KYLIX}
@@ -357,6 +362,7 @@
     // Delphi 5 or older
     {$define DELPHI6OROLDER}
     {$define DELPHI5OROLDER}
+    {$define DELPHI5ORFPC}
     {$define MSWINDOWS}
     {$define NOVARIANTS}
     {$define NOVARCOPYPROC}
@@ -416,7 +422,9 @@
 // used by SynSQLite3, SynSQLite3Static, SynSQlite3RegEx and mORMotSQLite3 units
 {$ifdef CPU64}
   // only one calling convention in the Win64 world
+  {$ifndef FPC}
   {$define SQLITE3_FASTCALL}
+  {$endif}
 {$else}
   // undefined by default: BCC32 -pr fastcall (=Delphi resgister) is broken
   // because of issues with BCC32 itself, or some obfuscated calls in source?
@@ -428,8 +436,12 @@
   {$ifndef FPCSQLITE3STATIC} // see above to enable this conditional 
     {$define NOSQLITE3STATIC}
   {$endif}
+{$else}
+  // Only Win32+Linux32 do support static linked library yet with Delphi
+  {$ifdef CPU64}
+    {$define NOSQLITE3STATIC}
+  {$endif}
 {$endif}
-// Only Win32+Linux32 do support our SQLite3 static linked library yet
 {$ifdef CPU64}
   {$define NOSQLITE3STATIC}
 {$endif}
@@ -444,6 +456,10 @@
   // our proprietary crypto expects a patched SQlite3.c statically linked
   {$define NOSQLITE3ENCRYPT}
 {$endif}
+
+{.$define SQLVIRTUALLOGS}
+// enable low-level logging of SQlite3 virtual table query planner costs
+// -> to be used only for internal debugging
 
 {$ifdef MSWINDOWS}
   /// define this to publish TWinINet / TWinHttp / TWinHttpAPI classes

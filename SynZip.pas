@@ -729,7 +729,7 @@ type
     // - warning: AddStored/AddDeflated() won't check for duplicate zip entries
     // - this method is very fast, and will increase the .zip file in-place
     // (the old content is not copied, new data is appended at the file end)
-    // "dummy" parameter exists only to disambiguate constructors for C++
+    // - "dummy" parameter exists only to disambiguate constructors for C++
     {$ifndef Linux}
     constructor CreateFrom(const aFileName: TFileName; dummy: integer=0);
     {$endif}
