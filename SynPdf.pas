@@ -4076,7 +4076,7 @@ const // not existing before Delphi 7
 function _PdfDateToDateTime(const AText: TPdfDate): TDateTime;
 var Y,M,D, H,MI,SS: cardinal;
 begin
-  if Length(AText)<>16 then
+  if Length(AText)<>17 then
     EConvertError.CreateRes(@SDateEncodeError);
   Y := ord(AText[3])*1000+ord(AText[4])*100+ord(AText[5])*10+ord(AText[6])
     -(48+480+4800+48000);
@@ -7328,12 +7328,12 @@ end;
 
 procedure TPdfInfo.SetCreationDate(Value: TDateTime);
 begin
-  FData.AddItemText('CreationDate', _DateTimeToPdfDate(Value));
+  FData.AddItemText('CreationDate', _DateTimeToPdfDate(Value)+'Z');
 end;
 
 procedure TPdfInfo.SetModDate(Value: TDateTime);
 begin
-  FData.AddItemText('ModDate', _DateTimeToPdfDate(Value));
+  FData.AddItemText('ModDate', _DateTimeToPdfDate(Value)+'Z');
 end;
 
 procedure TPdfInfo.SetCreator(const Value: String);
