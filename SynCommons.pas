@@ -33,6 +33,7 @@ unit SynCommons;
    - Alfred Glaenzer (alf)
    - BigStar
    - itSDS
+   - kevinday
    - mazinsw
    - Marius Maximus (mariuszekpl)
    - RalfS
@@ -4805,6 +4806,13 @@ type
     // - this constructor does nothing, but is declared as virtual so that
     // inherited classes may safely override this default void implementation
     constructor Create; virtual;
+    /// used to mimic TInterfacedObject reference counting
+    // - Release=true will call TInterfacedObject._Release
+    // - Release=false will call TInterfacedObject._AddRef
+    // - could be used to emulate proper reference counting of the instance
+    // via interfaces variables, but still storing plain class instances
+    // (e.g. in a global list of instances)
+    procedure RefCountUpdate(Release: boolean); virtual;
   end;
 
   /// our own empowered TPersistent-like parent class
@@ -4815,11 +4823,19 @@ type
   // - for best performance, any type inheriting from this class will bypass
   // some regular steps: do not implement interfaces or use TMonitor with them!
   TSynPersistent = class(TObject)
+  protected
+    // this default implementation will call AssignError()
+    procedure AssignTo(Dest: TSynPersistent); virtual;
+    procedure AssignError(Source: TSynPersistent);
   public
     /// this virtual constructor will be called at instance creation
     // - this constructor does nothing, but is declared as virtual so that
     // inherited classes may safely override this default void implementation
     constructor Create; virtual;
+    /// allows to implement a TPersistent-like assignement mechanism
+    // - inherited class should override AssignTo() protected method
+    // to implement the proper assignment
+    procedure Assign(Source: TSynPersistent); virtual;
     {$ifndef FPC_OR_PUREPASCAL}
     /// optimized x86 asm initialization code
     // - warning: this optimized version won't initialize the vmtIntfTable
@@ -19818,7 +19834,8 @@ function FileOpenSequentialRead(const FileName: string): Integer;
 begin
   {$ifdef MSWINDOWS}
   result := CreateFile(pointer(FileName),GENERIC_READ,
-    FILE_SHARE_READ,nil,OPEN_EXISTING,FILE_FLAG_SEQUENTIAL_SCAN,0);
+    FILE_SHARE_READ or FILE_SHARE_WRITE,nil, // same as fmShareDenyNone 
+    OPEN_EXISTING,FILE_FLAG_SEQUENTIAL_SCAN,0);
   {$else}
   result := FileOpen(FileName,fmOpenRead or fmShareDenyNone);
   {$endif MSWINDOWS}
@@ -19984,7 +20001,7 @@ begin
     {$ifdef USENORMTOUPPER}
     result := NormToUpperByte[result];
     {$else}
-    result := NormToUpperAnsi7Byte[result]);
+    result := NormToUpperAnsi7Byte[result];
     {$endif}
     exit;
   end;
@@ -19993,7 +20010,7 @@ begin
     {$ifdef USENORMTOUPPER}
     result := NormToUpperByte[result];
     {$else}
-    result := NormToUpperAnsi7Byte[result]);
+    result := NormToUpperAnsi7Byte[result];
     {$endif}
 end;
 
@@ -22066,9 +22083,11 @@ begin
   F := FileOpenSequentialRead(FileName);
   if PtrInt(F)>=0 then begin
     Size := GetFileSize(F,nil);
-    SetLength(result,Size);
-    if FileRead(F,pointer(Result)^,Size)<>Size then
-      result := '';
+    if Size>0 then begin
+      SetLength(result,Size);
+      if FileRead(F,pointer(result)^,Size)<>Size then
+        result := '';
+    end;
     FileClose(F);
   end;
 end;
@@ -24144,7 +24163,6 @@ begin
     if GetNextUTF8Upper(p)<>ord(up^) then
       exit;
     inc(up);
-    inc(p);
   end;
   result := true;
 end;
@@ -39134,6 +39152,13 @@ constructor TInterfacedObjectWithCustomCreate.Create;
 begin // nothing to do by default - overridden constructor may add custom code
 end;
 
+procedure TInterfacedObjectWithCustomCreate.RefCountUpdate(Release: boolean);
+begin
+  if Release then
+    _Release else
+    _AddRef;
+end;
+
 
 { TSynLocker }
 
@@ -39190,6 +39215,29 @@ end;
 constructor TSynPersistent.Create;
 begin // nothing to do by default - overridden constructor may add custom code
 end;
+
+procedure TSynPersistent.AssignError(Source: TSynPersistent);
+var
+  SourceName: string;
+begin
+  if Source <> nil then
+    SourceName := Source.ClassName else
+    SourceName := 'nil';
+  raise EConvertError.CreateFmt('Cannot assign a %s to a %s', [SourceName, ClassName]);
+end;
+
+procedure TSynPersistent.AssignTo(Dest: TSynPersistent);
+begin
+  Dest.AssignError(Self);
+end;
+
+procedure TSynPersistent.Assign(Source: TSynPersistent);
+begin
+  if Source<>nil then
+    Source.AssignTo(Self) else
+    AssignError(nil);
+end;
+
 
 {$ifndef FPC_OR_PUREPASCAL}
 
