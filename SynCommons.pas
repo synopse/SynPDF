@@ -3270,8 +3270,10 @@ function FindIniNameValue(P: PUTF8Char; UpperName: PAnsiChar): RawUTF8;
 // used by IsHTMLContentTypeTextual() function:
 // ! result := ExistsIniNameValue(htmlHeaders,HEADER_CONTENT_TYPE_UPPER,
 // !  ['TEXT/','APPLICATION/JSON','APPLICATION/XML']);
+// - warning: this function calls IdemPCharArray(), so expects UpperValues[]
+/// items to have AT LEAST TWO CHARS (it will use fast initial 2 bytes compare)
 function ExistsIniNameValue(P: PUTF8Char; const UpperName: RawUTF8;
-  const UpperValues: array of RawUTF8): boolean;
+  const UpperValues: array of PAnsiChar): boolean;
 
 /// find the integer Value of UpperName in P, till end of current section
 // - expect UpperName as 'NAME='
@@ -4771,14 +4773,20 @@ type
   public
     /// search one item in the internal hash array
     function Find(Item: TObject): integer;
+    /// search one item using slow list browsing
+    // - this version expects the internal list count to be supplied, if some
+    // last items are to be ignored (used e.g. in EnsureJustAddedNotDuplicated)
+    function Scan(Item: TObject; ListCount: integer): integer; virtual;
     /// to be called when an item is modified
     // - for Delete/Update will force a full rehash on next Find() call
     procedure Invalidate;
     /// to be called when an item has just been added
     // - the index of the latest added item should be Count-1
+    // - this method will update the internal hash table, and check if
+    // the newly added value is not duplicated
     // - return FALSE if this item is already existing (i.e. insert error)
     // - return TRUE if has been added to the internal hash table
-    function JustAdded: boolean;
+    function EnsureJustAddedNotDuplicated: boolean;
   end;
 
   /// abstract parent class with a virtual constructor, ready to be overridden
@@ -5527,6 +5535,10 @@ function SortDynArrayVariant(const A,B): integer;
 
 /// compare two "array of variant" elements, with no case sensitivity
 function SortDynArrayVariantI(const A,B): integer;
+
+/// compare two "array of variant" elements, with or without case sensitivity
+function SortDynArrayVariantComp(const A,B: TVarData; caseInsensitive: boolean): integer;
+
 {$endif}
 
 
@@ -6515,7 +6527,9 @@ type
     procedure AddInstanceName(Instance: TObject; SepChar: AnsiChar);
     /// append an Instance name and pointer, as 'TObjectList(00425E68)'+SepChar
     // - Instance must be not nil
-    procedure AddInstancePointer(Instance: TObject; SepChar: AnsiChar);
+    // - overriden version in TJSONSerializer would implement IncludeUnitName 
+    procedure AddInstancePointer(Instance: TObject; SepChar: AnsiChar;
+      IncludeUnitName: boolean); virtual;
     /// append a quoted string as JSON, with in-place decoding
     // - if QuotedString does not start with ' or ", it will written directly
     // (i.e. expects to be a number, or null/true/false constants)
@@ -9245,7 +9259,7 @@ procedure SymmetricEncrypt(key: cardinal; var data: RawByteString);
 var
   /// compute CRC32C checksum on the supplied buffer
   // - this variable will use the fastest mean available, e.g. SSE 4.2
-  // - you should use this function instead of crc32cfast() nor crc32csse42()
+  // - you should use this function instead of crc32cfast() or crc32csse42()
   crc32c: THasher;
 
 /// compute the hexadecimal representation of the crc32 checkum of a given text
@@ -12307,6 +12321,10 @@ type
     // - this method is called e.g. by _Json() and _JsonFast() global functions
     // - if you call Init*() methods in a row, ensure you call Clear in-between
     function InitJSON(const JSON: RawUTF8; aOptions: TDocVariantOptions=[]): boolean;
+    /// initialize a variant instance to store some document-based object content
+    // from a JSON array of JSON object content, stored in a file
+    // - if you call Init*() methods in a row, ensure you call Clear in-between
+    function InitJSONFromFile(const JsonFile: TFileName; aOptions: TDocVariantOptions=[]): boolean;
     /// ensure a document-based variant instance will have one unique options set
     // - this will create a copy of the supplied TDocVariant instance, forcing
     // all nested events to have the same set of Options
@@ -15954,7 +15972,7 @@ begin
     vtPointer:
       PointerToHex(VPointer,result);
     vtClass:
-      if VClass<>nil then
+      if VClass<>nil then                                          
         result := PShortString(PPointer(PtrInt(VClass)+vmtClassName)^)^ else
         result := '';
     vtObject:
@@ -18937,9 +18955,9 @@ begin
     exit;
   end;
   result := '';
-  SetLength(tmpStr,length(Args));
   if length(Args)*2+1>high(blocks) then
     raise ESynException.Create('FormatUTF8: too many args (max=25)!');
+  SetLength(tmpStr,length(Args));
   blocksN := 0;
   argN := 0;
   L := 0;
@@ -21584,6 +21602,7 @@ begin
     result := false;
 end;
 
+
 procedure StringDynArrayToRawUTF8DynArray(const Source: TStringDynArray;
   var Result: TRawUTF8DynArray);
 var i: Integer;
@@ -21865,9 +21884,8 @@ begin
 end;
 
 function ExistsIniNameValue(P: PUTF8Char; const UpperName: RawUTF8;
-  const UpperValues: array of RawUTF8): boolean;
+  const UpperValues: array of PAnsiChar): boolean;
 var PBeg: PUTF8Char;
-    i: integer;
 begin
   result := true;
   if high(UpperValues)>=0 then
@@ -21876,9 +21894,8 @@ begin
       if PBeg^=' ' then repeat inc(PBeg) until PBeg^<>' ';   // trim left ' '
       if IdemPChar(PBeg,pointer(UpperName)) then begin
         inc(PBeg,length(UpperName));
-        for i := 0 to high(UpperValues) do
-          if IdemPChar(PBeg,pointer(UpperValues[i])) then
-            exit; // found one value
+        if IdemPCharArray(PBeg,UpperValues)>=0 then
+          exit; // found one value
         break;
       end;
     end;
@@ -27524,7 +27541,7 @@ end;
 procedure LogToTextFile(Msg: RawUTF8);
 begin
   if Msg='' then begin
-    Msg := StringToUTF8(SysErrorMessage(GetLastError));
+    StringToUTF8(SysErrorMessage(GetLastError),Msg);
     if Msg='' then
       exit;
   end;
@@ -28381,7 +28398,7 @@ end;
 function IsHTMLContentTypeTextual(Headers: PUTF8Char): Boolean;
 begin
   result := ExistsIniNameValue(Headers,HEADER_CONTENT_TYPE_UPPER,
-    ['TEXT/','APPLICATION/JSON','APPLICATION/XML',
+    ['APPLICATION/JSON','TEXT/','APPLICATION/XML',
      'APPLICATION/X-JAVASCRIPT','IMAGE/SVG+XML']);
 end;
 
@@ -34217,6 +34234,12 @@ begin
   end;
 end;
 
+function TDocVariantData.InitJSONFromFile(const JsonFile: TFileName;
+  aOptions: TDocVariantOptions): boolean;
+begin
+  result := InitJSONInPlace(pointer(AnyTextFileToRawUTF8(JsonFile,true)),aOptions)<>nil;
+end;
+
 procedure TDocVariantData.InitCSV(CSV: PUTF8Char; aOptions: TDocVariantOptions;
   NameValueSep, ItemSep: AnsiChar; DoTrim: boolean);
 var n,v: RawUTF8;
@@ -36173,6 +36196,10 @@ begin
         result := 0;
     varBoolean:
       result := ord(A.VBoolean)-ord(B.VBoolean);
+    varOleStr{$ifdef HASVARUSTRING},varUString{$endif}:
+      if caseInsensitive then
+        result := AnsiICompW(A.VAny,B.VAny) else
+        result := StrCompW(A.VAny,B.VAny);
     else
       if A.VType and VTYPE_STATIC=0 then
         result := ICMP[VarCompareValue(variant(A),variant(B))] else
@@ -39045,14 +39072,17 @@ function TObjectHash.Find(Item: TObject): integer;
 var n: integer;
 begin
   n := Count;
-  if n<=COUNT_TO_START_HASHING then begin
-    for result := 0 to n-1 do // loop comparison if not worth it
-      if Compare(Get(result),Item) then
-        exit;
-    result := -1;
-    exit;
-  end;
-  result := HashFind(Hash(Item),Item);
+  if n<=COUNT_TO_START_HASHING then
+    result := Scan(Item,n) else
+    result := HashFind(Hash(Item),Item);
+end;
+
+function TObjectHash.Scan(Item: TObject; ListCount: integer): integer;
+begin
+  for result := 0 to ListCount-1 do
+    if Compare(Get(result),Item) then
+      exit;
+  result := -1;
 end;
 
 function TObjectHash.HashFind(aHashCode: cardinal; Item: TObject): integer;
@@ -39121,38 +39151,34 @@ begin
   fHashs := nil; // force HashInit call on next Find()
 end;
 
-function TObjectHash.JustAdded: boolean;
+function TObjectHash.EnsureJustAddedNotDuplicated: boolean;
 var H: cardinal;
-    n,ndx: integer;
-    O: TObject;
+    lastNdx,ndx: integer;
+    lastObject: TObject;
 begin
-  n := Count-1;
-  O := Get(n);
-  if O=nil then
-    raise ESynException.CreateUTF8('Invalid %.JustAdded call',[self]);
-  if n<COUNT_TO_START_HASHING then begin
-    result := false;
-    for ndx := 0 to n-1 do // loop comparison if not worth it
-      if Compare(Get(ndx),O) then
-        exit;
-    result := true;
+  lastNdx := Count-1;
+  lastObject := Get(lastNdx);
+  if lastObject=nil then
+    raise ESynException.CreateUTF8('Invalid %.EnsureJustAddedNotDuplicated call',[self]);
+  if lastNdx<COUNT_TO_START_HASHING then begin
+    result := Scan(lastObject,lastNdx)<0; // O(n) search if not worth it
     exit;
   end;
-  if n*2-n shr 3>length(fHashs) then begin
+  if lastNdx*2-lastNdx shr 3>length(fHashs) then begin
     fHashs := nil;
-    HashInit(n); // re-compute fHashs up to Count-1 if not enough void positions
+    HashInit(lastNdx); // re-compute fHashs up to Count-1 if not enough void positions
   end;
-  H := Hash(O);
-  ndx := HashFind(H,O);
+  H := Hash(lastObject);
+  ndx := HashFind(H,lastObject);
   if ndx>=0 then begin
-    result := true; // duplicate found
+    result := false; // duplicate found
     exit;
   end;
   with fHashs[-ndx-1] do begin
     Hash := H;
-    Index := n;
+    Index := lastNdx;
   end;
-  result := true;
+  result := true; // last inserted item is OK
 end;
 
 
@@ -41125,8 +41151,7 @@ begin
         vtChar:       AddJSONEscape(@VChar,1);
         vtWideChar:   AddJSONEscapeW(@VWideChar,1);
         vtWideString: AddJSONEscapeW(VWideString);
-        vtClass: if VClass<>nil then
-                   AddShort(PShortString(PPointer(PtrInt(VClass)+vmtClassName)^)^);
+        vtClass:      AddClassName(VClass);
       end;
       Add('"');
     end;
@@ -41155,9 +41180,7 @@ begin
   vtPointer:      AddPointer(PtrUInt(VPointer));
   vtPChar:        Add(PUTF8Char(VPChar),Escape);
   vtObject:       WriteObject(VObject,[woFullExpand]);
-  vtClass:
-    if VClass<>nil then
-      AddShort(PShortString(PPointer(PtrInt(VClass)+vmtClassName)^)^);
+  vtClass:        AddClassName(VClass);
   vtWideChar:
     AddW(@VWideChar,1,Escape);
   vtPWideChar:
@@ -41310,7 +41333,8 @@ begin
     Add(SepChar);
 end;
 
-procedure TTextWriter.AddInstancePointer(Instance: TObject; SepChar: AnsiChar);
+procedure TTextWriter.AddInstancePointer(Instance: TObject; SepChar: AnsiChar;
+  IncludeUnitName: boolean);
 begin
   AddShort(PShortString(PPointer(PPtrInt(Instance)^+vmtClassName)^)^);
   Add('(');
@@ -50411,7 +50435,7 @@ begin
     ndx := DV.GetValueIndex(List[i].Name);
     if ndx<0 then
       ndx := DV.InternalAdd(List[i].Name) else
-      if SortDynArrayVariant(v,DV.Values[ndx])=0 then
+      if SortDynArrayVariantComp(TVarData(v),TVarData(DV.Values[ndx]),false)=0 then
         continue; // value not changed -> skip
     if ChangedProps<>nil then
       PDocVariantData(ChangedProps)^.AddValue(List[i].Name,v);
