@@ -399,6 +399,7 @@ unit SynCommons;
   - UTF-8 process will now handle UTF-16 surrogates - see ticket [4a0382367d] -
     UnicodeCharToUTF8/NextUTF8Char are renamed WideCharToUTF8/NextUTF8UCS4 and
     new UTF16CharToUTF8/UCS4ToUTF8 functions have been introduced
+  - added ToUTF8() overloaded functions, which could be used on most simple types
   - introducing TSynTimeZone class, for cross-platform local time handling 
   - added TextColor() and TextBackground() functions - will initialize internal
     console process after any manual AllocConsole call
@@ -428,7 +429,7 @@ unit SynCommons;
   - included x64 asm of FillChar() and Move() for Win64 - Delphi RTL will be
     patched at startup, if the DOPATCHTRTL conditional is defined
   - introduced FillcharFast() and MoveFast() global function variables,
-    pointing to optimized asm versions, depending on the CPU abilities 
+    pointing to optimized asm versions, depending on the CPU abilities
   - FastCode-based x86 asm Move() procedure will handle source=dest
   - faster x86/x64 asm versions of StrUInt32() StrInt32() StrInt64() functions
   - new StrUInt64(), UniqueRawUTF8(), FastNewRawUTF8() and SetRawUTF8() functions
@@ -829,7 +830,11 @@ type
 {$ifdef ISDELPHI2009}
   PtrUInt = cardinal; { see http://synopse.info/forum/viewtopic.php?id=136 }
 {$else}
-  PtrUInt = {$ifdef UNICODE}NativeUInt{$else}cardinal{$endif};
+  {$ifdef UNICODE}
+  PtrUInt = NativeUInt;
+  {$else}
+  PtrUInt = cardinal;
+  {$endif}
 {$endif}
   /// a CPU-dependent unsigned integer type cast of a pointer of pointer
   // - used for 64 bits compatibility, native under Free Pascal Compiler
@@ -837,13 +842,25 @@ type
 
   /// a CPU-dependent signed integer type cast of a pointer / register
   // - used for 64 bits compatibility, native under Free Pascal Compiler
-  PtrInt = {$ifdef UNICODE}NativeInt{$else}integer{$endif};
+{$ifdef ISDELPHI2009}
+  PtrInt = integer;
+{$else}
+  {$ifdef UNICODE}
+  PtrInt = NativeInt;
+  {$else}
+  PtrInt = integer;
+  {$endif}
+{$endif}
   /// a CPU-dependent signed integer type cast of a pointer of pointer
   // - used for 64 bits compatibility, native under Free Pascal Compiler
   PPtrInt = ^PtrInt;
 
   /// unsigned Int64 doesn't exist under older Delphi, but is defined in FPC
-  QWord = {$ifdef HASINLINE}UInt64{$else}Int64{$endif};
+  {$ifdef HASINLINE}
+  QWord = UInt64;
+  {$else}
+  QWord = Int64;
+  {$endif}
 
   {$ifndef ISDELPHIXE2}
   /// used to store the handle of a system Thread
@@ -861,6 +878,7 @@ const
   soCurrent = soFromCurrent;
   reInvalidPtr = 2;
   PathDelim  = '\';
+  sLineBreak = #13#10;
 
 type
   PPointer = ^Pointer;
@@ -912,8 +930,9 @@ type
   TPtrUIntDynArray = array of PtrUInt;
 
 {$ifndef NOVARIANTS}
-  /// a pointer to a variant array
+  /// a variant values array
   TVariantArray = array[0..MaxInt div SizeOf(Variant)-1] of Variant;
+  /// a pointer to a variant array
   PVariantArray = ^TVariantArray;
 
   /// a dynamic array of variant values
@@ -929,9 +948,11 @@ type
 // - pointer(RawUnicode) is compatible with Win32 'Wide' API call
 // - mimic Delphi 2009 UnicodeString, without the WideString or Ansi conversion overhead
 // - all conversion to/from AnsiString or RawUTF8 must be explicit
-{$ifdef UNICODE} RawUnicode = type AnsiString(CP_UTF16); // Codepage for an UnicodeString
-{$else}          RawUnicode = type AnsiString;
-{$endif}
+  {$ifdef UNICODE}
+  RawUnicode = type AnsiString(CP_UTF16); // Codepage for an UnicodeString
+  {$else}
+  RawUnicode = type AnsiString;
+  {$endif}
 
   /// RawUTF8 is an UTF-8 String stored in an AnsiString
   // - use this type instead of System.UTF8String, which behavior changed
@@ -939,16 +960,22 @@ type
   // is consistent and compatible with all versions of Delphi compiler
   // - mimic Delphi 2009 UTF8String, without the charset conversion overhead
   // - all conversion to/from AnsiString or RawUnicode must be explicit
-{$ifdef UNICODE} RawUTF8 = type AnsiString(CP_UTF8); // Codepage for an UTF8 string
-{$else}          RawUTF8 = type AnsiString; {$endif}
+  {$ifdef UNICODE}
+  RawUTF8 = type AnsiString(CP_UTF8); // Codepage for an UTF8 string
+  {$else}
+  RawUTF8 = type AnsiString;
+  {$endif}
 
   /// WinAnsiString is a WinAnsi-encoded AnsiString (code page 1252)
   // - use this type instead of System.String, which behavior changed
   // between Delphi 2009 compiler and previous versions: our implementation
   // is consistent and compatible with all versions of Delphi compiler
   // - all conversion to/from RawUTF8 or RawUnicode must be explicit
-{$ifdef UNICODE} WinAnsiString = type AnsiString(1252); // WinAnsi Codepage
-{$else}          WinAnsiString = type AnsiString; {$endif}
+  {$ifdef UNICODE}
+  WinAnsiString = type AnsiString(1252); // WinAnsi Codepage
+  {$else}
+  WinAnsiString = type AnsiString;
+  {$endif}
 
 {$ifndef UNICODE}
   /// define RawByteString, as it does exist in Delphi 2009+
@@ -978,8 +1005,11 @@ type
   //   has been made much faster since Windows Vista/Seven)
   // - starting with Delphi 2009, it uses fastest UnicodeString type, which
   //   allow Copy On Write, Reference Counting and fast heap memory allocation
-  {$ifdef UNICODE}SynUnicode = UnicodeString;
-  {$else}         SynUnicode = WideString; {$endif}
+  {$ifdef UNICODE}
+  SynUnicode = UnicodeString;
+  {$else}
+  SynUnicode = WideString;
+  {$endif}
 
   PRawUnicode = ^RawUnicode;
   PRawJSON = ^RawJSON;
@@ -1393,9 +1423,13 @@ const
   /// HTTP header for MIME content type used for plain JSON
   JSON_CONTENT_TYPE_HEADER = HEADER_CONTENT_TYPE+JSON_CONTENT_TYPE;
 
+  /// MIME content type used for plain JSON, in upper case
+  // - could be used e.g. with IdemPChar() to retrieve the Content-Type value
+  JSON_CONTENT_TYPE_UPPER = 'APPLICATION/JSON';
+
   /// HTTP header for MIME content type used for plain JSON, in upper case
   // - could be used e.g. with IdemPChar() to retrieve the Content-Type value
-  JSON_CONTENT_TYPE_HEADER_UPPER = HEADER_CONTENT_TYPE_UPPER+'APPLICATION/JSON';
+  JSON_CONTENT_TYPE_HEADER_UPPER = HEADER_CONTENT_TYPE_UPPER+JSON_CONTENT_TYPE_UPPER;
 
   /// MIME content type used for plain UTF-8 text
   TEXT_CONTENT_TYPE = 'text/plain; charset=UTF-8';
@@ -1721,7 +1755,7 @@ function UTF8DecodeToUnicodeString(const S: RawUTF8): UnicodeString; overload; i
 // but is faster, since use no Win32 API call
 procedure UTF8DecodeToUnicodeString(P: PUTF8Char; L: integer; var result: UnicodeString); overload;
 
-{$endif}
+{$endif HASVARUSTRING}
 
 {$ifdef UNICODE}
 
@@ -1740,7 +1774,8 @@ function WinAnsiToUnicodeString(WinAnsi: PAnsiChar; WinAnsiLen: integer): Unicod
 /// convert a Win-Ansi string into a Delphi 2009+ Unicode string
 // - this function is faster than default RTL, since use no Win32 API call
 function WinAnsiToUnicodeString(const WinAnsi: WinAnsiString): UnicodeString; inline; overload;
-{$endif}
+
+{$endif UNICODE}
 
 /// convert any generic VCL Text into an UTF-8 encoded String
 // - it's prefered to use TLanguageFile.StringToUTF8() method in mORMoti18n,
@@ -1757,6 +1792,21 @@ function StringToUTF8(const Text: string): RawUTF8; overload;
 procedure StringToUTF8(const Text: string; var result: RawUTF8); overload;
   {$ifdef HASINLINE}inline;{$endif}
 
+/// convert any generic VCL Text into an UTF-8 encoded String
+function ToUTF8(const Text: string): RawUTF8; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// convert any UTF-8 encoded shortstring Text into an UTF-8 encoded String
+// - expects the supplied content to be already ASCII-7 or UTF-8 encoded, e.g.
+// a RTTI type or property name: it won't work with Ansi-encoded strings 
+function ToUTF8(const Ansi7Text: ShortString): RawUTF8; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// convert a TGUID into UTF-8 encoded text
+// - will return e.g. '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without the {})
+// - if you need the embracing { }, use GUIDToRawUTF8() function instead
+function ToUTF8(const guid: TGUID): RawUTF8; overload;
+
 {$ifndef NOVARIANTS}
 
 type
@@ -1768,6 +1818,12 @@ type
 // - use VariantSaveJSON() instead if you need a conversion to JSON with
 // custom parameters
 function VariantToUTF8(const V: Variant): RawUTF8; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// convert any Variant into UTF-8 encoded String
+// - use VariantSaveJSON() instead if you need a conversion to JSON with
+// custom parameters
+function ToUTF8(const V: Variant): RawUTF8; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// convert any Variant into UTF-8 encoded String
@@ -2118,7 +2174,7 @@ function Int32ToUtf8(Value: integer): RawByteString; overload;
 /// use our fast RawUTF8 version of IntToStr()
 // - without any slow UnicodeString=String->AnsiString conversion for Delphi 2009
 // - result as var parameter saves a local assignment and a try..finally
-procedure Int32ToUTF8(Value : integer; var result: RawUTF8); overload;
+procedure Int32ToUTF8(Value: integer; var result: RawUTF8); overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// use our fast RawUTF8 version of IntToStr()
@@ -2126,6 +2182,16 @@ procedure Int32ToUTF8(Value : integer; var result: RawUTF8); overload;
 // - result as var parameter saves a local assignment and a try..finally
 procedure Int64ToUtf8(Value: Int64; var result: RawUTF8); overload;
   {$ifdef HASINLINE}inline;{$endif}
+
+/// use our fast RawUTF8 version of IntToStr()
+function ToUTF8(Value: PtrInt): RawByteString; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+{$ifndef CPU64}
+/// use our fast RawUTF8 version of IntToStr()
+function ToUTF8(Value: Int64): RawByteString; overload;
+  {$ifdef PUREPASCAL}{$ifdef HASINLINE}inline;{$endif}{$endif}
+{$endif}
 
 /// optimized conversion of a cardinal into RawUTF8
 function UInt32ToUtf8(Value: cardinal): RawByteString; overload;
@@ -2163,6 +2229,11 @@ var
   // - is defined as a var, so that you may be able to override the default
   // settings, for the whole process
   DOUBLE_PRECISION: integer = 15;
+  /// best possible precision when rendering a "extended" kind of float
+  // - can be used as parameter for ExtendedToString/ExtendedToStr
+  // - is defined as a var, so that you may be able to override the default
+  // settings, for the whole process
+  EXTENDED_PRECISION: integer = 18;
 
 type
   {$ifdef CPUARM}
@@ -2293,7 +2364,7 @@ function StrIComp(Str1, Str2: pointer): PtrInt;
 function StrLenPas(S: pointer): PtrInt;
 
 {$ifdef FPC}
-/// FPC will use its internal optimized implementation
+/// FPC will use its internal optimized implementations
 function StrLen(S: pointer): sizeint; external name 'FPC_PCHAR_LENGTH';
 var FillcharFast: procedure(var Dest; count: PtrInt; Value: byte) = System.FillChar;
 {$else}
@@ -2743,6 +2814,7 @@ function UpperCopy(dest: PAnsiChar; const source: RawUTF8): PAnsiChar;
 function UpperCopyShort(dest: PAnsiChar; const source: shortstring): PAnsiChar;
 
 {$ifdef USENORMTOUPPER}
+
 /// fast UTF-8 comparaison using the NormToUpper[] array for all 8 bits values
 // - this version expects u1 and u2 to be zero-terminated
 // - this version will decode each UTF-8 glyph before using NormToUpper[]
@@ -2806,7 +2878,7 @@ function LowerCaseU(const S: RawUTF8): RawUTF8;
 // - will not set the last char to #0 (caller must do that if necessary)
 function ConvertCaseUTF8(P: PUTF8Char; const Table: TNormTableByte): PtrInt;
 
-{$endif}
+{$endif USENORMTOUPPER}
 
 /// fast conversion of the supplied text into uppercase
 // - this will only convert 'a'..'z' into 'A'..'Z' (no NormToUpper use), and
@@ -2879,7 +2951,7 @@ function FindIniEntryW(const Content: string; const Section, Name: RawUTF8): str
 {$ifdef FPC}
 /// our fast RawUTF8 version of Trim(), for FPC only
 function Trim(const S: RawUTF8): RawUTF8;
-{$endif}
+{$endif FPC}
 
 {$ifdef PUREPASCAL}
 
@@ -3363,6 +3435,28 @@ function DirectoryDelete(const Directory: TFileName; const Mask: TFileName='*.*'
 // - returns the full expanded directory name, including trailing backslash
 function EnsureDirectoryExists(const Directory: TFileName;
   RaiseExceptionOnCreationFailure: boolean=false): TFileName;
+
+type
+  /// file found result item, as returned by FindFiles()
+  TFindFiles = {$ifndef UNICODE}object{$else}record{$endif}
+    /// the matching file name
+    Name: TFileName;
+    /// the matching file attributes
+    Attr: Integer;
+    /// the matching file size
+    Size: Int64;
+    /// the matching file date/time
+    TimeStamp: TDateTime;
+    /// fill the item properties from a FindFirst/FindNext's TSearchRec
+    procedure FromSearchRec(const Directory: TFileName; const F: TSearchRec);
+  end;
+  /// result list, as returned by FindFiles()
+  TFindFilesDynArray = array of TFindFiles;
+
+/// search for matching file names
+// - just a wrapper around FindFirst/FindNext
+function FindFiles(const Directory,Mask: TFileName;
+  const IgnoreFileName: TFileName=''): TFindFilesDynArray;
 
 {$ifdef DELPHI5OROLDER}
 /// DirectoryExists returns a boolean value that indicates whether the
@@ -4016,13 +4110,6 @@ const
   djObject = djPointer;
 
 type
-  {$ifdef UNICODE}
-  { due to a bug in Delphi 2009+, we need to fake inheritance of record,
-    since TDynArrayHashed = object(TDynArray) fails to initialize
-    http://blog.synopse.info/post/2011/01/29/record-and-object-issue-in-Delphi-2010 }
-  {$define UNDIRECTDYNARRAY}
-  {$endif}
-
   /// a wrapper around a dynamic array with one dimension
   // - provide TList-like methods using fast RTTI information
   // - can be used to fast save/retrieve all memory content to a TStream
@@ -4248,7 +4335,7 @@ type
     /// sort the dynamic array elements, using the Compare property function
     // - it will change the dynamic array content, and exchange all elements
     // in order to be sorted in increasing order according to Compare function
-    procedure Sort;
+    procedure Sort(aCompare: TDynArraySortCompare=nil);
     /// search for an element value inside a sorted dynamic array
     // - this method will use the Compare property function for the search
     // - will be faster than a manual FindAndAddIfNotExisting+Sort process
@@ -4278,13 +4365,16 @@ type
     /// will reverse all array elements, in place
     procedure Reverse;
     /// sort the dynamic array elements using a lookup array of indexes
-    // - it won't change the dynamic array content: only create or update
-    // the given integer lookup array, using the specified comparison function
+    // - in comparison to the Sort method, this CreateOrderedIndex won't change
+    // the dynamic array content, but only create (or update) the supplied
+    // integer lookup array, using the specified comparison function
+    // - if aCompare is not supplied, the method will use fCompare (if defined)
     // - you should provide either a void either a valid lookup table, that is
     // a table with one to one lookup (e.g. created with FillIncreasing)
     // - if the lookup table has less elements than the main dynamic array,
     // its content will be recreated
-    procedure CreateOrderedIndex(var aIndex: TIntegerDynArray; aCompare: TDynArraySortCompare);
+    procedure CreateOrderedIndex(var aIndex: TIntegerDynArray;
+      aCompare: TDynArraySortCompare);
     /// save the dynamic array content into a (memory) stream
     // - will handle array of binaries values (byte, word, integer...), array of
     // strings or array of packed records, with binaries and string properties
@@ -4512,10 +4602,10 @@ type
     function Find(const Elem): integer; inline;
     property Capacity: integer read GetCapacity write SetCapacity;
   private
-  {$else}
+  {$else UNDIRECTDYNARRAY}
   TDynArrayHashed = object(TDynArray)
   protected
-  {$endif}
+  {$endif UNDIRECTDYNARRAY}
     fHashElement: TDynArrayHashOne;
     fHasher: THasher;
     fHashs: TSynHashDynArray;
@@ -5240,6 +5330,7 @@ procedure InterfaceArrayDelete(var aInterfaceArray; aItemIndex: integer); overlo
 
 {$endif DELPHI5OROLDER}
 
+
 /// helper to retrieve the text of an enumerate item
 // - you'd better use RTTI related classes of mORMot.pas unit, e.g. TEnumType
 function GetEnumName(aTypeInfo: pointer; aIndex: integer): PShortString;
@@ -5292,6 +5383,7 @@ function GUIDToText(P: PUTF8Char; guid: PByteArray): PUTF8Char;
 
 /// convert a TGUID into UTF-8 encoded text
 // - will return e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
+// - if you do not need the embracing { }, use ToUTF8() overloaded function
 function GUIDToRawUTF8(const guid: TGUID): RawUTF8;
 
 /// convert a TGUID into text
@@ -5312,6 +5404,7 @@ function RandomGUID: TGUID; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 type
+  /// stack-allocated ASCII string, used by GUIDToShort() function
   TGUIDShortString = string[38];
 
 const
@@ -5538,8 +5631,7 @@ function SortDynArrayVariantI(const A,B): integer;
 
 /// compare two "array of variant" elements, with or without case sensitivity
 function SortDynArrayVariantComp(const A,B: TVarData; caseInsensitive: boolean): integer;
-
-{$endif}
+{$endif NOVARIANTS}
 
 
 /// hash one AnsiString content with the suppplied Hasher() function
@@ -5572,7 +5664,7 @@ function HashUnicodeString(const Elem; Hasher: THasher): cardinal;
 /// case-insensitive hash one UnicodeString content with the suppplied Hasher() function
 // - work with UnicodeString in Delphi 2009+
 function HashUnicodeStringI(const Elem; Hasher: THasher): cardinal;
-{$endif}
+{$endif UNICODE}
 
 {$ifndef NOVARIANTS}
 /// case-sensitive hash one variant content with the suppplied Hasher() function
@@ -5580,7 +5672,7 @@ function HashVariant(const Elem; Hasher: THasher): cardinal;
 
 /// case-insensitive hash one variant content with the suppplied Hasher() function
 function HashVariantI(const Elem; Hasher: THasher): cardinal;
-{$endif}
+{$endif NOVARIANTS}
 
 /// hash one PtrUInt (=NativeUInt) value with the suppplied Hasher() function
 function HashPtrUInt(const Elem; Hasher: THasher): cardinal;
@@ -5874,7 +5966,7 @@ type
   /// the kind of variables handled by TJSONCustomParser
   // - the last item should be ptCustom, for non simple types
   TJSONCustomParserRTTIType = (
-    ptArray, ptBoolean, ptByte, ptCardinal, ptCurrency, ptDouble,
+    ptArray, ptBoolean, ptByte, ptCardinal, ptCurrency, ptDouble, ptExtended,
     ptInt64, ptInteger, ptRawByteString, ptRawJSON, ptRawUTF8, ptRecord,
     ptSingle, ptString, ptSynUnicode, ptDateTime, ptGUID, ptID, ptTimeLog,
     {$ifndef NOVARIANTS}ptVariant, {$endif}
@@ -6185,6 +6277,7 @@ type
   end;
 
   /// the available logging events, as handled by TSynLog
+  // - defined in SynCommons so that it may be used with TTextWriter.AddEndOfLine
   // - sllInfo will log general information events
   // - sllDebug will log detailed debugging information
   // - sllTrace will log low-level step by step debugging information
@@ -10231,6 +10324,8 @@ type
     /// retrieve the version as a 32 bits integer with Major.Minor.Release
     // - following Major shl 16+Minor shl 8+Release bit pattern
     function Version32: integer;
+    /// build date and time of this exe file, as plain text
+    function BuildDateTimeString: string;
   published
     /// version info of the exe file as '3.1.0.123'
     // - return "string" type, i.e. UnicodeString for Delphi 2009+
@@ -10263,7 +10358,12 @@ const
 // - generally does not include the release or build numbers
 // - returns Cardinal(-1) in case of failure
 function GetFileVersion(const FileName: TFileName): cardinal;
+
 {$endif}
+
+/// returns a JSON object containing deailed information about the computer
+// - including Host, User, CPU, OS, freemem, freedisk...
+function SystemInfoJson: RawUTF8;
 
 {$ifdef MSWINDOWS}
 
@@ -10272,10 +10372,10 @@ type
   TWindowsVersion = (
     wUnknown, w2000, wXP, wXP_64, wServer2003, wServer2003_R2,
     wVista, wVista_64, wServer2008, wServer2008_64,
-    wServer2008_R2, wServer2008_R2_64, wSeven, wSeven_64,
+    wSeven, wSeven_64, wServer2008_R2, wServer2008_R2_64,
     wEight, wEight_64, wServer2012, wServer2012_64,
     wEightOne, wEightOne_64, wServer2012R2, wServer2012R2_64,
-    wTen, wTen_64, wServer2014R2, wServer2014R2_64);
+    wTen, wTen_64, wServer2016, wServer2016_64);
   {$ifndef UNICODE}
   /// not defined in older Delphi versions
   TOSVersionInfoEx = record
@@ -10293,10 +10393,21 @@ type
   end;
   {$endif}
 
+const
+  /// the recognized Windows versions, as plain text
+  WINDOWS_NAME: array[TWindowsVersion] of RawUTF8 = (
+    '', '2000', 'XP', 'XP 64bit', 'Server 2003', 'Server 2003 R2',
+    'Vista', 'Vista 64bit', 'Server 2008', 'Server 2008 64bit',
+    '7', '7 64bit', 'Server 2008 R2', 'Server 2008 R2 64bit',
+    '8', '8 64bit', 'Server 2012', 'Server 2012 64bit',
+    '8.1', '8.1 64bit', 'Server 2012 R2', 'Server 2012 R2 64bit',
+    '10', '10 64bit', 'Server 2016', 'Server 2016 64bit');
+
 var
-  /// is set to TRUE if the current process is running under WOW64
+  /// is set to TRUE if the current process is a 32 bit image running under WOW64
   // - WOW64 is the x86 emulator that allows 32-bit Windows-based applications
   // to run seamlessly on 64-bit Windows
+  // - equals always FALSE if the current executable is a 64 bit image
   IsWow64: boolean;
   /// the current System information, as retrieved for the current process
   // - under a WOW64 process, it will use the GetNativeSystemInfo() new API
@@ -10308,6 +10419,9 @@ var
   OSVersionInfo: TOSVersionInfoEx;
   /// the current Operating System version, as retrieved for the current process
   OSVersion: TWindowsVersion;
+  /// the current Operating System version, as retrieved for the current process
+  // - contains e.g. 'Windows Seven 64 Service Pack 1 (6.1.7601)'
+  OSVersionText: RawUTF8;
 
 /// this function can be used to create a GDI compatible window, able to
 // receive Windows Messages for fast local communication
@@ -10342,6 +10456,7 @@ var
     nprocs: integer;
     uts: UtsName;
   end;
+  OSVersionText: RawUTF8;
 
 {$ifdef KYLIX3}
 
@@ -10646,6 +10761,10 @@ type
 
   /// one recognized WHERE expression for TSynTableStatement
   TSynTableStatementWhere = record
+    /// any '(' before the actual expression
+    ParenthesisBefore: RawUTF8;
+    /// any ')' after the actual expression
+    ParenthesisAfter: RawUTF8;
     /// expressions are evaluated as AND unless this field is set to TRUE
     JoinedOR: boolean;
     /// if this expression is preceded by a NOT modifier
@@ -10695,6 +10814,7 @@ type
     fWhere: TSynTableStatementWhereDynArray;
     fOrderByField: TSQLFieldIndexDynArray;
     fGroupByField: TSQLFieldIndexDynArray;
+    fWhereHasParenthesis: boolean;
     fOrderByDesc: boolean;
     fLimit: integer;
     fOffset: integer;
@@ -10727,6 +10847,8 @@ type
     property TableName: RawUTF8 read fTableName;
     /// the WHERE clause of this SQL statement
     property Where: TSynTableStatementWhereDynArray read fWhere;
+    /// if the WHERE clause contains any ( ) parenthesis expression
+    property WhereHasParenthesis: boolean read fWhereHasParenthesis;
     /// recognize an GROUP BY clause with one or several fields
     // - here 0 = ID, otherwise RTTI field index +1
     property GroupByField: TSQLFieldIndexDynArray read fGroupByField;
@@ -11444,6 +11566,12 @@ procedure VariantToRawByteString(const Value: variant; var Dest: RawByteString);
 /// same as Value := Null, but slightly faster
 procedure SetVariantNull(var Value: variant);
   {$ifdef HASINLINE}inline;{$endif}
+
+const
+  NullVarData: TVarData = (VType: varNull);
+var
+  /// a slightly faster alternative to Variants.Null function
+  Null: variant absolute NullVarData;
 
 {$endif}
 
@@ -13029,7 +13157,11 @@ function _Json(const JSON: RawUTF8; var Value: variant;
 // ! Obj(NameValuePairs,JSON_OPTIONS[true]);
 // - so all created objects and arrays will be handled by reference, for best
 // speed - but you should better write on the resulting variant tree with caution
-function _ObjFast(const NameValuePairs: array of const): variant;
+function _ObjFast(const NameValuePairs: array of const): variant; overload;
+
+/// initialize a variant instance to store any object as a TDocVariant
+// - is a wrapper around _JsonFast(ObjectToJson(aObject))
+function _ObjFast(aObject: TObject): variant; overload;
 
 /// initialize a variant instance to store some document-based array content
 // - this global function is an handy alias to:
@@ -13370,6 +13502,9 @@ type
     constructor Create; override;
     /// finalize the class, and its nested TSynMonitorSize instances
     destructor Destroy; override;
+    /// some text corresponding to current 'free/total' memory information
+    // - returns e.g. '10.3 GB / 15.6 GB'
+    class function FreeAsText: RawUTF8;
     {$ifndef NOVARIANTS}
     /// fill a TDocVariant with the current system memory information
     // - numbers would be given in KB (Bytes shl 10)
@@ -13401,7 +13536,7 @@ type
   end;
 
   /// value object able to gather information about a system drive
-  TSynMonitoryDisk = class(TSynPersistent)
+  TSynMonitorDisk = class(TSynPersistent)
   protected
     fName: RawUTF8;
     fVolumeName: RawUTF8;
@@ -13419,6 +13554,9 @@ type
     constructor Create; override;
     /// finalize the class, and its nested TSynMonitorSize instances
     destructor Destroy; override;
+    /// some text corresponding to current 'free/total' disk information
+    // - could return e.g. 'D: 64.4 GB / 213.4 GB'
+    class function FreeAsText: RawUTF8;
   published
     /// the disk name
     property Name: RawUTF8 read GetName;
@@ -13797,8 +13935,8 @@ type
 
 
 /// convert a size to a human readable value
-// - append MB, KB or B symbol
-// - for MB and KB, add one fractional digit
+// - append TB, GB, MB, KB or B symbol
+// - for TB, GB, MB and KB, add one fractional digit
 function KB(bytes: Int64): RawUTF8;
 
 /// convert a micro seconds elapsed time into a human readable value
@@ -15769,6 +15907,29 @@ begin
 end;
 {$endif}
 
+{$ifdef UNICODE}
+function ToUTF8(const Text: string): RawUTF8;
+begin
+  RawUnicodeToUtf8(pointer(Text),length(Text),result);
+end;
+{$else}
+function ToUTF8(const Text: string): RawUTF8;
+begin
+  result := CurrentAnsiConvert.AnsiToUTF8(Text);
+end;
+{$endif}
+
+function ToUTF8(const Ansi7Text: ShortString): RawUTF8;
+begin
+  SetString(result,PAnsiChar(@Ansi7Text[1]),ord(Ansi7Text[0]));
+end;
+
+function ToUTF8(const guid: TGUID): RawUTF8;
+begin
+  FastNewRawUTF8(result,36);
+  GUIDToText(pointer(result),@guid);
+end;
+
 procedure Int32ToUTF8(Value : integer; var result: RawUTF8);
 var tmp: array[0..15] of AnsiChar;
     P: PAnsiChar;
@@ -15802,6 +15963,9 @@ begin
     vtBoolean: if V.VBoolean then
                  value := 1 else
                  value := 0;
+    {$ifndef NOVARIANTS}
+    vtVariant: value := V.VVariant^;
+    {$endif}
     else begin
       result := false;
       exit;
@@ -15820,6 +15984,9 @@ begin
                  value := 0;
     vtExtended: value := V.VExtended^;
     vtCurrency: value := V.VCurrency^;
+    {$ifndef NOVARIANTS}
+    vtVariant: value := V.VVariant^;
+    {$endif}
     else begin
       result := false;
       exit;
@@ -15942,7 +16109,7 @@ begin
   with V do
   case V.VType of
     vtString:
-      result := VString^;
+      SetRawUTF8(result,@VString^[1],ord(VString^[0]));
     vtAnsiString:
       result := RawUTF8(VAnsiString); // expect UTF-8 content
     {$ifdef UNICODE}
@@ -15980,18 +16147,12 @@ begin
          result := PShortString(PPointer(PPtrInt(VObject)^+vmtClassName)^)^ else
          result := '';
     vtInterface:
-      {$ifdef ISDELPHI2010}
-      if VInterface<>nil then
-        result := PShortString(PPointer(PPtrInt(IInterface(VInterface) as TObject)^+vmtClassName)^)^ else
-        result := '';
-      {$else}
-      {$ifdef FPC}
+      {$ifdef HASINTERFACEASTOBJECT}
       if VInterface<>nil then
         result := PShortString(PPointer(PPtrInt(IInterface(VInterface) as TObject)^+vmtClassName)^)^ else
         result := '';
       {$else}
       PointerToHex(VInterface,result);
-      {$endif}
       {$endif}
     {$ifndef NOVARIANTS}
     vtVariant:
@@ -17214,6 +17375,14 @@ begin
     VariantToUTF8(Variant(tmp),result,wasString) else
   if VType=varVariant or varByRef then // complex varByRef
     VariantToUTF8(PVariant(VPointer)^,result,wasString) else
+  if VType=varByRef or varString then begin
+    wasString := true;
+    {$ifdef UNICODE}
+      AnyAnsiToUTF8(PRawByteString(VString)^,result);
+    {$else}
+      result := PRawUTF8(VString)^;
+    {$endif}
+  end else
   if VType=varByRef or varOleStr then begin
     wasString := true;
     RawUnicodeToUtf8(pointer(PWideString(VAny)^),length(PWideString(VAny)^),result);
@@ -17229,6 +17398,12 @@ begin
 end;
 
 function VariantToUTF8(const V: Variant): RawUTF8;
+var wasString: boolean;
+begin
+  VariantToUTF8(V,result,wasString);
+end;
+
+function ToUTF8(const V: Variant): RawUTF8; overload;
 var wasString: boolean;
 begin
   VariantToUTF8(V,result,wasString);
@@ -18826,7 +19001,25 @@ end;
 
 {$endif}
 
-function UInt32ToUTF8(Value: Cardinal): RawByteString; // faster than SysUtils.IntToStr
+{$ifndef CPU64} // already implemented by ToUTF8(Value: PtrInt) below
+function ToUTF8(Value: Int64): RawByteString;
+var tmp: array[0..23] of AnsiChar;
+    P: PAnsiChar;
+begin
+  P := StrInt64(@tmp[23],Value);
+  SetString(result,P,@tmp[23]-P);
+end;
+{$endif}
+
+function ToUTF8(Value: PtrInt): RawByteString;
+var tmp: array[0..15] of AnsiChar;
+    P: PAnsiChar;
+begin
+  P := StrInt32(@tmp[15],Value);
+  SetString(result,P,@tmp[15]-P);
+end;
+
+function UInt32ToUTF8(Value: Cardinal): RawByteString;
 var tmp: array[0..15] of AnsiChar;
     P: PAnsiChar;
 begin
@@ -19763,35 +19956,37 @@ begin
   GetVersionEx(OSVersionInfo);
   Vers := wUnknown;
   with OSVersionInfo do
+  // see https://msdn.microsoft.com/en-us/library/windows/desktop/ms724833
   case dwMajorVersion of
     5: case dwMinorVersion of
-     0: Vers := w2000;
-     1: Vers := wXP;
-     2: if (wProductType=VER_NT_WORKSTATION) and
-           (SystemInfo.wProcessorArchitecture=PROCESSOR_ARCHITECTURE_AMD64) then
-          Vers := wXP_64 else
-        if GetSystemMetrics(SM_SERVERR2)=0 then
-          Vers := wServer2003 else
-          Vers := wServer2003_R2;
-    end;
-    6: begin
-    case dwMinorVersion of
-     0: Vers := wVista;
-     1: Vers := wSeven;
-     2: Vers := wEight;
-     3: Vers := wEightOne;
-     4: Vers := wTen;
-    end;
-    if Vers<>wUnknown then begin
-      if wProductType<>VER_NT_WORKSTATION then
-        inc(Vers,2); // e.g. wEight -> wServer2012
-      if SystemInfo.wProcessorArchitecture=PROCESSOR_ARCHITECTURE_AMD64 then
-        inc(Vers);   // e.g. wEight -> wEight64
-    end;
-    end;
+       0: Vers := w2000;
+       1: Vers := wXP;
+       2: if (wProductType=VER_NT_WORKSTATION) and
+             (SystemInfo.wProcessorArchitecture=PROCESSOR_ARCHITECTURE_AMD64) then
+            Vers := wXP_64 else
+          if GetSystemMetrics(SM_SERVERR2)=0 then
+            Vers := wServer2003 else
+            Vers := wServer2003_R2;
+      end;
+    6: case dwMinorVersion of
+       0: Vers := wVista;
+       1: Vers := wSeven;
+       2: Vers := wEight;
+       3: Vers := wEightOne;
+       4: Vers := wTen;
+       end;
     10: Vers := wTen;
   end;
+  if Vers>=wVista then begin
+    if OSVersionInfo.wProductType<>VER_NT_WORKSTATION then
+      inc(Vers,2); // e.g. wEight -> wServer2012
+    if SystemInfo.wProcessorArchitecture=PROCESSOR_ARCHITECTURE_AMD64 then
+      inc(Vers);   // e.g. wEight -> wEight64
+  end;
   OSVersion := Vers;
+  with OSVersionInfo do
+    OSVersionText := FormatUTF8('Windows % % (%.%.%)',
+      [WINDOWS_NAME[Vers],szCSDVersion,dwMajorVersion,dwMinorVersion,dwBuildNumber]);
 end;
 
 {$else}
@@ -19804,6 +19999,8 @@ begin
   {$else}
   FPUname(SystemInfo.uts);
   {$endif}
+  with SystemInfo.uts do
+    OSVersionText := FormatUTF8('%-% %',[sysname,release,version]);
 end;
 
 {$ifdef KYLIX3}
@@ -22407,6 +22604,54 @@ begin
     result := false;
 end;
 
+procedure TFindFiles.FromSearchRec(const Directory: TFileName; const F: TSearchRec);
+begin
+  Name := Directory+F.Name;
+  {$ifdef MSWINDOWS}
+  {$ifdef HASINLINE} // FPC or Delphi 2006+
+  Size := F.Size;
+  {$else} // F.Size was limited to 32 bits on older Delphi
+  Size := F.FindData.nFileSizeLow or Int64(F.FindData.nFileSizeHigh) shl 32;
+  {$endif}
+  {$else}
+  Size := F.Size;
+  {$endif}
+  Attr := F.Attr;
+  {$ifdef ISDELPHIXE2}
+  TimeStamp := F.TimeStamp;
+  {$else}
+  TimeStamp := FileDateToDateTime(F.Time);
+  {$endif}
+end;
+
+function FindFiles(const Directory,Mask,IgnoreFileName: TFileName): TFindFilesDynArray;
+var F: TSearchRec;
+    n: integer;
+    Dir: TFileName;
+begin
+  result := nil;
+  n := 0;
+  Dir := IncludeTrailingPathDelimiter(Directory);
+  if FindFirst(Dir+Mask,faAnyfile-faDirectory,F)=0 then begin
+    repeat
+      {$ifndef DELPHI5OROLDER}
+      {$WARN SYMBOL_DEPRECATED OFF} // for faVolumeID
+      {$endif}
+      if (F.Attr and (faDirectory+faVolumeID+faSysFile+faHidden)=0) and
+         (F.Name[1]<>'.') and ((IgnoreFileName='') or
+          (AnsiCompareFileName(F.Name,IgnoreFileName)<>0)) then begin
+        SetLength(result,n+1);
+        result[n].FromSearchRec(Dir,F);
+        inc(n);
+      end;
+      {$ifndef DELPHI5OROLDER}
+      {$WARN SYMBOL_DEPRECATED ON}
+      {$endif}
+    until FindNext(F)<>0;
+    FindClose(F);
+  end;
+end;
+
 function EnsureDirectoryExists(const Directory: TFileName;
   RaiseExceptionOnCreationFailure: boolean=false): TFileName;
 begin
@@ -22814,8 +23059,11 @@ end;
 procedure FillIncreasing(Values: PIntegerArray; StartValue, Count: integer);
 var i: integer;
 begin
-  for i := 0 to Count-1 do
-    Values[i] := StartValue+i;
+  if StartValue=0 then
+    for i := 0 to Count-1 do
+      Values[i] := i else
+    for i := 0 to Count-1 do
+      Values[i] := StartValue+i;
 end;
 
 procedure Int64ToUInt32(Values64: PInt64Array; Values32: PCardinalArray; Count: integer);
@@ -28398,7 +28646,7 @@ end;
 function IsHTMLContentTypeTextual(Headers: PUTF8Char): Boolean;
 begin
   result := ExistsIniNameValue(Headers,HEADER_CONTENT_TYPE_UPPER,
-    ['APPLICATION/JSON','TEXT/','APPLICATION/XML',
+    [JSON_CONTENT_TYPE_UPPER,'TEXT/','APPLICATION/XML',
      'APPLICATION/X-JAVASCRIPT','IMAGE/SVG+XML']);
 end;
 
@@ -28671,6 +28919,25 @@ begin
 end;
 
 
+function SystemInfoJson: RawUTF8;
+begin
+  with SystemInfo do
+    result := JSONEncode([
+      'host',ExeVersion.Host,'user',ExeVersion.User,'os',OSVersionText,
+      {$ifndef PUREPASCAL}{$ifdef CPUINTEL}
+      'hyperthread',cfHT in CpuFeatures,'sse2',cfSSE2 in CpuFeatures,
+      'sse42',cfSSE42 in CpuFeatures,'aesni',cfAESNI in CpuFeatures,
+      'hypervisor',cf_HYP in CpuFeatures,
+      {$endif}{$endif}
+      'cpucount',
+      {$ifdef MSWINDOWS}
+      dwNumberOfProcessors,{$ifndef CPU64}'wow64',IsWow64,{$endif}
+      {$else MSWINDOWS}
+      nprocs,
+      {$endif MSWINDOWS}
+      'freemem',TSynMonitorMemory.FreeAsText,'freedisk',TSynMonitorDisk.FreeAsText]);
+end;
+
 {$ifdef MSWINDOWS}
 
 {$ifdef DELPHI6OROLDER}
@@ -28830,6 +29097,11 @@ end;
 function TFileVersion.Version32: integer;
 begin
   result := Major shl 16+Minor shl 8+Release;
+end;
+
+function TFileVersion.BuildDateTimeString: string;
+begin
+  DateTimeToIso8601StringVar(fBuildDateTime,' ',result);
 end;
 
 procedure SetExecutableVersion(aMajor,aMinor,aRelease: integer);
@@ -31807,10 +32079,10 @@ end;
 class function TJSONCustomParserRTTI.TypeNameToSimpleRTTIType(TypeName: PUTF8Char;
   TypeNameLen: Integer; var ItemTypeName: RawUTF8): TJSONCustomParserRTTIType;
 const
-  SORTEDMAX = {$ifdef NOVARIANTS}29{$else}30{$endif};
+  SORTEDMAX = {$ifdef NOVARIANTS}30{$else}31{$endif};
   SORTEDNAMES: array[0..SORTEDMAX] of PUTF8Char =
     ('ARRAY','BOOLEAN','BYTE','CARDINAL','CURRENCY',
-     'DOUBLE','INT64','INTEGER','PTRINT','PTRUINT',
+     'DOUBLE','EXTENDED','INT64','INTEGER','PTRINT','PTRUINT',
      'RAWBYTESTRING','RAWJSON','RAWUTF8','RECORD','SINGLE',
      'STRING','SYNUNICODE','TCREATETIME','TDATETIME','TGUID',
      'TID','TMODTIME','TRECORDREFERENCE','TRECORDREFERENCETOBEDELETED',
@@ -31820,7 +32092,7 @@ const
    // warning: recognized types should match at binary storage level!
    SORTEDTYPES: array[0..SORTEDMAX] of TJSONCustomParserRTTIType =
      (ptArray,ptBoolean,ptByte,ptCardinal,ptCurrency,
-      ptDouble,ptInt64,ptInteger,ptPtrInt,ptPtrUInt,
+      ptDouble,ptExtended,ptInt64,ptInteger,ptPtrInt,ptPtrUInt,
       ptRawByteString,ptRawJSON,ptRawUTF8,ptRecord,ptSingle,
       ptString,ptSynUnicode,ptTimeLog,ptDateTime,ptGUID,
       ptID,ptTimeLog,ptInt64,ptInt64,
@@ -31911,10 +32183,11 @@ begin
     Typ := pointer(PtrUInt(@Item.elSize)+Item.NameLen);
     {$endif}
     case TFloatType(Typ^) of
-    ftSingle: result := ptSingle;
-    ftDoub:   result := ptDouble;
-    ftCurr:   result := ptCurrency;
-    // ftExtended, ftComp: not implemented yet
+    ftSingle:   result := ptSingle;
+    ftDoub:     result := ptDouble;
+    ftCurr:     result := ptCurrency;
+    ftExtended: result := ptExtended;
+    // ftComp: not implemented yet
     end;
   end;
   end;
@@ -31995,7 +32268,7 @@ procedure TJSONCustomParserRTTI.ComputeDataSizeAfterAdd;
 const // binary size (in bytes) of each kind of property - 0 for ptRecord/ptCustom
   JSONRTTI_SIZE: array[TJSONCustomParserRTTIType] of byte = (
     SizeOf(PtrUInt),SizeOf(Boolean),SizeOf(Byte),SizeOf(Cardinal),SizeOf(Currency),
-    SizeOf(Double),SizeOf(Int64),SizeOf(Integer),SizeOf(RawByteString),
+    SizeOf(Double),SizeOf(Extended),SizeOf(Int64),SizeOf(Integer),SizeOf(RawByteString),
     SizeOf(RawJSON),SizeOf(RawUTF8),0,SizeOf(Single),SizeOf(String),SizeOf(SynUnicode),
     SizeOf(TDateTime),SizeOf(TGUID),SizeOf(Int64),SizeOf(TTimeLog),
     {$ifndef NOVARIANTS}SizeOf(Variant),{$endif}
@@ -32213,6 +32486,7 @@ Error:      Prop.FinalizeNestedArray(PPtrUInt(Data)^);
       ptCardinal:  PCardinal(Data)^ := GetCardinal(PropValue);
       ptCurrency:  PInt64(Data)^ := StrToCurr64(PropValue);
       ptDouble:    PDouble(Data)^ := GetExtended(PropValue);
+      ptExtended:  PExtended(Data)^ := GetExtended(PropValue);
       ptInt64,ptID:SetInt64(PropValue,PInt64(Data)^);
       ptInteger:   PInteger(Data)^ := GetInteger(PropValue);
       ptSingle:    PSingle(Data)^ := GetExtended(PropValue);
@@ -32327,6 +32601,7 @@ procedure TJSONCustomParserRTTI.WriteOneLevel(aWriter: TTextWriter; var P: PByte
     ptCardinal:  aWriter.AddU(PCardinal(Value)^);
     ptCurrency:  aWriter.AddCurr64(PInt64(Value)^);
     ptDouble:    aWriter.AddDouble(unaligned(PDouble(Value)^));
+    ptExtended:  aWriter.Add(PExtended(Value)^,EXTENDED_PRECISION);
     ptInt64,ptID:aWriter.Add(PInt64(Value)^);
     ptInteger:   aWriter.Add(PInteger(Value)^);
     ptSingle:    aWriter.AddSingle(PSingle(Value)^);
@@ -34381,8 +34656,8 @@ begin
     if ndx>=0 then
       raise EDocVariant.CreateUTF8('Duplicated "%" name',[aName]);
   end;
-  SetVariantByValue(aValue,VValue[InternalAdd(aName)]);
-  result := VCount-1;
+  result := InternalAdd(aName); // FPC does not allow VValue[InternalAdd(aName)]
+  SetVariantByValue(aValue,VValue[result]);
 end;
 
 function TDocVariantData.AddValue(aName: PUTF8Char; aNameLen: integer; const aValue: variant): integer;
@@ -34410,15 +34685,17 @@ end;
 
 function TDocVariantData.AddItem(const aValue: variant): integer;
 begin
-  SetVariantByValue(aValue,VValue[InternalAdd('')]);
-  result := VCount-1;
+  result := InternalAdd(''); // FPC does not allow VValue[InternalAdd(aName)]
+  SetVariantByValue(aValue,VValue[result]);
 end;
 
 procedure TDocVariantData.AddItems(const aValue: array of const);
-var ndx: integer;
+var ndx,added: integer;
 begin
-  for ndx := 0 to high(aValue) do
-    VarRecToVariant(aValue[ndx],VValue[InternalAdd('')]);
+  for ndx := 0 to high(aValue) do begin
+    added := InternalAdd(''); // FPC does not allow VValue[InternalAdd(aName)]
+    VarRecToVariant(aValue[ndx],VValue[added]);
+  end;
 end;
 
 function TDocVariantData.SearchItemByProp(const aPropName,aPropValue: RawUTF8;
@@ -35407,7 +35684,8 @@ var ndx: Integer;
     Data: TDocVariantData absolute V;
 begin
   if (Data.Kind=dvArray) and (PWord(Name)^=ord('_')) then begin
-    SetVariantByValue(variant(Value),Data.VValue[Data.InternalAdd('')]);
+    ndx := Data.InternalAdd(''); // FPC does not allow VValue[InternalAdd(aName)]
+    SetVariantByValue(variant(Value),Data.VValue[ndx]);
     exit;
   end;
   SetString(aName,Name,StrLen(PUTF8Char(Name)));
@@ -35452,7 +35730,8 @@ begin
       exit;
     end;
   1:if SameText(Name,'Add') then begin
-      SetVariantByValue(variant(Arguments[0]),Data.VValue[Data.InternalAdd('')]);
+      ndx := Data.InternalAdd(''); // FPC does not allow VValue[InternalAdd(aName)]
+      SetVariantByValue(variant(Arguments[0]),Data.VValue[ndx]);
       exit;
     end else
     if SameText(Name,'Delete') then begin
@@ -35489,7 +35768,8 @@ begin
     end;
   2:if SameText(Name,'Add') then begin
       SetTempFromFirstArgument;
-      SetVariantByValue(variant(Arguments[1]),Data.VValue[Data.InternalAdd(temp)]);
+      ndx := Data.InternalAdd(temp); // FPC does not allow VValue[InternalAdd(aName)]
+      SetVariantByValue(variant(Arguments[1]),Data.VValue[ndx]);
       exit;
     end;
   end;
@@ -35812,6 +36092,15 @@ begin
   if TVarData(result).VType and VTYPE_STATIC<>0 then
     VarClear(result);
   TDocVariantData(result).InitObject(NameValuePairs,JSON_OPTIONS_FAST);
+end;
+
+function _ObjFast(aObject: TObject): variant;
+begin
+  if TVarData(result).VType and VTYPE_STATIC<>0 then
+    VarClear(result);
+  if TDocVariantData(result).InitJSONInPlace(
+      pointer(ObjectToJson(aObject)),JSON_OPTIONS_FAST)=nil then
+    VarClear(result);
 end;
 
 function _ArrFast(const Items: array of const): variant;
@@ -36221,7 +36510,7 @@ begin
   result := SortDynArrayVariantComp(TVarData(A),TVarData(B),true);
 end;
 
-{$endif}
+{$endif NOVARIANTS}
 
 function TDynArray.Add(const Elem): integer;
 begin
@@ -37538,11 +37827,13 @@ begin
   until I >= R;
 end;
 
-procedure TDynArray.Sort;
+procedure TDynArray.Sort(aCompare: TDynArraySortCompare);
 var QuickSort: TDynArrayQuickSort;
 begin
-  if (@fCompare<>nil) and (fValue<>nil) and (fValue^<>nil) then begin
-    Quicksort.Compare := @fCompare;
+  if @aCompare=nil then
+    Quicksort.Compare := @fCompare else
+    Quicksort.Compare := aCompare;
+  if (@Quicksort.Compare<>nil) and (fValue<>nil) and (fValue^<>nil) then begin
     Quicksort.Value := fValue^;
     Quicksort.ElemSize := ElemSize;
     Quicksort.QuickSort(0,Count-1);
@@ -37555,13 +37846,15 @@ procedure TDynArray.CreateOrderedIndex(var aIndex: TIntegerDynArray;
 var QuickSort: TDynArrayQuickSort;
     n: integer;
 begin
-  if (@aCompare<>nil) and (fValue<>nil) and (fValue^<>nil) then begin
+  if @aCompare=nil then
+    Quicksort.Compare := @fCompare else
+    Quicksort.Compare := aCompare;
+  if (@QuickSort.Compare<>nil) and (fValue<>nil) and (fValue^<>nil) then begin
     n := Count;
     if length(aIndex)<n then begin
       SetLength(aIndex,n);
       FillIncreasing(pointer(aIndex),0,n);
     end;
-    Quicksort.Compare := @aCompare;
     Quicksort.Value := fValue^;
     Quicksort.ElemSize := ElemSize;
     Quicksort.Index := pointer(aIndex);
@@ -41186,7 +41479,7 @@ begin
   vtPWideChar:
     AddW(pointer(VPWideChar),StrLenW(VPWideChar),Escape);
   vtAnsiString:
-    Add(VAnsiString,Escape); // expect RawUTF8
+    Add(VAnsiString,length(RawUTF8(VAnsiString)),Escape); // expect RawUTF8
   vtCurrency:
     AddCurr64(VInt64^);
   vtWideString:
@@ -43618,8 +43911,12 @@ end;
 function KB(bytes: Int64): RawUTF8;
 var hi,rem: cardinal;
 begin
-  if bytes>=1024*1024 then begin
-    if bytes>=1024*1024*1024 then begin
+  if bytes>=1 shl 20 then begin
+    if bytes>=Int64(1) shl 40 then begin
+      bytes := bytes shr 20;
+      result := ' TB';
+    end else
+    if bytes>=1 shl 30 then begin
       bytes := bytes shr 10;
       result := ' GB';
     end else
@@ -43910,6 +44207,16 @@ begin
   inherited Destroy;
 end;
 
+class function TSynMonitorMemory.FreeAsText: RawUTF8;
+begin
+  with TSynMonitorMemory.Create do
+  try
+    result := FormatUTF8('% / %',[PhysicalMemoryFree.Text,PhysicalMemoryTotal.Text]);
+  finally
+    Free;
+  end;
+end;
+
 {$ifndef NOVARIANTS}
 class function TSynMonitorMemory.ToVariant: variant;
 begin
@@ -44078,16 +44385,16 @@ begin
 end;
 
 
-{ TSynMonitoryDisk }
+{ TSynMonitorDisk }
 
-constructor TSynMonitoryDisk.Create;
+constructor TSynMonitorDisk.Create;
 begin
   fAvailableSize := TSynMonitorSize.Create;
   fFreeSize := TSynMonitorSize.Create;
   fTotalSize := TSynMonitorSize.Create;
 end;
 
-destructor TSynMonitoryDisk.Destroy;
+destructor TSynMonitorDisk.Destroy;
 begin
   fAvailableSize.Free;
   fFreeSize.Free;
@@ -44095,28 +44402,38 @@ begin
   inherited;
 end;
 
-function TSynMonitoryDisk.GetName: RawUTF8;
+function TSynMonitorDisk.GetName: RawUTF8;
 begin
   RetrieveDiskInfo;
   result := fName;
 end;
 
-function TSynMonitoryDisk.GetAvailable: TSynMonitorSize;
+function TSynMonitorDisk.GetAvailable: TSynMonitorSize;
 begin
   RetrieveDiskInfo;
   result := fAvailableSize;
 end;
 
-function TSynMonitoryDisk.GetFree: TSynMonitorSize;
+function TSynMonitorDisk.GetFree: TSynMonitorSize;
 begin
   RetrieveDiskInfo;
   result := fFreeSize;
 end;
 
-function TSynMonitoryDisk.GetTotal: TSynMonitorSize;
+function TSynMonitorDisk.GetTotal: TSynMonitorSize;
 begin
   RetrieveDiskInfo;
   result := fTotalSize;
+end;
+
+class function TSynMonitorDisk.FreeAsText: RawUTF8;
+begin
+  with TSynMonitorDisk.Create do
+  try
+    result := FormatUTF8('% % / %',[Name,FreeSize.Text,TotalSize.Text]);
+  finally
+    Free;
+  end;
 end;
 
 {$ifdef MSWINDOWS}
@@ -44125,7 +44442,7 @@ function GetDiskFreeSpaceExA(lpDirectoryName: PAnsiChar;
   lpTotalNumberOfFreeBytes: QWord): LongBool; stdcall; external kernel32;
 {$endif}
 
-procedure TSynMonitoryDisk.RetrieveDiskInfo;
+procedure TSynMonitorDisk.RetrieveDiskInfo;
   procedure RetrieveInfo;
   {$ifdef MSWINDOWS}
   var tmp: array[byte] of AnsiChar;
@@ -48918,7 +49235,7 @@ end;
 constructor TSynTableStatement.Create(const SQL: RawUTF8;
   GetFieldIndex: TSynTableFieldIndex; SimpleFieldsBits: TSQLFieldBits=[0..MAX_SQLFIELDS-1];
   FieldProp: TSynTableFieldProperties=nil);
-var Prop: RawUTF8;
+var Prop, whereBefore: RawUTF8;
     P, B: PUTF8Char;
     ndx,err,len,selectCount,whereCount: integer;
     whereWithOR,whereNotClause: boolean;
@@ -48980,6 +49297,7 @@ begin
   result := true;
 end;
 function GetWhereValue(var Where: TSynTableStatementWhere): boolean;
+var B: PUTF8Char;
 begin
   result := false;
   P := GotoNextNotSpace(P);
@@ -49027,11 +49345,21 @@ begin
     inc(P,2); // ignore :(...): parameter
   Where.ValueSQLLen := P-Where.ValueSQL;
   P := GotoNextNotSpace(P);
+  if (P^=')') and (Where.FunctionName='') then begin
+    B := P;
+    repeat
+      inc(P);
+    until not (P^ in [#1..' ',')']);
+    while P[-1]=' ' do dec(P); // trim right space
+    SetString(Where.ParenthesisAfter,B,P-B);
+    P := GotoNextNotSpace(P);
+  end;
   result := true;
 end;
 function GetWhereExpression(FieldIndex: integer; var Where: TSynTableStatementWhere): boolean;
 begin
   result := false;
+  Where.ParenthesisBefore := whereBefore;
   Where.JoinedOR := whereWithOR;
   Where.NotClause := whereNotClause;
   Where.Field := FieldIndex; // 0 = ID, otherwise PropertyIndex+1
@@ -49160,10 +49488,20 @@ begin
   whereCount := 0;
   whereWithOR := false;
   whereNotClause := false;
+  whereBefore := '';
   GetNextFieldProp(P,Prop);
   if IdemPropNameU(Prop,'WHERE') then begin
     repeat
       B := P;
+      if P^='(' then begin
+        fWhereHasParenthesis := true;
+        repeat
+          inc(P);
+        until not (P^ in [#1..' ','(']);
+        while P[-1]=' ' do dec(P); // trim right space
+        SetString(whereBefore,B,P-B);
+        B := P;
+      end;
       ndx := GetPropIndex;
       if ndx<0 then begin
         if IdemPropNameU(Prop,'NOT') then begin
@@ -49174,7 +49512,9 @@ begin
           inc(P);
           SetLength(fWhere,whereCount+1);
           with fWhere[whereCount] do begin
+            ParenthesisBefore := whereBefore;
             JoinedOR := whereWithOR;
+            NotClause := whereNotClause;
             FunctionName := UpperCase(Prop);
             // Byte/Word/Integer/Cardinal/Int64/CurrencyDynArrayContains(BlobField,I64)
             len := length(Prop);
@@ -49210,6 +49550,7 @@ begin
         whereWithOR := false else
         goto lim2;
       whereNotClause := false;
+      whereBefore := '';
     until false;
     // 4. get optional LIMIT/OFFSET/ORDER clause
 lim:P := GotoNextNotSpace(P);
