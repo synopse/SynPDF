@@ -4327,23 +4327,24 @@ end;
 
 function TPdfWrite.AddEscapeContent(const Text: RawByteString): TPdfWrite;
 {$ifdef USE_PDFSECURITY}
-var tmp: PAnsiChar;
-    L: integer;
-    buf: array[byte] of AnsiChar;
+var
+  vTmp: PAnsiChar;
+  L: integer;
+  buf: array[byte] of AnsiChar;
 {$endif}
 begin
 {$ifdef USE_PDFSECURITY}
   if (Text<>'') and (fDoc.fEncryption<>nil) then begin
     L := length(Text);
     if L<sizeof(buf) then
-      tmp := buf else
-      GetMem(tmp,L);
+      vTmp := buf else
+      GetMem(vTmp,L);
     try
-      fDoc.fEncryption.EncodeBuffer(pointer(Text)^,tmp^,L);
-      result := AddEscape(tmp,L);
+      fDoc.fEncryption.EncodeBuffer(pointer(Text)^,vTmp^,L);
+      result := AddEscape(vTmp,L);
     finally
-      if tmp<>buf then
-        Freemem(tmp);
+      if vTmp<>buf then
+        Freemem(vTmp);
     end;
   end else
 {$endif}
@@ -4509,9 +4510,12 @@ begin
     str(Value:0:2,Buffer); // fast conversion with no temp string, using '.'
     L := ord(Buffer[0]);
     if Buffer[L]='0' then
+    begin
       if Buffer[L-1]='0' then // '3.00' -> '3 '
-        dec(L,2) else // '3.40' -> '3.4 '
-        else inc(L);  // '3.45' -> '3.45 '
+        dec(L,2)
+    end
+    else
+      inc(L);  // '3.45' -> '3.45 '
     Buffer[L] := ' '; // append space at the end
     MoveFast(Buffer[1],B^,L);
     inc(B,L);
@@ -4581,23 +4585,23 @@ begin
 end;
 var L: Integer;
 {$ifdef USE_PDFSECURITY}
-    tmp: TWordDynArray;
+    vTmp: TWordDynArray;
 {$endif}
 begin
   if WideCharCount>0 then begin
 {$ifdef USE_PDFSECURITY}
     if fDoc.fEncryption<>nil then begin
-      SetLength(tmp,WideCharCount);
-      fDoc.fEncryption.EncodeBuffer(PW^,pointer(tmp)^,WideCharCount*2);
-      PW := pointer(tmp);
+      SetLength(vTmp,WideCharCount);
+      fDoc.fEncryption.EncodeBuffer(PW^,pointer(vTmp)^,WideCharCount*2);
+      PW := pointer(vTmp);
     end;
 {$endif}
     repeat
       L := WideCharCount;
       if BEnd-B<=L*4 then begin
         Save;
-        if L>high(Tmp) shr 2 then
-          L := high(Tmp) shr 2; // max WideCharCount allowed in Tmp[]
+        if L>high(vTmp) shr 2 then
+          L := high(vTmp) shr 2; // max WideCharCount allowed in vTmp[]
       end;
       BinToHex4(pointer(PW),B,L);
       inc(PtrInt(PW),L*2);
@@ -4963,12 +4967,14 @@ end;
 
 function TPdfWrite.ToPDFString: PDFString;
 begin
+  result := '';
   if fDestStreamPosition=0 then
     // we remained in the internal buffer -> not necessary to use stream
-    SetString(Result,Tmp,B-@Tmp) else begin
+    SetString(Result,Tmp,B-@Tmp)
+  else
+  begin
     // we used the stream -> flush remaining, and get whole data at once
     Save;
-    result := '';
     SetLength(result,fDestStreamPosition);
     fDestStream.Seek(0,soFromBeginning);
     fDestStream.Read(pointer(result)^,fDestStreamPosition);
