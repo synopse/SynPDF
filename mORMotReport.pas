@@ -1644,6 +1644,7 @@ var PtrHdl: THandle;
     PtrPPI: TPoint;
     size: TSize;
 begin
+  Result := '';
   try
     PtrHdl := Printer.Handle;
     PtrPPI.x := GetDeviceCaps(PtrHdl, LOGPIXELSX);
@@ -2454,16 +2455,17 @@ begin
 end;
 
 procedure TGDIPages.SetZoomStatus(aZoomStatus: TZoomStatus);
-var zoom: integer;
+var
+  vZoom: integer;
 begin
   if (self=nil) or (aZoomStatus=fZoomStatus) then
     exit;
   case aZoomStatus of
-    zsPageFit:   zoom := PAGE_FIT;
-    zsPageWidth: zoom := PAGE_WIDTH;
-    else         zoom := fZoom;
+    zsPageFit:   vZoom := PAGE_FIT;
+    zsPageWidth: vZoom := PAGE_WIDTH;
+    else         vZoom := fZoom;
   end;
-  SetZoom(zoom);
+  SetZoom(vZoom);
 end;
 
 procedure TGDIPages.SetZoom(Zoom: integer);
@@ -3716,7 +3718,7 @@ var PC: PChar;
     i, n, aX: integer;
     Men: TGdiPagePreviewButton;
     M, Root: TMenuItem;
-    Page: TMetaFile;
+    vPage: TMetaFile;
     s: string;
 begin
   if Self=nil then exit; // avoid GPF
@@ -3727,7 +3729,7 @@ begin
     FreeAndNil(fCanvas);
   n := length(fPages);
   if (n>1) and not HeaderDone then begin
-    // cancel the last page if it hasn't been started ...
+    // cancel the last Page if it hasn't been started ...
     FreeAndNil(fCurrentMetaFile);
     dec(n);
     SetLength(fPages,n);
@@ -3736,10 +3738,10 @@ begin
   if (n>0) and (fPagesToFooterText<>'') then
     // add 'Page #/#' caption at the specified position
     for i := 0 to n-1 do begin
-      Page := CreateMetaFile(fPages[i].SizePx.X,fPages[i].SizePx.Y);
+      vPage := CreateMetaFile(fPages[i].SizePx.X,fPages[i].SizePx.Y);
       try
-        fCanvas := CreateMetafileCanvas(Page);
-        fCanvas.Draw(0,0,GetMetaFileForPage(i)); // re-draw the original page
+        fCanvas := CreateMetafileCanvas(vPage);
+        fCanvas.Draw(0,0,GetMetaFileForPage(i)); // re-draw the original Page
         s := format(fPagesToFooterText,[i+1,n]); // add 'Page #/#' caption
         aX := fPagesToFooterAt.X;
         if aX<0 then
@@ -3751,9 +3753,9 @@ begin
           fCanvas.TextOut(aX,SizePx.Y-MarginPx.bottom-fFooterHeight+
             fFooterGap+fPagesToFooterAt.Y,s);
         FreeAndNil(fCanvas);
-        SetMetaFileForPage(i,Page); // replace page content
+        SetMetaFileForPage(i,vPage); // replace Page content
       finally
-        Page.Free;
+        vPage.Free;
       end;
     end;
   // OK, all Metafile pages have now been created and added to Pages[]
@@ -3761,7 +3763,7 @@ begin
     fOnDocumentProducedEvent(Self); // notify report just generated
   fCurrPreviewPage := 1;
   if Assigned(fPreviewPageChangedEvent) then
-    fPreviewPageChangedEvent(Self); // notify page changed
+    fPreviewPageChangedEvent(Self); // notify Page changed
   Invalidate;
   // update popup menu content
   if PopupMenu=nil then // caller may have created a TPopupMenu instance
@@ -4746,7 +4748,7 @@ end;
 function TGDIPages.ExportPDFStream(aDest: TStream): boolean;
 var PDF: TPDFDocument;
     BackgroundImage: TPdfImage;
-    page: TPdfPage;
+    vPage: TPdfPage;
     i: integer;
 begin
   try
@@ -4784,9 +4786,9 @@ begin
         // this loop will do all the magic :)
         PDF.DefaultPageWidth := PdfCoord(25.4*SizePx.X/fPrinterPxPerInch.x);
         PDF.DefaultPageHeight := PdfCoord(25.4*SizePx.Y/fPrinterPxPerInch.y);
-        page := PDF.AddPage;
+        vPage := PDF.AddPage;
         if BackgroundImage<>nil then
-          PDF.Canvas.DrawXObject(0,0,page.PageWidth,page.PageHeight,'BackgroundImage');
+          PDF.Canvas.DrawXObject(0,0, vPage.PageWidth, vPage.PageHeight,'BackgroundImage');
         PDF.Canvas.RenderMetaFile(GetMetaFileForPage(i),Screen.PixelsPerInch/fPrinterPxPerInch.x);
         PDF.SaveToStreamDirectPageFlush;
       end;
