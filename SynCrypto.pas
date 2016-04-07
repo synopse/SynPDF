@@ -8,7 +8,7 @@ unit SynCrypto;
 (*
     This file is part of Synopse framework.
 
-    Synopse framework. Copyright (C) 2015 Arnaud Bouchez
+    Synopse framework. Copyright (C) 2016 Arnaud Bouchez
       Synopse Informatique - http://synopse.info
 
   *** BEGIN LICENSE BLOCK *****
@@ -27,10 +27,11 @@ unit SynCrypto;
 
   The Initial Developer of the Original Code is Arnaud Bouchez.
 
-  Portions created by the Initial Developer are Copyright (C) 2015
+  Portions created by the Initial Developer are Copyright (C) 2016
   the Initial Developer. All Rights Reserved.
 
   Contributor(s):
+  - EvaF
   - Intel's sha256_sse4.asm under under a three-clause Open Software license
   - Wolfgang Ehrhardt under zlib license for AES "pure pascal" versions
   - souchaud
@@ -249,7 +250,7 @@ interface
     {.$define USEPADLOCK} // dedibox Linux tested only
   {$endif}
 {$else}
-  {$ifdef CONDITIONALEXPRESSIONS}
+  {$ifndef DELPHI5OROLDER}
     // on Windows: enable Microsoft AES Cryptographic Provider (XP SP3 and up)
     {$define USE_PROV_RSA_AES}
   {$endif}
@@ -272,7 +273,7 @@ uses
 {$endif}
   SysUtils,
 {$ifndef LVCL}
-  {$ifdef CONDITIONALEXPRESSIONS}
+  {$ifndef DELPHI5OROLDER}
   RTLConsts,
   {$endif}
 {$endif}
@@ -949,13 +950,20 @@ function MD5DigestToString(const D: TMD5Digest): RawUTF8;
 procedure FillRandom(var IV: TAESBlock); overload;
 
 /// apply the XOR operation to the supplied binary buffers of 16 bytes
-procedure XorBlock16(A,B: {$ifdef CPU64}PInt64Array{$else}PCardinalArray{$endif}); {$ifdef HASINLINE}inline;{$endif} overload;
+procedure XorBlock16(A,B: {$ifdef CPU64}PInt64Array{$else}PCardinalArray{$endif});
+  {$ifdef HASINLINE}inline;{$endif} overload;
 
 /// apply the XOR operation to the supplied binary buffers of 16 bytes
-procedure XorBlock16(A,B,C: {$ifdef CPU64}PInt64Array{$else}PCardinalArray{$endif}); {$ifdef HASINLINE}inline;{$endif} overload;
+procedure XorBlock16(A,B,C: {$ifdef CPU64}PInt64Array{$else}PCardinalArray{$endif});
+ {$ifdef HASINLINE}inline;{$endif} overload;
 
 /// apply the XOR operation to the supplied binary buffers
-procedure XorBlockN(A,B,C: PByteArray; Count: integer); {$ifdef HASINLINE}inline;{$endif}
+procedure XorBlockN(A,B,C: PByteArray; Count: integer);
+  {$ifdef HASINLINE}inline;{$endif} overload;
+
+/// apply the XOR operation to the supplied binary buffers
+procedure XorBlockN(A,B: PByteArray; Count: integer);
+  {$ifdef HASINLINE}inline;{$endif} overload;
 
 /// compute the HTDigest for a user and a realm, according to a supplied password
 // - apache-compatible: 'agent007:download area:8364d0044ef57b3defcfa141e8f77b65'
@@ -1238,10 +1246,9 @@ var
 
 procedure ComputeAesStaticTables; // will compute 4.5 KB of constant tables
 var i, x,y: byte;
-    pow,log: array of byte;
+    pow,log: array[byte] of byte;
+    c: cardinal;
 begin
-  SetLength(pow,256);
-  SetLength(log,256);
   x := 1;
   for i := 0 to 255 do begin
     pow[i] := x;
@@ -1273,9 +1280,9 @@ begin
     x := InvSBox[i];
     if x=0 then
       continue;
-    x := log[x]; // Td0[x] = Si[x].[0e,09,0d,0b] -> e.g. log[$0e]=223 below
-    Td0[i] := pow[(x+223)mod 255]+pow[(x+199)mod 255]shl 8+
-        pow[(x+238)mod 255]shl 16+pow[(x+104)mod 255]shl 24;
+    c := log[x]; // Td0[c] = Si[c].[0e,09,0d,0b] -> e.g. log[$0e]=223 below
+    Td0[i] := pow[(c+223)mod 255]+pow[(c+199)mod 255]shl 8+
+        pow[(c+238)mod 255]shl 16+pow[(c+104)mod 255]shl 24;
     Td1[i] := Td0[i] shl 8+Td0[i] shr 24;
     Td2[i] := Td1[i] shl 8+Td1[i] shr 24;
     Td3[i] := Td2[i] shl 8+Td2[i] shr 24;
@@ -1428,7 +1435,7 @@ var i: integer;
 begin
   FillcharFast(k0,sizeof(k0),0);
   if keylen>64 then
-    sha.Full(key,64,PSHA1Digest(@k0)^) else
+    sha.Full(key,keylen,PSHA1Digest(@k0)^) else
     MoveFast(key^,k0,keylen);
   for i := 0 to 15 do
     k0xorIpad[i] := k0[i] xor $36363636;
@@ -1489,7 +1496,7 @@ var i: integer;
 begin
   FillcharFast(k0,sizeof(k0),0);
   if keylen>64 then
-    sha.Full(key,64,PSHA256Digest(@k0)^) else
+    sha.Full(key,keylen,PSHA256Digest(@k0)^) else
     MoveFast(key^,k0,keylen);
   for i := 0 to 15 do
     k0xorIpad[i] := k0[i] xor $36363636;
@@ -6098,6 +6105,14 @@ begin
   for i := 0 to Count-1 do
     B[i] := A[i] xor C[i];
 end;
+
+procedure XorBlockN(A,B: PByteArray; Count: integer);
+var i: integer;
+begin
+  for i := 0 to Count-1 do
+    A[i] := A[i] xor B[i];
+end;
+
 
 const
   sAESException = 'AES engine initialization failure';

@@ -6,7 +6,7 @@ unit SynPdf;
 {
     This file is part of Synopse framework.
 
-    Synopse framework. Copyright (C) 2015 Arnaud Bouchez
+    Synopse framework. Copyright (C) 2016 Arnaud Bouchez
       Synopse Informatique - http://synopse.info
 
   *** BEGIN LICENSE BLOCK *****
@@ -25,7 +25,7 @@ unit SynPdf;
 
   The Initial Developer of the Original Code is Arnaud Bouchez.
 
-  Portions created by the Initial Developer are Copyright (C) 2015
+  Portions created by the Initial Developer are Copyright (C) 2016
   the Initial Developer. All Rights Reserved.
 
   Contributor(s):
@@ -213,6 +213,8 @@ unit SynPdf;
     enabled by default for use within the framework)
 
   Version 1.18
+  - BREAKING CHANGE of TPdfCanvas.RenderMetaFile() by spliting Scale parameter
+    into specific ScaleX, ScaleY values
   - major speed up of TPdfCanvas.RenderMetaFile() by caching printer resolution
   - implemented 40 bit and 128 bit security - see TPdfEncryption.New()
   - introducing TPdfDocument.SaveToStreamDirectBegin/PageFlush/End methods,
@@ -713,12 +715,12 @@ type
     /// internal Ansi->Unicode conversion, using the CodePage used in Create()
     // - caller must release the returned memory via FreeMem()
     function ToWideChar(const Ansi: PDFString; out DLen: Integer): PWideChar;
-{$ifdef USE_UNISCRIBE}
+    {$ifdef USE_UNISCRIBE}
     /// internal method using the Windows Uniscribe API
     // - return FALSE if PW was not appened to the PDF content, TRUE if OK
     function AddUnicodeHexTextUniScribe(PW: PWideChar; WinAnsiTTF: TPdfFontTrueType;
       NextLine: boolean; Canvas: TPdfCanvas): boolean;
-{$endif}
+    {$endif}
     /// internal method NOT using the Windows Uniscribe API
     procedure AddUnicodeHexTextNoUniScribe(PW: PWideChar; TTF: TPdfFontTrueType;
       NextLine: boolean; Canvas: TPdfCanvas);
@@ -1590,7 +1592,7 @@ type
     // the native resolution of the bitmap - in this case, the resulting
     // PDF file content will be bigger in size (e.g. use this for printing)
     // - 60 is the prefered way e.g. for publishing PDF over the internet
-    // - 80/90 is a good ration if you want to have a nice PDF to see on screen
+    // - 80/90 is a good ratio if you want to have a nice PDF to see on screen
     // - of course, this doesn't affect vectorial (i.e. emf) pictures
     property ForceJPEGCompression: integer read fForceJPEGCompression write fForceJPEGCompression;
     /// this property can force all canvas bitmaps to be stored directly
@@ -1720,7 +1722,8 @@ type
     // = XOff,YOff parameters specified in RenderMetaFile()
     FOffsetXDef, FOffsetYDef: Single;
     // WorldTransform factor and offs
-    FWorldFactorX, FWorldFactorY, FWorldOffsetX, FWorldOffsetY, FDevScale: single;
+    FWorldFactorX, FWorldFactorY, FWorldOffsetX, FWorldOffsetY: single;
+    FDevScaleX, FDevScaleY: single;
     FWinSize, FViewSize: TSize;
     FWinOrg, FViewOrg: TPoint;
     FMappingMode: Integer;
@@ -1990,12 +1993,13 @@ type
     procedure SetTextMatrix(a, b, c, d, x, y: Single);           {  Tm  }
     /// Move to the start of the next line
     procedure MoveToNextLine;                                    {  T*  }
-{$ifdef UNICODE}
+    {$ifdef HASVARUSTRING}
     /// Show a text string
     // - text is expected to be Unicode encoded
     // - if NextLine is TRUE, moves to the next line and show a text string;
     // in this case, method as the same effect as MoveToNextLine; ShowText(s);
     procedure ShowText(const text: UnicodeString; NextLine: boolean=false); overload; inline; {  Tj  or ' }
+    {$endif}
     /// Show a text string
     // - text is expected to be Ansi-Encoded, in the current CharSet; if
     // some Unicode or MBCS conversion is necessary, it will be notified to the
@@ -2003,15 +2007,6 @@ type
     // - if NextLine is TRUE, moves to the next line and show a text string;
     // in this case, method as the same effect as MoveToNextLine; ShowText(s);
     procedure ShowText(const text: PDFString; NextLine: boolean=false); overload; {  Tj  or ' }
-{$else}
-    /// Show a text string
-    // - text is expected to be Ansi-Encoded, in the current CharSet; if
-    // some Unicode or MBCS conversion is necessary, it will be notified to the
-    // corresponding
-    // - if NextLine is TRUE, moves to the next line and show a text string;
-    // in this case, method as the same effect as MoveToNextLine; ShowText(s);
-    procedure ShowText(const text: PDFString; NextLine: boolean=false); overload; {  Tj  or ' }
-{$endif}
     /// Show an Unicode Text string
     // - if NextLine is TRUE, moves to the next line and show a text string;
     // in this case, method as the same effect as MoveToNextLine; ShowText(s);
@@ -2108,7 +2103,7 @@ type
     // - KerningHScaleBottom/KerningHScaleTop are limits below which and over
     // which Font Kerning is transformed into PDF Horizontal Scaling commands
     // - TextClipping can be set to fix some issues e.g. when using Wine
-    procedure RenderMetaFile(MF: TMetaFile; Scale: Single=1.0;
+    procedure RenderMetaFile(MF: TMetaFile; ScaleX: Single=1.0; ScaleY: Single=1.0;
       XOff: single=0.0; YOff: single=0.0;
       TextPositioning: TPdfCanvasRenderMetaFileTextPositioning=tpSetTextJustification;
       KerningHScaleBottom: single=99.0; KerningHScaleTop: single=101.0;
@@ -6369,7 +6364,8 @@ begin
   FFactor := 72/FDoc.FScreenLogPixels; // PDF expect 72 pixels per inch
   FFactorX := FFactor;
   FFactorY := FFactor;
-  FDevScale := 1;
+  FDevScaleX := 1;
+  FDevScaleY := 1;
   FMappingMode := MM_TEXT;
   fUseMetaFileTextPositioning := tpSetTextJustification;
   fKerningHScaleBottom := 99.0;
@@ -6965,7 +6961,7 @@ begin
     FContents.Writer.Add('T*'#10);
 end;
 
-{$ifdef UNICODE}
+{$ifdef HASVARUSTRING}
 
 procedure TPdfCanvas.ShowText(const text: UnicodeString; NextLine: boolean);
 begin // direct call of the unicode text drawing method below
@@ -7190,24 +7186,24 @@ end;
 
 function TPdfCanvas.I2X(X: Integer): Single;
 begin
-  result := FOffsetXDef + (FWorldOffsetX + ViewOffsetX(X) * GetWorldFactorX) * FDevScale
+  result := FOffsetXDef + (FWorldOffsetX + ViewOffsetX(X) * GetWorldFactorX) * FDevScaleX
 end;
 
 function TPdfCanvas.I2Y(Y: Integer): Single;
 begin
   result := FPage.GetPageHeight - FOffsetYDef -
-    (FWorldOffsetY + ViewOffsetY(Y) * GetWorldFactorY) * FDevScale
+    (FWorldOffsetY + ViewOffsetY(Y) * GetWorldFactorY) * FDevScaleY
 end;
 
 function TPdfCanvas.I2X(X: Single): Single;
 begin
-  result := FOffsetXDef + (FWorldOffsetX + ViewOffsetX(X) * GetWorldFactorX) * FDevScale
+  result := FOffsetXDef + (FWorldOffsetX + ViewOffsetX(X) * GetWorldFactorX) * FDevScaleX
 end;
 
 function TPdfCanvas.I2Y(Y: Single): Single;
 begin
   result := FPage.GetPageHeight - FOffsetYDef -
-    (FWorldOffsetY + ViewOffsetY(Y) * GetWorldFactorY) * FDevScale
+    (FWorldOffsetY + ViewOffsetY(Y) * GetWorldFactorY) * FDevScaleY
 end;
 
 procedure TPdfCanvas.LineToI(x, y: integer);
@@ -7238,7 +7234,7 @@ end;
 procedure TPdfCanvas.RoundRectI(x1, y1, x2, y2, cx, cy: integer);
 begin
   RoundRect(I2X(x1),I2Y(y1),I2X(x2),I2Y(y2),
-    cx * FDevScale * GetWorldFactorX,-cy * FDevScale * GetWorldFactorY);
+    cx * FDevScaleX * GetWorldFactorX,-cy * FDevScaleY * GetWorldFactorY);
 end;
 
 procedure TPdfCanvas.PointI(x, y: Single);
@@ -8280,9 +8276,7 @@ end;
 
 procedure TPdfOutlineRoot.Save;
 begin
-  if Opened then
-    Data.AddItem('Count', FCount) else
-    Data.AddItem('Count', FCount);
+  Data.AddItem('Count', FCount);
   if FFirst<>nil then begin
     Data.AddItem('First', FFirst.Data);
     FFirst.Save;
@@ -8604,7 +8598,7 @@ begin
       P.SetVCLCurrentMetaFile;
       try
         FCanvas.SetPage(P);
-        FCanvas.RenderMetaFile(P.fVCLCurrentMetaFile,1,0,0,
+        FCanvas.RenderMetaFile(P.fVCLCurrentMetaFile,1,1,0,0,
           fUseMetaFileTextPositioning,KerningHScaleBottom,KerningHScaleTop,
           fUseMetaFileTextClipping);
       finally
@@ -8627,7 +8621,7 @@ begin
       FreeAndNil(P.fVCLCurrentCanvas); // manual P.SetVCLCurrentMetaFile
       try
         FCanvas.FContents.FSaveAtTheEnd := false; // force flush NOW
-        FCanvas.RenderMetaFile(P.fVCLCurrentMetaFile,1,0,0,
+        FCanvas.RenderMetaFile(P.fVCLCurrentMetaFile,1,1,0,0,
           fUseMetaFileTextPositioning,KerningHScaleBottom,KerningHScaleTop,
           fUseMetaFileTextClipping);
       finally
@@ -9270,7 +9264,7 @@ begin
   EMR_SETPIXELV: begin
     // prepare pixel size and color
     if pen.width<>1 then begin
-      E.fPenWidth := E.Canvas.GetWorldFactorX * E.Canvas.FDevScale;
+      E.fPenWidth := E.Canvas.GetWorldFactorX * E.Canvas.FDevScaleX;
       E.Canvas.SetLineWidth(E.fPenWidth * E.Canvas.FFactorX);
     end;
     if PEMRSetPixelV(R)^.crColor<>Cardinal(pen.color) then
@@ -9282,7 +9276,7 @@ begin
     Moved := false;
     // roll back pixel size and color
     if pen.width<>1 then begin
-      E.fPenWidth := pen.width * E.Canvas.GetWorldFactorX * E.Canvas.FDevScale;
+      E.fPenWidth := pen.width * E.Canvas.GetWorldFactorX * E.Canvas.FDevScaleX;
       E.Canvas.SetLineWidth(E.fPenWidth * E.Canvas.FFactorX);
     end;
     if PEMRSetPixelV(R)^.crColor<>Cardinal(pen.color) then
@@ -9316,7 +9310,7 @@ begin
   end;
 end;
 
-procedure TPdfCanvas.RenderMetaFile(MF: TMetaFile; Scale, XOff, YOff: single;
+procedure TPdfCanvas.RenderMetaFile(MF: TMetaFile; ScaleX, ScaleY, XOff, YOff: single;
   TextPositioning: TPdfCanvasRenderMetaFileTextPositioning;
   KerningHScaleBottom, KerningHScaleTop: single;
   TextClipping: TPdfCanvasRenderMetaFileTextClipping);
@@ -9331,7 +9325,8 @@ begin
   try
     FOffsetXDef := XOff;
     FOffsetYDef := YOff;
-    FDevScale := Scale * FFactor;
+    FDevScaleX := ScaleX * FFactor;
+    FDevScaleY := ScaleY * FFactor;
     FEmfBounds := R; // keep device rect
     fUseMetaFileTextPositioning := TextPositioning;
     fUseMetaFileTextClipping := TextClipping;
@@ -9716,10 +9711,10 @@ begin
       end;
       fPenStyle := pen.style;
     end;
-    if pen.width * Canvas.GetWorldFactorX * Canvas.FDevScale<>fPenWidth then begin
+    if pen.width * Canvas.GetWorldFactorX * Canvas.FDevScaleX<>fPenWidth then begin
       if pen.width=0 then
-        fPenWidth := Canvas.GetWorldFactorX * Canvas.FDevScale else
-        fPenWidth := pen.width * Canvas.GetWorldFactorX * Canvas.FDevScale;
+        fPenWidth := Canvas.GetWorldFactorX * Canvas.FDevScaleX else
+        fPenWidth := pen.width * Canvas.GetWorldFactorX * Canvas.FDevScaleX;
       Canvas.SetLineWidth(fPenWidth * Canvas.FFactorX);
     end;
   end else begin
@@ -9996,7 +9991,7 @@ begin
   with DC[nDC] do begin
     tmp := Pen;
     pen.color := font.color;
-    pen.width := aSize / 15 / Canvas.GetWorldFactorX / Canvas.FDevScale;
+    pen.width := aSize / 15 / Canvas.GetWorldFactorX / Canvas.FDevScaleX;
     pen.style := PS_SOLID;
     pen.null := False;
     NeedPen;
@@ -10034,8 +10029,8 @@ begin
       ASignY := -1;
     if (Canvas.FWorldFactorX) < 0 then
       ASignX := -1;
-    fscaleY := Abs(Canvas.fFactorY * Canvas.GetWorldFactorY * Canvas.FDevScale);
-    fscaleX := Abs(Canvas.fFactorX * Canvas.GetWorldFactorX * Canvas.FDevScale);
+    fscaleY := Abs(Canvas.fFactorY * Canvas.GetWorldFactorY * Canvas.FDevScaleY);
+    fscaleX := Abs(Canvas.fFactorX * Canvas.GetWorldFactorX * Canvas.FDevScaleX);
     // guess the font size
     if font.LogFont.lfHeight<0 then
       ASize := Abs(font.LogFont.lfHeight)*fscaleY else
@@ -10235,9 +10230,9 @@ begin
     end;
     // handle underline or strike out styles (direct draw PDF lines on canvas)
     if font.LogFont.lfUnderline<>0 then
-      DrawLine(Posi, aSize / 8 / Canvas.GetWorldFactorX / Canvas.FDevScale);
+      DrawLine(Posi, aSize / 8 / Canvas.GetWorldFactorX / Canvas.FDevScaleX);
     if font.LogFont.lfStrikeOut<>0 then
-      DrawLine(Posi, - aSize / 3 / Canvas.GetWorldFactorX / Canvas.FDevScale);
+      DrawLine(Posi, - aSize / 3 / Canvas.GetWorldFactorX / Canvas.FDevScaleX);
     // end any pending clipped TextRect() region
     if WithClip then begin
       Canvas.GRestore;

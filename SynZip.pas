@@ -6,7 +6,7 @@ unit SynZip;
 {
     This file is part of Synopse framework.
 
-    Synopse framework. Copyright (C) 2015 Arnaud Bouchez
+    Synopse framework. Copyright (C) 2016 Arnaud Bouchez
       Synopse Informatique - http://synopse.info
 
   *** BEGIN LICENSE BLOCK *****
@@ -25,7 +25,7 @@ unit SynZip;
 
   The Initial Developer of the Original Code is Arnaud Bouchez.
 
-  Portions created by the Initial Developer are Copyright (C) 2015
+  Portions created by the Initial Developer are Copyright (C) 2016
   the Initial Developer. All Rights Reserved.
 
   Contributor(s):
@@ -178,18 +178,8 @@ unit SynZip;
 interface
 
 uses
-  SysUtils,
-  Classes,
-{$ifdef USEZLIB}
-  {$ifdef USEPASZLIB}
-  zbase,
-  paszlib,
-  {$else}
-  ZLib,
-  {$endif}
-{$endif}
 {$ifdef MSWINDOWS}
-  Windows;
+  Windows,
 {$else}
   {$ifdef KYLIX3}
   LibC,
@@ -198,8 +188,18 @@ uses
   clocale,
   {$endif}
   {$endif}
-  Types;
+  Types,
 {$endif}
+{$ifdef USEZLIB}
+  {$ifdef USEPASZLIB}
+  zbase,
+  paszlib,
+  {$else}
+  ZLib,
+  {$endif}
+{$endif}
+  SysUtils,
+  Classes;
 
 type
   /// the format used for storing data
@@ -211,7 +211,10 @@ type // Delphi 5 doesn't have those base types defined :(
   PCardinal = ^Cardinal;
   IntegerArray  = array[0..$effffff] of Integer;
 const
+  PathDelim  = '\';
   soCurrent = soFromCurrent;
+
+function IncludeTrailingPathDelimiter(const FileName: TFileName): TFileName;
 {$endif}
 
 /// in-memory ZLib DEFLATE compression
@@ -242,7 +245,7 @@ function UnCompressStream(src: pointer; srcLen: integer; aStream: TStream;
 
 
 type
-{$ifdef UNICODE}
+{$ifdef HASCODEPAGE}
   /// define a raw storage string type, used for data buffer management
   ZipString = type RawByteString;
 {$else}
@@ -616,7 +619,7 @@ type
     zipName: TFileName;
   end;
 
-{$ifndef LINUX}
+{$ifdef MSWINDOWS}
   /// read-only access to a .zip archive file
   // - can open directly a specified .zip file (will be memory mapped for fast access)
   // - can open a .zip archive file content from a resource (embedded in the executable)
@@ -672,7 +675,7 @@ type
     // - returns FALSE if the information was not successfully retrieved
     function RetrieveFileInfo(Index: integer; var Info: TFileInfo): boolean;
   end;
-{$endif Linux}
+{$endif MSWINDOWS}
 
   /// abstract write-only access for creating a .zip archive
   TZipWriteAbstract = class
@@ -733,12 +736,17 @@ type
     // - this method is very fast, and will increase the .zip file in-place
     // (the old content is not copied, new data is appended at the file end)
     // - "dummy" parameter exists only to disambiguate constructors for C++
-    {$ifndef Linux}
+    {$ifdef MSWINDOWS}
     constructor CreateFrom(const aFileName: TFileName; dummy: integer=0);
     {$endif}
     /// compress (using the deflate method) a file, and add it to the zip file
     procedure AddDeflated(const aFileName: TFileName; RemovePath: boolean=true;
-      CompressLevel: integer=6); overload;
+      CompressLevel: integer=6; ZipName: TFileName=''); overload;
+    /// compress (using the deflate method) all files within a folder, and
+    // add it to the zip file
+    // - if Recursive is TRUE, would include files from nested sub-folders
+    procedure AddFolder(const FolderName: TFileName; const Mask: TFileName='*.*';
+      Recursive: boolean=true; CompressLevel: integer=6);
     /// add a file from an already compressed zip entry
     procedure AddFromZip(const ZipEntry: TZipEntry);
     /// release associated memory, and close destination file
@@ -761,7 +769,7 @@ type
 // into .zip archive files
 // - resulting file will be named YYYYMM.zip and will be located in the
 // aDestinationPath directory, i.e. TSynLogFamily.ArchivePath+'\log\YYYYMM.zip'
-{$ifndef Linux}
+{$ifdef MSWINDOWS}
 function EventArchiveZip(const aOldLogFileName, aDestinationPath: TFileName): boolean;
 {$endif}
 
@@ -778,6 +786,13 @@ uses
   {$endif}
 {$endif Linux}
 
+{$ifdef DELPHI5OROLDER}
+function IncludeTrailingPathDelimiter(const FileName: TFileName): TFileName;
+begin
+  result := IncludeTrailingBackslash(FileName);
+end;
+{$endif}
+
 const
   // those constants have +1 to avoid finding it in the exe
   FIRSTHEADER_SIGNATURE_INC = $04034b50+1;  // PK#3#4
@@ -790,7 +805,7 @@ const
 var
   EventArchiveZipWrite: TZipWrite = nil;
 
-{$ifndef Linux}
+{$ifdef MSWINDOWS}
 function EventArchiveZip(const aOldLogFileName, aDestinationPath: TFileName): boolean;
 var n: integer;
 begin
@@ -804,11 +819,11 @@ begin
         system.copy(aDestinationPath,1,length(aDestinationPath)-1)+'.zip');
     n := EventArchiveZipWrite.Count;
     EventArchiveZipWrite.AddDeflated(aOldLogFileName,True);
-    if (EventArchiveZipWrite.Count=n+1) and DeleteFile({$ifndef Linux}pointer{$endif}(aOldLogFileName)) then
+    if (EventArchiveZipWrite.Count=n+1) and DeleteFile(aOldLogFileName) then
       result := True;
   end;
 end;
-{$endif}
+{$endif MSWINDOWS}
 
 function Is7BitAnsi(P: PChar): boolean;
 begin
@@ -952,13 +967,44 @@ begin
   FileWrite(Handle,buf,len);
 end;
 
+procedure TZipWrite.AddFolder(const FolderName: TFileName; const Mask: TFileName='*.*';
+  Recursive: boolean=true; CompressLevel: integer=6);
+procedure RecursiveAdd(const fileDir,zipDir: TFileName);
+var f: TSearchRec;
+begin
+  if Recursive then
+    if FindFirst(fileDir+{$ifdef MSWINDOWS}'*.*'{$else}'*'{$endif},faDirectory,f)=0 then begin
+      repeat
+        if f.Name[1]<>'.' then
+          RecursiveAdd(fileDir+f.Name+PathDelim,zipDir+f.Name+'\');
+      until FindNext(f)<>0;
+      FindClose(f);
+    end;
+  if FindFirst(fileDir+Mask,faAnyfile-faDirectory,f)=0 then begin
+    repeat
+      if f.Name[1]<>'.' then
+        {$ifndef DELPHI5OROLDER}
+        {$WARN SYMBOL_DEPRECATED OFF} // for faVolumeID
+        {$endif}
+        if f.Attr and (faDirectory+faVolumeID+faSysFile+faHidden)=0 then
+          AddDeflated(fileDir+f.Name,false,CompressLevel,zipDir+f.Name)
+        {$ifndef DELPHI5OROLDER}
+        {$WARN SYMBOL_DEPRECATED ON}
+        {$endif}
+    until FindNext(f)<>0;
+    FindClose(f);
+  end;
+end;
+begin
+  RecursiveAdd(IncludeTrailingPathDelimiter(FolderName),'');
+end;
+
 procedure TZipWrite.AddDeflated(const aFileName: TFileName; RemovePath: boolean=true;
-  CompressLevel: integer=6);
-var {$ifndef Linux}
+  CompressLevel: integer=6; ZipName: TFileName='');
+var {$ifdef MSWINDOWS}
     Time: TFileTime;
     FileTime: LongRec;
     {$endif}
-    ZipName: TFileName;
     Size: Int64;
     Size64: Int64Rec absolute Size;
     OffsHead, OffsEnd: cardinal;
@@ -968,13 +1014,16 @@ var {$ifndef Linux}
 begin
   S := TFileStream.Create(aFileName,fmOpenRead or fmShareDenyNone);
   try
-    if RemovePath then
-      ZipName := ExtractFileName(aFileName) else
-      ZipName := aFileName;
-    {$ifndef Linux}
-    GetFileTime(S.Handle,nil,nil,@Time);
-    FileTimeToLocalFileTime(Time,Time);
-    FileTimeToDosDateTime(Time,FileTime.Hi,FileTime.Lo);
+    if ZipName='' then
+      if RemovePath then
+        ZipName := ExtractFileName(aFileName) else
+    {$ifdef MSWINDOWS}
+        ZipName := aFileName;
+      GetFileTime(S.Handle,nil,nil,@Time);
+      FileTimeToLocalFileTime(Time,Time);
+      FileTimeToDosDateTime(Time,FileTime.Hi,FileTime.Lo);
+    {$else}
+        ZipName := StringReplace(aFileName,'/','\',[rfReplaceAll]);
     {$endif}
     Size := S.Size;
     if Size64.Hi<>0 then
@@ -994,7 +1043,7 @@ begin
           zfullSize := Z.SizeIn;
           zzipSize := Z.SizeOut;
           zzipMethod := Z_DEFLATED;
-          {$ifndef Linux}
+          {$ifdef MSWINDOWS}
           zlastMod := integer(FileTime);
           {$else}
           zlastMod := FileAge(ZipName);
@@ -1035,7 +1084,7 @@ begin
     Handle := FileCreate(aFileName);
 end;
 
-{$ifndef Linux}
+{$ifdef MSWINDOWS}
 constructor TZipWrite.CreateFrom(const aFileName: TFileName; dummy: integer);
 var R: TZipRead;
     i: Integer;
@@ -1063,7 +1112,7 @@ begin
     R.Free;
   end;
 end;
-{$endif}
+{$endif MSWINDOWS}
 
 destructor TZipWrite.Destroy;
 begin
@@ -1094,7 +1143,7 @@ end;
 
 { TZipRead }
 
-{$ifndef Linux}
+{$ifdef MSWINDOWS}
 
 procedure TZipRead.UnMap;
 begin
@@ -1122,7 +1171,7 @@ var lhr: PLastHeader;
     H: PFileHeader;
     lfhr: PLocalFileHeader;
     i,j: integer;
-    {$ifdef CONDITIONALEXPRESSIONS}
+    {$ifndef DELPHI5OROLDER}
     tmp: UTF8String;
     {$else}
     tmp: ZipString;
@@ -1167,7 +1216,7 @@ begin
       for j := 0 to infoLocal^.nameLen-1 do
         if storedName[j]='/' then // normalize path delimiter
           PAnsiChar(Pointer(tmp))[j] := '\';
-      {$ifdef CONDITIONALEXPRESSIONS}
+      {$ifndef DELPHI5OROLDER}
       // Delphi 5 doesn't have UTF8Decode/UTF8Encode functions -> make 7 bit version
       if infoLocal^.GetUTF8FileName then
         // decode UTF-8 file name into native string/TFileName type
@@ -1343,7 +1392,7 @@ begin
     raise ESynZipException.CreateFmt('Error decompressing %s',[Entry[aIndex].zipName]);
 end;
 
-{$ifndef CONDITIONALEXPRESSIONS}
+{$ifdef DELPHI5OROLDER}
 /// DirectoryExists returns a boolean value that indicates whether the
 //  specified directory exists (and is actually a directory)
 function DirectoryExists(const Directory: string): boolean;
@@ -1419,10 +1468,10 @@ end;
 function TZipRead.UnZipAll(DestDir: TFileName): integer;
 begin
   if DestDir<>'' then
-    {$ifdef CONDITIONALEXPRESSIONS}
-    DestDir := IncludeTrailingPathDelimiter(DestDir);
-    {$else}
+    {$ifdef DELPHI5OROLDER}
     DestDir := IncludeTrailingBackslash(DestDir);
+    {$else}
+    DestDir := IncludeTrailingPathDelimiter(DestDir);
     {$endif}
   for result := 0 to Count-1 do
     if not UnZip(result,DestDir) then
@@ -1449,7 +1498,7 @@ begin
     result := UnZip(aIndex);
 end;
 
-{$endif Linux}
+{$endif MSWINDOWS}
 
 function GZRead(gz: PAnsiChar; gzLen: integer): ZipString;
 var Len: integer;
@@ -4724,26 +4773,6 @@ begin
       Exit;
   raise ESynZipException.CreateFmt('Error %d during zip/deflate process',[Code]);
 end;
-
-(*function UpdateCrc32(acrc32: cardinal; inBuf: pointer; inLen: integer) : cardinal;
-{  zlib crc32 : 46.63 ms  ict4zip updatecrc32 : 128.94 ms -> no comment ! }
-type b=pByte;
-var i: integer;
-begin
-  result := aCRC32;
-  for i := 0 to (inLen shr 3)-1 do begin
-    result := crc32tab[byte(result xor b(inBuf)^)] xor (result shr 8); inc(b(inBuf));
-    result := crc32tab[byte(result xor b(inBuf)^)] xor (result shr 8); inc(b(inBuf));
-    result := crc32tab[byte(result xor b(inBuf)^)] xor (result shr 8); inc(b(inBuf));
-    result := crc32tab[byte(result xor b(inBuf)^)] xor (result shr 8); inc(b(inBuf));
-    result := crc32tab[byte(result xor b(inBuf)^)] xor (result shr 8); inc(b(inBuf));
-    result := crc32tab[byte(result xor b(inBuf)^)] xor (result shr 8); inc(b(inBuf));
-    result := crc32tab[byte(result xor b(inBuf)^)] xor (result shr 8); inc(b(inBuf));
-    result := crc32tab[byte(result xor b(inBuf)^)] xor (result shr 8); inc(b(inBuf));
-  end;
-  for i := 0 to (inLen and 7)-1 do begin
-    result := crc32tab[byte(result xor b(inBuf)^)] xor (result shr 8); inc(b(inBuf)); end;
-end;*)
 
 function CompressString(const data: ZipString; failIfGrow: boolean = false;
   CompressionLevel: integer=6) : ZipString;
