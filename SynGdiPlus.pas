@@ -1377,7 +1377,7 @@ const
 
 function TSynPicture.SaveAs(Stream: TStream; Format: TGDIPPictureType;
   CompressionQuality: integer; IfBitmapSetResolution: single): TGdipStatus;
-var fStream: IStream;
+var vStream: IStream;
     Len,Dummy: {$ifdef ISDELPHIXE8}LargeUInt{$else}Int64{$endif};
     tmp: pointer;
     Params: TEncoderParameters;
@@ -1410,22 +1410,22 @@ begin
     PParams := @Params;
   end;
   end;
-  CreateStreamOnHGlobal(0,true,fStream); // fDeleteOnRelease=true
+  CreateStreamOnHGlobal(0,true,vStream); // fDeleteOnRelease=true
   try
-    result := Gdip.SaveImageToStream(fImage,fStream,@Encoders[Format],PParams);
+    result := Gdip.SaveImageToStream(fImage,vStream,@Encoders[Format],PParams);
     if result<>stOk then
       exit;
-    fStream.Seek(0,STREAM_SEEK_END,Len);
-    fStream.Seek(0,STREAM_SEEK_SET,Dummy);
+    vStream.Seek(0,STREAM_SEEK_END,Len);
+    vStream.Seek(0,STREAM_SEEK_SET,Dummy);
     Getmem(tmp,Len);
     try
-      fStream.Read(tmp,Len,nil);
+      vStream.Read(tmp,Len,nil);
       Stream.Write(tmp^,Len);
     finally
       Freemem(tmp);
     end;
   finally
-    fStream := nil; // release memory
+    vStream := nil; // release memory
   end;
 end;
 
