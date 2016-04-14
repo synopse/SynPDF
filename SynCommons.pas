@@ -5700,6 +5700,8 @@ function GUIDToString(const guid: TGUID): string;
 
 /// fill some memory buffer with random values
 // - the destination buffer is expected to be allocated as 32 bit items
+// - consider using instead the much safer TAESPRNG.Main.FillRandom() method
+// from the SynCrypto unit
 procedure FillRandom(Dest: PCardinalArray; CardinalCount: integer);
 
 /// compute a random GUID value
@@ -8180,6 +8182,8 @@ type
     // - returns the index of the matching item, -1 if aKey was not found
     // - this method is thread-safe, since it would lock the instance
     function Clear(const aKey): integer;
+    /// delete all key/value stored in the current instance
+    procedure DeleteAll;
     /// delete a key/value association from its supplied aKey
     // - this would delete the entry, i.e. matching key and value pair
     // - returns the index of the deleted item, -1 if aKey was not found
@@ -9401,6 +9405,7 @@ type
 
   { C++Builder doesn't support array elements as properties (RSP-12595).
     For now, simply exclude the relevant classes from C++Builder. }
+  {$NODEFINE TSynValidateTextProps}
   {$NODEFINE TSynValidateText }
   {$NODEFINE TSynValidatePassWord }
 
@@ -10129,7 +10134,15 @@ procedure SetCurrentThreadName(const Format: RawUTF8; const Args: array of const
 /// name a thread so that it would be easily identified in the IDE debugger
 // - you can force this function to do nothing by setting the NOSETTHREADNAME
 // conditional, if you have issues with this feature when debugging your app
-procedure SetThreadName(ThreadID: TThreadID; const Format: RawUTF8; const Args: array of const);
+procedure SetThreadName(ThreadID: TThreadID; const Format: RawUTF8;
+  const Args: array of const);
+
+/// could be used to override SetThreadNameInternal()
+procedure SetThreadNameDefault(ThreadID: TThreadID; const Name: RawUTF8);
+
+var
+  /// is overriden e.g. by mORMot.pas to log the thread name
+  SetThreadNameInternal: procedure(ThreadID: TThreadID; const Name: RawUTF8) = SetThreadNameDefault;
 
 type
   {$M+}
@@ -11280,11 +11293,9 @@ function InterlockedDecrement(var I: Integer): Integer;
 
 {$endif FPC}
 
-var
-  /// global information about the current executable and computer
-  // - this structure is initialized in this unit's initialization block below
-  // - you can call SetExecutableVersion() with a custom version, if needed
-  ExeVersion: record
+type
+  /// stores some global information about the current executable and computer
+  TExeVersion = record
     /// the main executable name, without any path nor extension
     // - e.g. 'Test' for 'c:\pathto\Test.exe'
     ProgramName: RawUTF8;
@@ -11308,6 +11319,12 @@ var
     /// the current computer user name
     User: RawUTF8;
   end;
+  
+var
+  /// global information about the current executable and computer
+  // - this structure is initialized in this unit's initialization block below
+  // - you can call SetExecutableVersion() with a custom version, if needed
+  ExeVersion: TExeVersion;
 
 /// initialize ExeVersion global variable, supplying a custom version number
 // - by default, the version numbers will be retrieved at startup from the
@@ -14911,13 +14928,15 @@ type
     function Safe: PSynLocker;
   end;
 
-  /// reference counted block code critical section
-  // - you can use one instance of this to protect multi-thread execution
+  /// reference-counted block code critical section
+  // - you can use one instance of this to protect multi-threaded execution
   // - the main class may initialize a IAutoLocker property in Create, then call
   // IAutoLocker.ProtectMethod in any method to make its execution thread safe
   // - this class inherits from TInterfacedObjectWithCustomCreate so you
   // could define one published property of a mORMot.pas' TInjectableObject
   // as IAutoLocker so that this class may be automatically injected
+  // - you may use the inherited TAutoLockerDebug class, as defined in SynLog.pas,
+  // to debug unexpected race conditions due to such critical sections
   TAutoLocker = class(TInterfacedObjectWithCustomCreate,IAutoLocker)
   {$endif DELPHI5OROLDER}
   protected
@@ -47578,12 +47597,12 @@ end;
 
 procedure TAutoLocker.Enter;
 begin
-  fSafe.Lock;
+  EnterCriticalSection(fSafe.fSection);
 end;
 
 procedure TAutoLocker.Leave;
 begin
-  fSafe.UnLock;
+  LeaveCriticalSection(fSafe.fSection);
 end;
 
 function TAutoLocker.Safe: PSynLocker;
@@ -48912,14 +48931,23 @@ begin
   fSafe.Padding[DIC_KEY].VType := varUnknown;
   fSafe.Padding[DIC_VALUECOUNT].VType := varInteger;
   fSafe.Padding[DIC_VALUE].VType := varUnknown;
+  fSafe.PaddingMaxUsedIndex := DIC_VALUE;
   fKeys.Init(aKeyTypeInfo,fSafe.Padding[DIC_KEY].VAny,nil,nil,nil,
     @fSafe.Padding[DIC_KEYCOUNT].VInteger,aKeyCaseInsensitive);
   fValues.Init(aValueTypeInfo,fSafe.Padding[DIC_VALUE].VAny,
     @fSafe.Padding[DIC_VALUECOUNT].VInteger);
 end;
 
+procedure TSynDictionary.DeleteAll;
+begin
+  fKeys.Clear;
+  fKeys.ReHash; // mandatory to avoid GPF
+  fValues.Clear;
+end;
+
 destructor TSynDictionary.Destroy;
 begin
+  fKeys.Clear;
   fValues.Clear;
   inherited Destroy;
 end;
@@ -54532,17 +54560,24 @@ end;
 
 procedure SetThreadName(ThreadID: TThreadID; const Format: RawUTF8;
   const Args: array of const);
-var name: RawByteString;
-{$ifndef ISDELPHIXE2}
-{$ifdef MSWINDOWS}
+var name: RawUTF8;
+begin
+  FormatUTF8(Format,Args,name);
+  SetThreadNameInternal(ThreadID,name);
+end;
+
+procedure SetThreadNameDefault(ThreadID: TThreadID; const Name: RawUTF8);
+var s: RawByteString;
+    {$ifndef ISDELPHIXE2}
+    {$ifdef MSWINDOWS}
     info: record
       FType: LongWord;     // must be 0x1000
       FName: PAnsiChar;    // pointer to name (in user address space)
       FThreadID: LongWord; // thread ID (-1 indicates caller thread)
       FFlags: LongWord;    // reserved for future use, must be zero
     end;
-{$endif}
-{$endif}
+    {$endif}
+    {$endif}
 begin
   {$ifdef FPC}
   exit;
@@ -54554,13 +54589,13 @@ begin
   if not IsDebuggerPresent then
     exit;
   {$endif}
-  name := CurrentAnsiConvert.UTF8ToAnsi(FormatUTF8(Format,Args));
+  s := CurrentAnsiConvert.UTF8ToAnsi(Name);
   {$ifdef ISDELPHIXE2}
-  TThread.NameThreadForDebugging(name,ThreadID);
+  TThread.NameThreadForDebugging(s,ThreadID);
   {$else}
   {$ifdef MSWINDOWS}
   info.FType := $1000;
-  info.FName := pointer(name);
+  info.FName := pointer(s);
   info.FThreadID := ThreadID;
   info.FFlags := 0;
   try
