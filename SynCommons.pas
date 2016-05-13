@@ -3301,6 +3301,9 @@ function AddPrefixToCSV(CSV: PUTF8Char; const Prefix: RawUTF8;
 // ! MyArray := TRawUTF8DynArrayFrom(['a','b','c']);
 function TRawUTF8DynArrayFrom(const Values: array of RawUTF8): TRawUTF8DynArray;
 
+/// append one or several values to a local "array of const" variable
+procedure AddArrayOfConst(var Dest: TTVarRecDynArray; const Values: array of const);
+
 /// return the index of Value in Values[], -1 if not found
 function FindRawUTF8(const Values: TRawUTF8DynArray; const Value: RawUTF8;
   CaseSensitive: boolean=true): integer; overload;
@@ -3555,6 +3558,7 @@ function EnsureDirectoryExists(const Directory: TFileName;
   RaiseExceptionOnCreationFailure: boolean=false): TFileName;
 
 type
+  {$A-}
   /// file found result item, as returned by FindFiles()
   TFindFiles = {$ifndef UNICODE}object{$else}record{$endif}
     /// the matching file name, including its folder name
@@ -3568,13 +3572,16 @@ type
     /// fill the item properties from a FindFirst/FindNext's TSearchRec
     procedure FromSearchRec(const Directory: TFileName; const F: TSearchRec);
   end;
+  {$A+}
   /// result list, as returned by FindFiles()
   TFindFilesDynArray = array of TFindFiles;
 
 /// search for matching file names
 // - just a wrapper around FindFirst/FindNext
+// - you may specify several masks in Mask, e.g. as '*.htm;*.html'
 function FindFiles(const Directory,Mask: TFileName;
-  const IgnoreFileName: TFileName=''; SortByName: boolean=false): TFindFilesDynArray;
+  const IgnoreFileName: TFileName=''; SortByName: boolean=false;
+  IncludesDir: boolean=true): TFindFilesDynArray;
 
 {$ifdef DELPHI5OROLDER}
 
@@ -4789,7 +4796,6 @@ type
     function LoadFromJSON(P: PUTF8Char; aEndOfObject: PUTF8Char=nil): PUTF8Char; inline;
     function SaveToLength: integer; inline;
     function LoadFrom(Source: PAnsiChar): PAnsiChar;  inline;
-    function Find(const Elem): integer; inline;
     property Capacity: integer read GetCapacity write SetCapacity;
   private
   {$else UNDIRECTDYNARRAY}
@@ -4801,12 +4807,21 @@ type
     fHashs: TSynHashDynArray;
     fHashsCount: integer;
     fEventCompare: TEventDynArraySortCompare;
+    fHashCountTrigger: integer;
+    fHashFindCount: integer;
     {$ifdef DYNARRAYHASHCOLLISIONCOUNT}
     fHashFindCollisions: cardinal;
     {$endif}
     procedure HashAdd(const Elem; aHashCode: Cardinal; var result: integer);
+    /// low-level search of an element from its pre-computed hash
+    // - you should NOT use this method, but rather high-level FindHashed*()
+    function HashFind(aHashCode: cardinal; const Elem): integer; overload;
+    /// low-level search of an element from its pre-computed hash
+    // - this overloaded method will return the first matching item: use the
+    // HashFind(...; const Elem) method to avoid any HashElement collision issue
+    // - you should NOT use this method, but rather high-level FindHashed*()
+    function HashFind(aHashCode: cardinal): integer; overload;
     function GetHashFromIndex(aIndex: Integer): Cardinal;
-    procedure HashInit;
   public
     /// initialize the wrapper with a one-dimension dynamic array
     // - this version accepts some hash-dedicated parameters: aHashElement to
@@ -4838,7 +4853,7 @@ type
     // the dynamic array content (e.g. in case of element deletion or update,
     // or after calling LoadFrom/Clear method) - this is not necessary after
     // FindHashedForAdding / FindHashedAndUpdate / FindHashedAndDelete methods
-    procedure ReHash(aHasher: TOnDynArrayHashOne=nil);
+    function ReHash(aHasher: TOnDynArrayHashOne=nil): boolean;
     /// low-level function which would inspect the internal fHashs[] array for
     // any collision
     // - is a brute force search within fHashs[].Hash values, which may be handy
@@ -4914,13 +4929,15 @@ type
     // - warning: Elem must be of the same exact type than the dynamic array, and
     // must refer to a variable (you can't write FindHashedAndDelete(i+10) e.g.)
     function FindHashedAndDelete(const Elem): integer;
-    /// low-level search of an element from its pre-computed hash
-    // - you should not use this method, but rather high-level FindHashed*()
-    function HashFind(aHashCode: cardinal; const Elem): integer; overload;
-    /// low-level search of an element from its pre-computed hash
-    // - this overloaded method will return the first matching item: use the
-    // HashFind(...; const Elem) method to avoid any HashElement collision issue
-    function HashFind(aHashCode: cardinal): integer; overload;
+    /// will search for an element value inside the dynamic array without hashing
+    // - is used internally when Count < HashCountTrigger
+    // - is preferred to Find(), since EventCompare would be used if defined
+    // - Elem should be of the same exact type than the dynamic array, or at
+    // least matchs the fields used by both the hash function and Equals method:
+    // e.g. if the searched/hashed field in a record is a string as first field,
+    // you may use a string variable as Elem: other fields will be ignored
+    // - returns -1 if not found, or the index in the dynamic array if found
+    function Scan(const Elem): integer;
     /// retrieve the hash value of a given item, from its index
     property Hash[aIndex: Integer]: Cardinal read GetHashFromIndex;
     /// alternative event-oriented Compare function to be used for Sort and Find
@@ -4928,6 +4945,11 @@ type
     property EventCompare: TEventDynArraySortCompare read fEventCompare write fEventCompare;
     /// custom hash function to be used for hashing of a dynamic array element
     property HashElement: TDynArrayHashOne read fHashElement;
+    /// after how many items the hashing take place
+    // - for smallest arrays, O(n) seach if faster than O(1) hashing, since
+    // maintaining the fHashs[] lookup has some CPU and memory costs
+    // - equals 32 by default 
+    property HashCountTrigger: integer read fHashCountTrigger write fHashCountTrigger;
     {$ifdef DYNARRAYHASHCOLLISIONCOUNT}
     /// access to the internal collision of HashFind()
     // - it won't depend only on the HashElement(), but also on the internal
@@ -8078,6 +8100,8 @@ type
     // into the TRawUTF8ListHashed
     function AddObjectIfNotExisting(const aText: RawUTF8; aObject: TObject;
       wasAdded: PBoolean=nil): PtrInt; override;
+    /// search in the low-level internal hashing table
+    function HashFind(aHashCode: cardinal): integer; {$ifdef HASINLINE}inline;{$endif}
     /// access to the low-level internal hashing table
     property Hash: TDynArrayHashed read fHash;
   end;
@@ -11164,7 +11188,7 @@ function GetFileVersion(const FileName: TFileName): cardinal;
 
 {$endif}
 
-/// returns a JSON object containing deailed information about the computer
+/// returns a JSON object containing basic information about the computer
 // - including Host, User, CPU, OS, freemem, freedisk...
 function SystemInfoJson: RawUTF8;
 
@@ -11285,6 +11309,10 @@ function GetTickCount64: Int64;
 // - is used e.g. by StringFromFile() and TSynMemoryStreamMapped.Create()
 function FileOpenSequentialRead(const FileName: string): Integer;
   {$ifdef HASINLINE}inline;{$endif}
+
+/// returns a TFileStream optimized for one pass file reading
+// - will use FileOpenSequentialRead(), i.e. FILE_FLAG_SEQUENTIAL_SCAN
+function FileStreamSequentialRead(const FileName: string): TFileStream;
 
 /// check if the current timestamp, in ms, matched a given period
 // - will compare the current GetTickCount64 to the supplied PreviousTix
@@ -13418,6 +13446,10 @@ type
     /// find an item in this document, and returns its value
     // - return null if aName is not found, or if the instance is not a TDocVariant
     function GetValueOrNull(const aName: RawUTF8): variant;
+    /// find an item in this document, and returns its value
+    // - return a cleared variant if aName is not found, or if the instance is
+    // not a TDocVariant
+    function GetValueOrEmpty(const aName: RawUTF8): variant;
     /// returns a TDocVariant object containing all properties matching the
     // first characters of the supplied property name
     // - returns null if the document is not a dvObject
@@ -15497,7 +15529,8 @@ type
     /// initialize the generator for the given 16-bit process identifier
     // - you can supply an obfuscation key, which should be shared for the
     // whole system, so that you may use FromObfuscated/ToObfuscated methods
-    constructor Create(aIdentifier: TSynUniqueIdentifierProcess; const aSharedObfuscationKey: RawUTF8=''); reintroduce;
+    constructor Create(aIdentifier: TSynUniqueIdentifierProcess;
+      const aSharedObfuscationKey: RawUTF8=''); reintroduce;
     /// finalize the generator structure
     destructor Destroy; override;
     /// return a new unique ID
@@ -22046,6 +22079,15 @@ begin
   {$endif MSWINDOWS}
 end;
 
+function FileStreamSequentialRead(const FileName: string): TFileStream;
+begin
+  {$ifdef DELPHI5ORFPC}
+  result := TFileStream.Create(FileName,fmOpenRead or fmShareDenyNone);
+  {$else}
+  result := TFileStream.Create(FileOpenSequentialRead(FileName));
+  {$endif}
+end;
+
 function Elapsed(var PreviousTix: Int64; Interval: Integer): Boolean;
 var now: Int64;
 begin
@@ -23217,38 +23259,21 @@ end;
 
 var
   /// a conversion table from Base64 text into binary data
-  // - used by Base64ToBin function
-  ConvertBase64ToBin: array of shortint;
-
-procedure InitConvertBase64ToBin;
-var i: integer;
-begin
-  SetLength(ConvertBase64ToBin,256);
-  FillcharFast(ConvertBase64ToBin[0],256,255); // invalid value set to -1
-  for i := 0 to high(b64) do
-    ConvertBase64ToBin[ord(b64[i])] := i;
-  ConvertBase64ToBin[ord('=')] := -2; // special value for '='
-end;
-
-type
-  TConvertBase64ToBinTable = array[AnsiChar] of shortint;
+  // - used by Base64ToBin/IsBase64 functions
+  ConvertBase64ToBin: array[AnsiChar] of shortint;
 
 function IsBase64(sp: PAnsiChar; len: PtrInt): boolean;
 var i: PtrInt;
-    Table: ^TConvertBase64ToBinTable;
 begin
   result := false;
-  if ConvertBase64ToBin=nil then
-    InitConvertBase64ToBin;
   if (len=0) or (len and 3<>0) then
     exit;
-  Table := pointer(ConvertBase64ToBin);
   for i := 0 to len-5 do
-    if Table[sp[i]]<0 then
+    if ConvertBase64ToBin[sp[i]]<0 then
       exit;
   inc(sp,len-4);
-  if (Table[sp[0]]=-1) or // -2 = '=' is allowed here
-     (Table[sp[1]]=-1) or (Table[sp[2]]=-1) or (Table[sp[3]]=-1) then
+  if (ConvertBase64ToBin[sp[0]]=-1) or // -2 = '=' is allowed here
+     (ConvertBase64ToBin[sp[1]]=-1) or (ConvertBase64ToBin[sp[2]]=-1) or (ConvertBase64ToBin[sp[3]]=-1) then
       exit;
   result := true; // layout seems correct
 end;
@@ -23259,16 +23284,13 @@ begin
 end;
 
 function Base64ToBinLength(sp: PAnsiChar; len: PtrInt): PtrInt;
-var Table: ^TConvertBase64ToBinTable absolute ConvertBase64ToBin;
 begin
   if (len=0) or (len and 3<>0) then begin
     result := 0;
     exit;
   end;
-  if ConvertBase64ToBin=nil then
-    InitConvertBase64ToBin;
-  if Table[sp[len-2]]>=0 then
-    if Table[sp[len-1]]>=0 then
+  if ConvertBase64ToBin[sp[len-2]]>=0 then
+    if ConvertBase64ToBin[sp[len-1]]>=0 then
       result := 0 else
       result := 1 else
       result := 2;
@@ -23279,20 +23301,18 @@ procedure Base64Decode(sp,rp: PAnsiChar; len: PtrInt);
 {$ifdef PUREPASCAL}
 var i: PtrInt;
     c, ch: PtrInt;
-    Table: ^TConvertBase64ToBinTable;
 begin
-  Table := pointer(ConvertBase64ToBin);
   for i := 1 to len do begin
-    c := Table[sp[0]];
+    c := ConvertBase64ToBin[sp[0]];
     if c>=0 then begin
       c := c shl 6;
-      ch := Table[sp[1]];
+      ch := ConvertBase64ToBin[sp[1]];
       if ch>=0 then begin
         c := (c or ch) shl 6;
-        ch := Table[sp[2]];
+        ch := ConvertBase64ToBin[sp[2]];
         if ch>=0 then begin
           c := (c or ch) shl 6;
-          ch := Table[sp[3]];
+          ch := ConvertBase64ToBin[sp[3]];
           if ch>=0 then begin
             c := c or ch;
             rp[2] := AnsiChar(c);
@@ -23327,13 +23347,11 @@ asm // eax=sp edx=rp ecx=len - pipeline optimized version by AB
      push eax
      test ecx,ecx
      mov ebp,edx
-     mov edi,dword ptr [ConvertBase64ToBin]
+     lea edi,[ConvertBase64ToBin]
      mov [esp],ecx
      jz @4
-     xor edx,edx
-     xor ebx,ebx
-@0:  mov dl,[eax]
-     mov bl,[eax+$01]
+@0:  movzx edx,byte ptr [eax]
+     movzx ebx,byte ptr [eax+$01]
      movsx ecx,byte ptr [edi+edx]
      movsx esi,byte ptr [edi+ebx]
      test ecx,ecx
@@ -23342,8 +23360,8 @@ asm // eax=sp edx=rp ecx=len - pipeline optimized version by AB
      test esi,esi
      jl @1
      or ecx,esi
-     mov dl,[eax+$02]
-     mov bl,[eax+$03]
+     movzx edx,byte ptr [eax+$02]
+     movzx ebx,byte ptr [eax+$03]
      shl ecx,$06
      movsx esi,byte ptr [edi+edx]
      movsx edx,byte ptr [edi+ebx]
@@ -23680,8 +23698,8 @@ end;
 function UInt3DigitsToUTF8(Value: Cardinal): RawUTF8;
 begin
   SetString(result,nil,3);
-  PWordArray(result)[0] := TwoDigitLookupW[Value div 100];
-  PByteArray(result)[2] := (Value mod 100)+48;
+  PWordArray(result)[0] := TwoDigitLookupW[Value div 10];
+  PByteArray(result)[2] := (Value mod 10)+48;
 end;
 
 function UInt4DigitsToUTF8(Value: Cardinal): RawUTF8;
@@ -24501,12 +24519,16 @@ begin
 end;
 
 function StreamToRawByteString(aStream: TStream): RawByteString;
-var current,size: Int64;
+var current, size: Int64;
 begin
   result := '';
   if aStream=nil then
     exit;
   current := aStream.Position;
+  if (current=0) and aStream.InheritsFrom(TRawByteStringStream) then begin
+    result := TRawByteStringStream(aStream).DataString; // fast COW
+    exit;
+  end;
   size := aStream.Size-current;
   if (size=0) or (size>maxInt) then
     exit;
@@ -24515,7 +24537,7 @@ begin
   aStream.Position := current;
 end;
 
-function RawByteStringToStream(Const aString: RawByteString): TStream;
+function RawByteStringToStream(const aString: RawByteString): TStream;
 begin
   result := TRawByteStringStream.Create(aString);
 end;
@@ -24654,7 +24676,7 @@ end;
 
 function SearchRecToDateTime(const F: TSearchRec): TDateTime;
 begin
-  {$ifdef ISDELPHIXE2}
+  {$ifdef ISDELPHIXE}
   result := F.TimeStamp;
   {$else}
   result := FileDateToDateTime(F.Time);
@@ -24742,40 +24764,55 @@ begin
 end;
 
 function FindFiles(const Directory,Mask,IgnoreFileName: TFileName;
-  SortByName: boolean): TFindFilesDynArray;
+  SortByName, IncludesDir: boolean): TFindFilesDynArray;
 var F: TSearchRec;
     n: integer;
     Dir: TFileName;
     da: TDynArray;
+    masks: TRawUTF8DynArray;
+    masked: TFindFilesDynArray;
 begin
   result := nil;
   n := 0;
-  Dir := IncludeTrailingPathDelimiter(Directory);
-  if FindFirst(Dir+Mask,faAnyfile-faDirectory,F)=0 then begin
-    repeat
-      {$ifndef DELPHI5OROLDER}
-      {$WARN SYMBOL_DEPRECATED OFF} // for faVolumeID
-      {$endif}
-      if (F.Attr and (faDirectory+faVolumeID+faSysFile+faHidden)=0) and
-         (F.Name[1]<>'.') and ((IgnoreFileName='') or
-          (AnsiCompareFileName(F.Name,IgnoreFileName)<>0)) then begin
-        if n=length(result) then
-          SetLength(result,n+n shr 3+8);
-        result[n].FromSearchRec(Dir,F);
-        inc(n);
-      end;
-      {$ifndef DELPHI5OROLDER}
-      {$WARN SYMBOL_DEPRECATED ON}
-      {$endif}
-    until FindNext(F)<>0;
-    FindClose(F);
-    if n=0 then
-      exit;
-    SetLength(result,n);
-    if SortByName and (n>1) then begin
-      da.Init(TypeInfo(TFindFilesDynArray),result);
-      da.Sort(SortDynArrayStringI);
+  da.Init(TypeInfo(TFindFilesDynArray),result);
+  if Pos(';',Mask)>0 then
+    CSVToRawUTF8DynArray(pointer(StringToUTF8(Mask)),masks,';');
+  if masks<>nil then begin
+    if SortByName then
+      QuickSortRawUTF8(masks,length(masks),nil,@StrIComp);
+    for n := 0 to high(masks) do begin
+      masked := FindFiles(Directory,UTF8ToString(masks[n]),
+        IgnoreFileName,SortByName,IncludesDir);
+      da.AddArray(masked);
     end;
+  end else begin
+    Dir := IncludeTrailingPathDelimiter(Directory);
+    if FindFirst(Dir+Mask,faAnyfile-faDirectory,F)=0 then begin
+      repeat
+        {$ifndef DELPHI5OROLDER}
+        {$WARN SYMBOL_DEPRECATED OFF} // for faVolumeID
+        {$endif}
+        if (F.Attr and (faDirectory+faVolumeID+faSysFile+faHidden)=0) and
+           (F.Name[1]<>'.') and ((IgnoreFileName='') or
+            (AnsiCompareFileName(F.Name,IgnoreFileName)<>0)) then begin
+          if n=length(result) then
+            SetLength(result,n+n shr 3+8);
+          if IncludesDir then
+            result[n].FromSearchRec(Dir,F) else
+            result[n].FromSearchRec('',F);
+          inc(n);
+        end;
+        {$ifndef DELPHI5OROLDER}
+        {$WARN SYMBOL_DEPRECATED ON}
+        {$endif}
+      until FindNext(F)<>0;
+      FindClose(F);
+      if n=0 then
+        exit;
+      SetLength(result,n);
+    end;
+    if SortByName and (n>0) then
+      da.Sort(SortDynArrayStringI);
   end;
 end;
 
@@ -27379,6 +27416,15 @@ begin
     result[i] := Values[i];
 end;
 
+procedure AddArrayOfConst(var Dest: TTVarRecDynArray; const Values: array of const);
+var i,n: Integer;
+begin
+  n := length(Dest);
+  SetLength(Dest,n+length(Values));
+  for i := 0 to high(Values) do
+    Dest[i+n] := Values[i];
+end;
+
 var
   DefaultTextWriterJSONClass: TTextWriterClass = TTextWriter;
   DefaultTextWriterTrimEnum: boolean;
@@ -29454,6 +29500,8 @@ begin
     if Expanded then
       result := 9 else
       result := 7;
+    if FirstTimeChar=#0 then
+      dec(result);
   end else begin
     // convert time and date
     DateToIso8601PChar(Dest,Expanded,
@@ -29470,6 +29518,8 @@ begin
     if Expanded then
       result := 15+4 else
       result := 15;
+    if FirstTimeChar=#0 then
+      dec(result);
   end;
 end;
 
@@ -29876,7 +29926,6 @@ begin
   end;
   result := fDisplays;
 end;
-
 
 
 procedure AppendToTextFile(aLine: RawUTF8; const aFileName: TFileName);
@@ -36624,12 +36673,12 @@ begin
     if n>0 then begin
       SetLength(VValue,n);
       repeat
+        if VCount>=n then
+          exit; // unexpected array size means invalid JSON
         GetJSONToAnyVariant(VValue[VCount],JSON,@EndOfObject,@VOptions);
         if JSON=nil then
           exit;
         inc(VCount);
-        if VCount>n then
-          raise EDocVariant.Create('Unexpected array size');
       until EndOfObject=']';
     end else
       if JSON^=']' then // n=0
@@ -36646,6 +36695,8 @@ begin
       SetLength(VValue,n);
       SetLength(VName,n);
       repeat
+        if VCount>=n then
+          exit; // unexpected object size means invalid JSON 
         // see http://docs.mongodb.org/manual/reference/mongodb-extended-json
         Name := GetJSONPropName(JSON);
         if Name=nil then
@@ -36655,8 +36706,6 @@ begin
         if JSON=nil then
           exit;
         inc(VCount);
-        if VCount>n then
-          raise EDocVariant.Create('Unexpected object size');
       until EndOfObject='}';
     end else
       if JSON^='}' then // n=0
@@ -37306,6 +37355,18 @@ begin
     if ndx>=0 then
       result := VValue[ndx] else
       SetVariantNull(result);
+  end;
+end;
+
+function TDocVariantData.GetValueOrEmpty(const aName: RawUTF8): variant;
+var ndx: integer;
+begin
+  VarClear(result);
+  if (DocVariantType<>nil) and (VType=DocVariantVType) and
+     (Kind=dvObject) then begin
+    ndx := GetValueIndex(aName);
+    if ndx>=0 then
+      result := VValue[ndx];
   end;
 end;
 
@@ -38621,10 +38682,12 @@ begin
 end;
 
 function SortDynArrayInt64(const A,B): integer;
+var tmp: Int64;
 begin
-  if Int64(A)<Int64(B) then
+  tmp := Int64(A)-Int64(B);
+  if tmp<0 then
     result := -1 else
-  if Int64(A)>Int64(B) then
+  if tmp>0 then
     result := 1 else
     result := 0;
 end;
@@ -41015,11 +41078,6 @@ begin
   result := InternalDynArray.LoadFrom(Source);
 end;
 
-function TDynArrayHashed.Find(const Elem): integer;
-begin
-  result := InternalDynArray.Find(Elem);
-end;
-
 function TDynArrayHashed.SaveTo(Dest: PAnsiChar): PAnsiChar;
 begin
   result := InternalDynArray.SaveTo(Dest);
@@ -41042,14 +41100,39 @@ end;
 
 {$endif UNDIRECTDYNARRAY}
 
+function TDynArrayHashed.Scan(const Elem): integer;
+var P: PAnsiChar;
+begin
+  P := fValue^; // Count<fHashCountTrigger -> O(n) is faster than O(1)
+  if Assigned(fEventCompare) then begin
+    for result := 0 to Count-1 do
+      if fEventCompare(P^,Elem)=0 then
+        exit else
+        inc(P,ElemSize);
+  end else
+    for result := 0 to Count-1 do
+      if {$ifdef UNDIRECTDYNARRAY}InternalDynArray.{$endif}fCompare(P^,Elem)=0 then
+        exit else
+        inc(P,ElemSize);
+  result := -1;
+end;
+
 function TDynArrayHashed.FindHashed(const Elem): integer;
 begin
   if (fHashs<>nil) and Assigned(fHashElement) then begin
     result := HashFind(fHashElement(Elem,fHasher),Elem);
     if result<0 then
       result := -1; // for coherency with most methods
-  end else
-    result := -1;
+  end else begin
+    result := Scan(Elem); // Count<fHashCountTrigger
+    if (result>=0) and (fHashCountTrigger>0) then begin
+      inc(fHashFindCount);
+      if fHashFindCount>=fHashCountTrigger then begin
+        fHashCountTrigger := 0; // FindHashed() should use O(1) hash
+        ReHash;
+      end;
+    end;
+  end;
 end;
 
 procedure TDynArrayHashed.HashAdd(const Elem; aHashCode: Cardinal; var result: integer);
@@ -41073,7 +41156,21 @@ end;
 
 function TDynArrayHashed.FindHashedForAdding(const Elem; out wasAdded: boolean;
   aHashCode: cardinal): integer;
+var n: integer;
 begin
+  n := Count;
+  if n<fHashCountTrigger then begin
+    result := Scan(Elem);
+    if result<0 then begin
+      SetCount(n+1); // like HashAdd(): reserve space for added item
+      result := n;
+      wasadded := true;
+    end else
+      wasadded := false;
+    exit;
+  end;
+  if fHashs=nil then
+    ReHash; // compute hash of all previously added fHashCountTrigger items
   if aHashCode=0 then
     if Assigned(fHashElement) then
       aHashCode := fHashElement(Elem,fHasher);
@@ -41129,19 +41226,36 @@ end;
 
 function TDynArrayHashed.FindHashedAndFill(var ElemToFill): integer;
 begin
-  if Assigned(fHashElement) then begin
-    result := HashFind(fHashElement(ElemToFill,fHasher),ElemToFill);
-    if result<0 then
-      result := -1 else
-      ElemCopy((PAnsiChar(fValue^)+cardinal(result)*ElemSize)^,ElemToFill);
-  end else
-    result := -1;
+  if fHashs=nil then // Count<fHashCountTrigger
+    result := Scan(ElemToFill) else
+    if Assigned(fHashElement) then begin
+      result := HashFind(fHashElement(ElemToFill,fHasher),ElemToFill);
+      if result<0 then
+        result := -1;
+    end else
+      result := -1;
+  if result>=0 then
+    ElemCopy((PAnsiChar(fValue^)+cardinal(result)*ElemSize)^,ElemToFill);
 end;
 
 function TDynArrayHashed.FindHashedAndUpdate(const Elem; AddIfNotExisting: boolean): integer;
 var aHashCode: cardinal;
+label h;
 begin
-  if Assigned(fHashElement) then begin
+  if fHashs=nil then begin // Count<fHashCountTrigger
+    result := Scan(Elem);
+    if result<0 then
+      if AddIfNotExisting then
+        if Count<fHashCountTrigger then
+          result := Add(Elem) else begin
+          ReHash; // compute hash of all previously added fHashCountTrigger items
+          goto h;
+        end else
+        result := -1 else
+      ElemCopy(Elem,(PAnsiChar(fValue^)+cardinal(result)*ElemSize)^); // update
+    exit;
+  end;
+h:if Assigned(fHashElement) then begin
     aHashCode := fHashElement(Elem,fHasher);
     if aHashCode=HASH_VOID then
       aHashCode := HASH_ONVOIDCOLISION; // as in HashFind() -> for HashAdd() below
@@ -41163,6 +41277,11 @@ end;
 
 function TDynArrayHashed.FindHashedAndDelete(const Elem): integer;
 begin
+  if fHashs=nil then begin // Count<fHashCountTrigger
+    result := Scan(Elem);
+    if result>=0 then
+      Delete(result);
+  end else
   if Assigned(fHashElement) then begin
     result := HashFind(fHashElement(Elem,fHasher),Elem);
     if result<0 then
@@ -41345,27 +41464,32 @@ begin
   fHashElement := aHashElement;
   {$ifdef UNDIRECTDYNARRAY}InternalDynArray.{$endif}fCompare := aCompare;
   fHashs := nil;
-end;
-
-procedure TDynArrayHashed.HashInit;
-var cap: integer;
-begin
-  // find nearest power of two for new fHashs[] size
-  cap := Capacity*2; // Capacity sounds better than Count
-  fHashsCount := 256;
-  while fHashsCount<cap do
-    fHashsCount := fHashsCount shl 1;
-  fHashs := nil; // any previous hash is invalid
-  SetLength(fHashs,fHashsCount); // fill all fHashs[]=HASH_VOID=0
+  fHashFindCount := 0;
+  fHashCountTrigger := 32;
 end;
 
 //var TDynArrayHashedCollisionCount: cardinal;
 
 function TDynArrayHashed.HashFind(aHashCode: cardinal): integer;
 var first,last: integer;
+    h: cardinal;
+    P: PAnsiChar;
 begin
-  if fHashs=nil then
-    HashInit;
+  if fHashs=nil then begin // Count=0 or Count<fHashCountTrigger
+    if Assigned(fHashElement) then begin
+      P := fValue^;
+      for result := 0 to Count-1 do begin
+        h := fHashElement(P^,fHasher);
+        if h=HASH_VOID then
+          h := HASH_ONVOIDCOLISION;
+        if h=aHashCode then
+          exit else
+          inc(P,ElemSize);
+      end;
+    end;
+    result := -1;
+    exit;
+  end;
   if aHashCode=HASH_VOID then
     aHashCode := HASH_ONVOIDCOLISION; // 0 means void slot in the loop below
   result := (aHashCode-1) and (fHashsCount-1); // fHashs[] has a power of 2 length
@@ -41395,8 +41519,10 @@ function TDynArrayHashed.HashFind(aHashCode: cardinal; const Elem): integer;
 var first,last: integer;
     P: PAnsiChar;
 begin
-  if fHashs=nil then
-    HashInit;
+  if fHashs=nil then begin // e.g. Count<fHashCountTrigger
+    result := Scan(Elem);
+    exit;
+  end;
   if aHashCode=HASH_VOID then
     aHashCode := HASH_ONVOIDCOLISION; // 0 means void slot in the loop below
   result := (aHashCode-1) and (fHashsCount-1); // fHashs[] has a power of 2 length
@@ -41450,6 +41576,7 @@ begin
   if (cardinal(aIndex)>=cardinal(Count)) or not Assigned(fHashElement) then
     result := 0 else begin
     // it's faster to rehash than to loop in fHashs[].Index values
+    // and it will also work with Count<fHashCountTrigger
     P := PAnsiChar(fValue^)+cardinal(aIndex)*ElemSize;
     result := fHashElement(P^,fHasher);
     if result=HASH_VOID then
@@ -41476,17 +41603,25 @@ begin
   result := -1;
 end;
 
-procedure TDynArrayHashed.ReHash(aHasher: TOnDynArrayHashOne=nil);
-var i, n, ndx: integer;
+function TDynArrayHashed.ReHash(aHasher: TOnDynArrayHashOne=nil): boolean;
+var i, n, cap, ndx: integer;
     P: PAnsiChar;
     aHashCode: cardinal;
 begin
-  HashInit;
+  result := false;
+  fHashs := nil;
   n := Count;
-  if n<=0 then
-    exit; // avoid GPF after TDynArray.Clear call (Count=0)
+  if (n=0) or (n<fHashCountTrigger) then
+    exit; // hash only if needed, and avoid GPF after TDynArray.Clear (Count=0)
   if (not Assigned(aHasher)) and (not Assigned(fHashElement)) then
     exit;
+  // find nearest power of two for new fHashs[] size
+  cap := Capacity*2; // Capacity sounds better than Count
+  fHashsCount := 256;
+  while fHashsCount<cap do
+    fHashsCount := fHashsCount shl 1;
+  SetLength(fHashs,fHashsCount); // fill all fHashs[]=HASH_VOID=0
+  // fill fHashs[] from all existing items
   P := fValue^;
   for i := 0 to n-1 do begin
     if Assigned(aHasher) then
@@ -41503,6 +41638,7 @@ begin
       end;
     inc(P,ElemSize);
   end;
+  result := true;
 end;
 
 
@@ -42757,7 +42893,6 @@ class procedure TTextWriter.UnRegisterCustomJSONSerializer(aTypeInfo: pointer);
 begin
   GlobalJSONCustomParsers.RegisterCallbacks(aTypeInfo,nil,nil);
 end;
-
 class function TTextWriter.RegisterCustomJSONSerializerFromText(aTypeInfo: pointer;
   const aRTTIDefinition: RawUTF8): TJSONRecordAbstract;
 begin
@@ -45591,7 +45726,22 @@ Prop: if not (ord(P^) in IsJsonIdentifierFirstChar) then
         inc(P);
       until not (ord(P^) in IsJsonIdentifier);
       while P^ in [#1..' '] do inc(P);
-      if P^<>':' then exit;
+      if P^='(' then begin // handle e.g. "born":isodate("1969-12-31")
+        inc(P);
+        while P^ in [#1..' '] do inc(P);
+        if P^='"' then begin
+         P := GotoEndOfJSONString(P);
+         if P^<>'"' then
+          exit;
+        end;
+        inc(P);
+        while P^ in [#1..' '] do inc(P);
+        if P^<>')' then
+          exit;
+        inc(P);
+       end
+       else
+       if P^<>':' then exit;
     end;
     end;
     if P^ in [#1..' '] then repeat inc(P) until not(P^ in [#1..' ']);
@@ -48067,7 +48217,7 @@ end;
 constructor TSynCache.Create(aMaxCacheRamUsed: cardinal=16384*1024; aCaseSensitive: boolean=false);
 begin
   fNameValue.Init(aCaseSensitive);
-  fNameValue.fDynArray.{$ifdef UNDIRECTDYNARRAY}InternalDynArray.{$endif}Capacity := 200; // some space for future cached entries
+  fNameValue.fDynArray.Capacity := 200; // some space for future cached entries
   fMaxCacheRamUsed := aMaxCacheRamUsed;
   fFindLastAddedIndex := -1;
 end;
@@ -48104,7 +48254,7 @@ begin
         Capacity := 0;   // force free all fNameValue.List[] key/value pairs
         Capacity := 200; // then reserve some space for future cached entries
       end;
-    fNameValue.fDynArray.ReHash; // will force reset all hash content
+    fNameValue.fDynArray.fHashs := nil; // will force reset all hash content
     result := true; // mark something was flushed
   end;
   fFindLastAddedIndex := -1;
@@ -48628,6 +48778,7 @@ begin
   inherited Create;
   fFreeItems := aFreeItems;
   fHash.Init(TypeInfo(TObjectDynArray),fList,@HashPtrUInt,@SortDynArrayPointer,nil,@fCount);
+  fHash.fHashCountTrigger := 0; // has dedicated inherited process of small lists 
 end;
 
 destructor TObjectListHashedAbstract.Destroy;
@@ -48667,10 +48818,8 @@ begin
   wasAdded := false;
   if self<>nil then
     if fHashed then begin
-      if not fHashValid then begin
-        fHash.ReHash;
-        fHashValid := true;
-      end;
+      if not fHashValid then
+        fHashValid := fHash.ReHash;
       result := fHash.FindHashedForAdding(aObject,wasAdded);
       if wasAdded then
         fList[result] := aObject;
@@ -48942,10 +49091,8 @@ end;
 
 function TRawUTF8ListHashed.IndexOf(const aText: RawUTF8): PtrInt;
 begin
-  if fChanged then begin
-    fHash.ReHash; // rough, but working implementation
-    fChanged := false;
-  end;
+  if fChanged then
+    fChanged := not fHash.ReHash; // rough, but working implementation
   result := fHash.FindHashed(aText);
 end;
 
@@ -48953,10 +49100,8 @@ function TRawUTF8ListHashed.AddObjectIfNotExisting(
   const aText: RawUTF8; aObject: TObject; wasAdded: PBoolean): PtrInt;
 var added: boolean;
 begin
-  if fChanged then begin
-    fHash.ReHash; // rough, but working implementation
-    fChanged := false;
-  end;
+  if fChanged then
+    fChanged := not fHash.ReHash; // rough, but working implementation
   result := fHash.FindHashedForAdding(aText,added);
   if added then begin
     fList[result] := aText;
@@ -48966,6 +49111,11 @@ begin
   end;
   if wasAdded<>nil then
     wasAdded^ := added;
+end;
+
+function TRawUTF8ListHashed.HashFind(aHashCode: cardinal): integer;
+begin
+  result := fHash.HashFind(aHashCode);
 end;
 
 
@@ -50486,9 +50636,9 @@ begin
       c := ReadByte;
       inc(n,7);
       if c<=$7f then break;
-      result := result or ((c and $7f) shl n);
+      result := result or (QWord(c and $7f) shl n);
     until false;
-    result := result or (c shl n);
+    result := result or (QWord(c) shl n);
   end;
 end;
 
@@ -53340,8 +53490,7 @@ begin
       exit;
     len := SynLZdecompressdestlen(P+8);
     SetLength(result,len);
-    if (len<>0) and
-        ((SynLZdecompress1(P+8,DataLen-8,pointer(result))<>len) or
+    if (len<>0) and  ((SynLZDecompress1(P+8,DataLen-8,pointer(result))<>len) or
        (Hash32(pointer(result),len)<>PCardinal(P)^)) then begin
       result := '';
       exit;
@@ -53353,10 +53502,10 @@ end;
 
 function StreamSynLZ(Source: TCustomMemoryStream; Dest: TStream; Magic: cardinal): integer;
 var DataLen: integer;
-    S: pointer;
-    P: pointer;
+    S,D: pointer;
     Head: TSynLZHead;
     Trailer: TSynLZTrailer;
+    tmp: TSynTempBuffer;
 begin
   if Dest=nil then begin
     result := 0;
@@ -53369,22 +53518,29 @@ begin
     S := nil;
     DataLen := 0;
   end;
-  Getmem(P,SynLZcompressdestlen(DataLen));
+  tmp.Init(SynLZcompressdestlen(DataLen));
   try
     Head.Magic := Magic;
     Head.UnCompressedSize := DataLen;
     Head.HashUncompressed := Hash32(S,DataLen);
-    result := SynLZcompress1(S,DataLen,P);
+    result := SynLZcompress1(S,DataLen,tmp.buf);
+    if result>tmp.len then
+      raise ESynException.Create('StreamLZ: SynLZ compression overflow');
+    if result>DataLen then begin
+      result := DataLen; // compression not worth it
+      D := S;
+    end else
+      D := tmp.buf;
     Head.CompressedSize := result;
-    Head.HashCompressed := Hash32(P,result);
+    Head.HashCompressed := Hash32(D,result);
     Dest.Write(Head,sizeof(Head));
-    Dest.Write(P^,Head.CompressedSize);
+    Dest.Write(D^,Head.CompressedSize);
     Trailer.HeaderRelativeOffset := result+(sizeof(Head)+sizeof(Trailer));
     Trailer.Magic := Magic;
     Dest.Write(Trailer,sizeof(Trailer));
     result := Head.CompressedSize+(sizeof(Head)+sizeof(Trailer));
   finally
-    Freemem(P);
+    tmp.Done;
   end;
 end;
 
@@ -53413,11 +53569,7 @@ begin
   result := false;
   if FileExists(Source) then
   try
-    {$ifdef DELPHI5ORFPC}
-    S := TFileStream.Create(Source,fmOpenRead or fmShareDenyNone);
-    {$else}
-    S := TFileStream.Create(FileOpenSequentialRead(Source));
-    {$endif}
+    S := FileStreamSequentialRead(Source);
     try
       DeleteFile(Dest);
       D := TFileStream.Create(Dest,fmCreate);
@@ -53464,11 +53616,7 @@ begin
   result := false;
   if FileExists(Source) then
   try
-    {$ifdef DELPHI5ORFPC}
-    S := TFileStream.Create(Source,fmOpenRead or fmShareDenyNone);
-    {$else}
-    S := TFileStream.Create(FileOpenSequentialRead(Source));
-    {$endif}
+    S := FileStreamSequentialRead(Source);
     try
       DeleteFile(Dest);
       D := TFileStream.Create(Dest,fmCreate);
@@ -53491,8 +53639,7 @@ begin
           if (Hash32(pointer(src),Head.CompressedSize)<>Head.HashCompressed) or
              (SynLZdecompressdestlen(pointer(src))<>Head.UnCompressedSize) then
             exit;
-          if (SynLZdecompress1(pointer(src),Head.CompressedSize,pointer(dst))
-               <>Head.UnCompressedSize) or
+          if (SynLZDecompress1(pointer(src),Head.CompressedSize,pointer(dst))<>Head.UnCompressedSize) or
              (Hash32(pointer(dst),Head.UnCompressedSize)<>Head.HashUncompressed) then
             exit;
           if D.Write(pointer(dst)^,Head.UncompressedSize)<>Head.UncompressedSize then
@@ -53556,6 +53703,7 @@ var S,D: PAnsiChar;
     Head: TSynLZHead;
     Trailer: TSynLZTrailer;
     buf: RawByteString;
+    stored: boolean;
 begin
   result := nil;
   if Source=nil then
@@ -53601,9 +53749,13 @@ begin
       // trailer not available in old .synlz layout, or in FileSynLZ multiblocks
       Source.Position := sourcePosition else
       sourceSize := 0; // should be monoblock
-    // Source will now point after all data
-    if (SynLZdecompressdestlen(S)<>Head.UnCompressedSize) or
-       (Hash32(S,Head.CompressedSize)<>Head.HashCompressed) then
+    // Source stream will now point after all data
+    stored := (Head.CompressedSize=Head.UnCompressedSize) and
+              (Head.HashCompressed=Head.HashUncompressed);
+    if not stored then
+      if SynLZdecompressdestlen(S)<>Head.UnCompressedSize then
+        exit;
+    if Hash32(S,Head.CompressedSize)<>Head.HashCompressed then
       exit;
     if result=nil then
       result := THeapMemoryStream.Create else begin
@@ -53617,9 +53769,10 @@ begin
     result.Size := resultSize+Head.UnCompressedSize;
     D := PAnsiChar(result.Memory)+resultSize;
     inc(resultSize,Head.UnCompressedSize);
-    if {$ifdef DELPHI5OROLDER}SynLZDecompress1asm // circumvent Internal Error C11715
-       {$else}SynLZdecompress1{$endif}(S,Head.CompressedSize,D)<>Head.UnCompressedSize then
-      FreeAndNil(result) else 
+    if stored then
+      MoveFast(S^,D^,Head.CompressedSize) else
+    if SynLZDecompress1(S,Head.CompressedSize,D)<>Head.UnCompressedSize then
+      FreeAndNil(result) else
     if Hash32(D,Head.UnCompressedSize)<>Head.HashUncompressed then
       FreeAndNil(result);
   until (result=nil) or (sourcePosition>=sourceSize);
@@ -53639,7 +53792,7 @@ procedure SynLZCompress(P: PAnsiChar; PLen: integer; out Result: RawByteString;
 var len: integer;
     R: PAnsiChar;
     crc: cardinal;
-    tmp: array[0..4095] of AnsiChar;
+    tmp: array[0..4095] of AnsiChar;  // resize Result instead of TSynTempBuffer 
 begin
   if PLen=0 then
     exit;
@@ -53659,12 +53812,19 @@ begin
     end else
       R := @tmp;
     PCardinal(R)^ := crc;
-    R[4] := SYNLZCOMPRESS_SYNLZ;
     len := SynLZcompress1(P,PLen,R+9);
-    PCardinal(R+5)^ := crc32c(0,pointer(R+9),len);
+    if len>PLen then begin // store if compression not worth it
+      R[4] := SYNLZCOMPRESS_STORED;
+      PCardinal(R+5)^ := crc;
+      MoveFast(P^,R[9],PLen);
+      len := PLen;
+    end else begin
+      R[4] := SYNLZCOMPRESS_SYNLZ;
+      PCardinal(R+5)^ := crc32c(0,pointer(R+9),len);
+    end;
     if R=@tmp then
       SetString(result,tmp,len+9) else
-      SetLength(result,len+9);
+      SetLength(result,len+9); // resize in-place may not move any data
   end;
 end;
 
@@ -53686,7 +53846,7 @@ begin
     len := SynLZdecompressdestlen(P+9);
     SetLength(result,len);
     if (len<>0) and
-       ((SynLZdecompress1(P+9,PLen-9,pointer(result))<>len) or
+       ((SynLZDecompress1(P+9,PLen-9,pointer(result))<>len) or
        (crc32c(0,pointer(result),len)<>PCardinal(P)^)) then
       result := '';
   end;
@@ -53718,9 +53878,15 @@ begin
     SetLength(result,SynLZcompressdestlen(PLen)+9);
     R := pointer(result);
     PCardinal(R)^ := crc;
-    R[4] := SYNLZCOMPRESS_SYNLZ;
     len := SynLZcompress1(P,PLen,R+9);
-    PCardinal(R+5)^ := crc32c(0,pointer(R+9),len);
+    if len>PLen then begin // store if compression not worth it
+      R[4] := SYNLZCOMPRESS_STORED;
+      PCardinal(R+5)^ := crc;
+      MoveFast(P^,R[9],PLen);
+    end else begin
+      R[4] := SYNLZCOMPRESS_SYNLZ;
+      PCardinal(R+5)^ := crc32c(0,pointer(R+9),len);
+    end;
     SetLength(result,len+9);
   end;
 end;
@@ -55278,6 +55444,8 @@ begin
   try
     // start secondary threads
     perthread := MethodCount div use;
+    if perthread=0 then
+      use := 1;
     n := 0;
     for t := 0 to use-2 do begin
       repeat
@@ -55386,6 +55554,7 @@ end;
 
 procedure TBlockingProcess.ResetInternal;
 begin
+  ResetEvent;
   fEvent := evNone;
 end;
 
@@ -55600,21 +55769,15 @@ end;
 
 var
   GlobalCriticalSection: TRTLCriticalSection;
-  GlobalCriticalSectionInitialized: boolean;
 
 procedure GlobalLock;
 begin
-  if not GlobalCriticalSectionInitialized then begin
-    InitializeCriticalSection(GlobalCriticalSection);
-    GlobalCriticalSectionInitialized := true;
-  end;
   EnterCriticalSection(GlobalCriticalSection);
 end;
 
 procedure GlobalUnLock;
 begin
-  if GlobalCriticalSectionInitialized then
-    LeaveCriticalSection(GlobalCriticalSection);
+  LeaveCriticalSection(GlobalCriticalSection);
 end;
 
 {$ifdef CPUINTEL}
@@ -55696,6 +55859,10 @@ begin
     TwoDigitsHex[i][1] := HexChars[i shr 4];
     TwoDigitsHex[i][2] := HexChars[i and $f];
   end;
+  FillcharFast(ConvertBase64ToBin,256,255); // invalid value set to -1
+  for i := 0 to high(b64) do
+    ConvertBase64ToBin[b64[i]] := i;
+  ConvertBase64ToBin['='] := -2; // special value for '='
   // initialize our internaly used TSynAnsiConvert engines
   TSynAnsiConvert.Engine(0);
   // initialize tables for crc32cfast() and SymmetricEncrypt/FillRandom
@@ -55742,6 +55909,7 @@ initialization
   // initialization of global variables
   GarbageCollectorFreeAndNilList := TList.Create;
   GarbageCollectorFreeAndNil(GarbageCollector,TObjectList.Create);
+  InitializeCriticalSection(GlobalCriticalSection);
   {$ifdef CPUINTEL}
   TestIntelCpuFeatures;
   {$endif}
@@ -55762,6 +55930,8 @@ initialization
   InitSynCommonsConversionTables;
   RetrieveSystemInfo;
   SetExecutableVersion(0,0,0);
+  TTextWriter.RegisterCustomJSONSerializerFromText(TypeInfo(TFindFilesDynArray),
+    'Name string Attr Integer Size Int64 TimeStamp TDateTime');
   // some type definition assertions
   Assert(SizeOf(TSynTableFieldType)=1); // as expected by TSynTableFieldProperties
   Assert(SizeOf(TSynTableFieldOptions)=1);
@@ -55776,7 +55946,6 @@ initialization
 
 finalization
   GarbageCollectorFree;
-  if GlobalCriticalSectionInitialized then
-    DeleteCriticalSection(GlobalCriticalSection);
+  DeleteCriticalSection(GlobalCriticalSection);
   //writeln('TDynArrayHashedCollisionCount=',TDynArrayHashedCollisionCount); readln;
 end.
