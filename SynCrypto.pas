@@ -31,6 +31,7 @@ unit SynCrypto;
   the Initial Developer. All Rights Reserved.
 
   Contributor(s):
+  - Alfred Glaenzer (alf)
   - EvaF
   - Intel's sha256_sse4.asm under under a three-clause Open Software license
   - Johan Bontes
@@ -1449,6 +1450,10 @@ asm
 asm // rcx=s, rdx=d
   .noframe
 {$endif}
+  {$ifndef win64}
+  mov rdx,rsi
+  mov rcx,rdi
+  {$endif win64}
   mov eax,[rcx]; mov r8d,[rcx+4]; mov r9d,[rcx+8]; mov r10d,[rcx+12]
   bswap eax;     bswap r8d;       bswap r9d;       bswap r10d
   mov [rdx],eax; mov [rdx+4],r8d; mov [rdx+8],r9d; mov [rdx+12],r10d
@@ -1464,6 +1469,10 @@ asm
 asm // rcx=s, rdx=d
   .noframe
 {$endif}
+  {$ifndef win64}
+  mov rdx,rsi
+  mov rcx,rdi
+  {$endif win64}
   mov eax,[rcx]; mov r8d,[rcx+4]; mov r9d,[rcx+8]; mov r10d,[rcx+12];
   bswap eax;     bswap r8d;       bswap r9d;       bswap r10d;
   mov [rdx],eax; mov [rdx+4],r8d; mov [rdx+8],r9d; mov [rdx+12],r10d;
@@ -1472,7 +1481,7 @@ end;
 
 {$endif CPU64}
 
-{$else}
+{$else not CPUINTEL}
 
 procedure bswap256(s,d: PIntegerArray);
 begin
@@ -1765,6 +1774,7 @@ end;
     {$define AES_PASCAL} // AES128 unrolled pascal(Delphi7)=57MB/s rolled asm=84MB/s :)
   {$endif CPUINTEL}
 {$endif}
+
 {$ifdef AES_PASCAL}
   {$define AESPASCAL_OR_CPU64}
 {$endif}
@@ -1922,7 +1932,7 @@ asm // input: eax=TAESContext, xmm7=data; output: eax=TAESContext, xmm7=data
   db $66,$0F,$38,$DD,$FD
   {$endif}
 end;
-{$endif}
+{$endif CPU32}
 {$ifdef CPU64}
 procedure AesNiEncrypt(const ctxt; const source: TAESBlock; var dest: TAESBlock);
 {$ifdef FPC}nostackframe; assembler;
@@ -1931,6 +1941,11 @@ asm
 asm // input: rcx=TAESContext, rdx=source, r8=dest
   .noframe
 {$endif}
+  {$ifndef win64}
+  mov r8,rdx
+  mov rdx,rsi
+  mov rcx,rdi
+  {$endif win64}
   movdqu xmm7,[rdx]
   mov dl,[rcx].TAESContext.Rounds
   movdqu xmm0,[rcx+16*0]
@@ -1988,6 +2003,11 @@ asm
 asm // input: rcx=TAESContext, rdx=source, r8=dest
   .noframe
 {$endif}
+  {$ifndef win64}
+  mov r8,rdx
+  mov rdx,rsi
+  mov rcx,rdi
+  {$endif win64}
   movdqu xmm7,[rdx]
   mov dl,[rcx].TAESContext.Rounds
   cmp dl,10
@@ -2564,9 +2584,13 @@ asm
 asm
   .noframe
 {$endif}
+  {$ifndef win64}
+  mov rdx,rsi
+  mov rcx,rdi
+  {$endif win64}
   mov rax,rcx
   movdqu xmm1,[rdx]
-  movdqu xmm5,dqword ptr [@shuffle_mask]
+  movdqu xmm5,dqword ptr [rip+@shuffle_mask]
   cmp al,128
   je @128
   cmp al,192
@@ -2833,6 +2857,10 @@ asm
 asm // rcx=Rounds rdx=RK
   .noframe
 {$endif}
+  {$ifndef win64}
+  mov rdx,rsi
+  mov rcx,rdi
+  {$endif win64}
   mov rax,rcx
   sub eax,9
   movdqu xmm0,[rdx+$10]
@@ -3603,7 +3631,7 @@ begin
       xor ((W[i-15]shr 18)or(W[i-15]shl 14))xor(W[i-15]shr 3))+W[i-16];
 end;
 {$else}
-{$ifdef CPU32}
+{$ifdef CPUX86}
 asm // W=eax Buf=edx
      push  esi
      push  edi
@@ -3649,9 +3677,18 @@ asm // W=eax Buf=edx
      pop   edi
      pop   esi
 end;
-{$endif CPU32}
-{$ifdef CPU64}
+{$endif CPUX86}
+{$ifdef CPUX64}
+{$ifdef FPC}nostackframe; assembler;
+asm
+{$else}
 asm // W=rcx Buf=rdx
+  .noframe
+{$endif}
+     {$ifndef win64}
+     mov   rdx,rsi
+     mov   rcx,rdi
+     {$endif win64}
      mov   rax,rcx
      push  rsi
      push  rdi
@@ -3697,8 +3734,8 @@ asm // W=rcx Buf=rdx
      pop   rdi
      pop   rsi
 end;
-{$endif CPU64}
-{$endif}
+{$endif CPUX64}
+{$endif AES_PASCAL}
 
 const
   K256: array[0..63] of cardinal = (
@@ -3714,7 +3751,7 @@ const
    $5b9cca4f, $682e6ff3, $748f82ee, $78a5636f, $84c87814, $8cc70208,
    $90befffa, $a4506ceb, $bef9a3f7, $c67178f2);
 
-{$ifdef CPU64}
+{$ifdef CPUX64}
 // optimized unrolled version from Intel's sha256_sse4.asm
 //  Original code is released as Copyright (c) 2012, Intel Corporation
 var
@@ -3722,11 +3759,11 @@ var
 
 const
   PSHUFFLE_BYTE_FLIP_MASK: array[0..1] of QWord =
-    ($0405060700010203,$0C0D0E0F08090A0B);
+    (qword($0405060700010203),qword($0C0D0E0F08090A0B));
   _SHUF_00BA: array[0..1] of QWord =
-    ($B0A090803020100, $FFFFFFFFFFFFFFFF);
+    (qword($0B0A090803020100),qword($FFFFFFFFFFFFFFFF));
   _SHUF_DC00: array[0..1] of QWord =
-    ($FFFFFFFFFFFFFFFF,$B0A090803020100);
+    (qword($FFFFFFFFFFFFFFFF),qword($B0A090803020100));
   STACK_SIZE = 32{$ifndef LINUX}+7*16{$endif};
 
 procedure sha256_sse4(var input_data; var digest; num_blks: PtrUInt);
@@ -3738,9 +3775,9 @@ asm // rcx=input_data rdx=digest r8=num_blks (Linux: rdi,rsi,rdx)
 {$endif FPC}
         push    rbx
         {$ifdef LINUX}
-        mov rcx,rdi
-        mov r8,rdx
-        mov rdx,rsi
+        mov     r8,rdx
+        mov     rcx,rdi
+        mov     rdx,rsi
         {$else}
         push    rsi   // Win64 expects those registers to be preserved
         push    rdi
@@ -3771,10 +3808,10 @@ asm // rcx=input_data rdx=digest r8=num_blks (Linux: rdi,rsi,rdx)
         mov     r9d,[rdx+14H]
         mov     r10d,[rdx+18H]
         mov     r11d,[rdx+1CH]
-        movdqu  xmm12,[PSHUFFLE_BYTE_FLIP_MASK]
-        movdqu  xmm10,[_SHUF_00BA]
-        movdqu  xmm11,[_SHUF_DC00]
-@loop0: mov     rbp,[K256Aligned]
+        movdqu  xmm12,[rip+PSHUFFLE_BYTE_FLIP_MASK]
+        movdqu  xmm10,[rip+_SHUF_00BA]
+        movdqu  xmm11,[rip+_SHUF_DC00]
+@loop0: mov     rbp,[rip+K256Aligned]
         movdqu  xmm4,[rcx]
         pshufb  xmm4,xmm12
         movdqu  xmm5,[rcx+10H]
@@ -4679,7 +4716,7 @@ asm // rcx=input_data rdx=digest r8=num_blks (Linux: rdi,rsi,rdx)
         {$endif}
         pop     rbx
 end;
-{$endif CPU64}
+{$endif CPUX64}
 
 procedure TSHA256.Compress;
 // Actual hashing function
@@ -4690,7 +4727,7 @@ var H: TSHAHash;
     t1, t2: cardinal;
     {$endif}
 begin
-  {$ifdef CPU64}
+  {$ifdef CPUX64}
   if cfSSE41 in CpuFeatures then begin
     if K256Aligned='' then
       SetString(K256Aligned,PAnsiChar(@K256),SizeOf(K256));
@@ -4699,7 +4736,7 @@ begin
       exit;
     end; // if K256Aligned[] is not properly aligned -> fallback to pascal
   end;
-  {$endif CPU64}
+  {$endif CPUX64}
 
   // Calculate "expanded message blocks"
   Sha256ExpandMessageBlocks(@W,@TSHAContext(Context).Buffer);
@@ -4810,23 +4847,22 @@ procedure TSHA256.Final(out Digest: TSHA256Digest);
 // finalize SHA256 calculation, clear context
 var Data: TSHAContext absolute Context;
 begin
-  // Message padding
-  // 1. append bit '1' after Buffer
+  // append bit '1' after Buffer
   Data.Buffer[Data.Index]:= $80;
   FillcharFast(Data.Buffer[Data.Index+1],63-Data.Index,0);
-  // 2. Compress if more than 448 bits, (no room for 64 bit length
+  // compress if more than 448 bits (no space for 64 bit length storage)
   if Data.Index>=56 then begin
     Compress;
     FillcharFast(Data.Buffer,56,0);
   end;
-  // Write 64 bit Buffer length into the last bits of the last block
+  // write 64 bit Buffer length into the last bits of the last block
   // (in big endian format) and do a final compress
   PInteger(@Data.Buffer[56])^ := bswap32(Int64Rec(Data.MLen).Hi);
   PInteger(@Data.Buffer[60])^ := bswap32(Int64Rec(Data.MLen).Lo);
   Compress;
   // Hash -> Digest to little endian format
   bswap256(@Data.Hash,@Digest);
-  // Clear Data and internally stored Digest
+  // clear Data and internally stored Digest
   Init;
 end;
 
@@ -7359,13 +7395,34 @@ function CreateGuid(out guid: TGUID): HResult; stdcall;
   external 'ole32.dll' name 'CoCreateGuid';
 {$endif}
 
+{$ifdef CPUINTEL}
+/// get 32-bit value from NIST SP 800-90A compliant RDRAND Intel x86/x64 opcode
+function RdRand32: cardinal;
+{$ifdef CPU64}
+{$ifdef FPC}nostackframe; assembler;
+asm
+{$else}
+asm
+  .noframe
+{$endif FPC}
+{$endif CPU64}
+{$ifdef CPU32}
+asm
+{$endif}
+  // rdrand eax: same opcodes for x86 and x64
+  db $0f,$c7,$f0
+  // returns in eax, ignore carry flag (eax=0 won't hurt)
+end;
+// https://software.intel.com/en-us/articles/intel-digital-random-number-generator-drng-software-implementation-guide
+{$endif}
+
 class function TAESPRNG.GetEntropy(Len: integer): RawByteString;
 var time: Int64;
     ext: TSynExtended;
     threads: array[0..2] of cardinal;
     version: RawByteString;
     sha: TSHA256;
-    entropy: array[0..1] of TSHA256Digest; // 64 bytes
+    entropy: array[0..3] of TSHA256Digest; // 128 bytes
     paranoid: cardinal;
     p: PByteArray;
     i: integer;
@@ -7377,6 +7434,28 @@ var time: Int64;
     {$ifdef MSWINDOWS}
     prov: HCRYPTPROV;
     {$endif}
+  procedure ShaInit;
+  var timenow: Int64;
+      g: TGUID;
+      i, val: cardinal;
+  begin
+    sha.Update(@time,sizeof(time));
+    sha.Update(@entropy,sizeof(entropy)); // bytes on CPU stack
+    QueryPerformanceCounter(timenow);
+    sha.Update(@timenow,sizeof(timenow)); // include GetEntropy() execution time
+    for i := 0 to timenow and 3 do begin
+      CreateGUID(g); // not random, but genuine
+      sha.Update(@g,sizeof(g));
+    end;
+    {$ifdef CPUINTEL}
+    sha.Update(@CpuFeatures,sizeof(CpuFeatures));
+    if cfRAND in CpuFeatures then
+      for i := 1 to 20 do begin // hash 80 bytes from CPU
+        val := RdRand32;
+        sha.Update(@val,sizeof(val));
+      end;
+    {$endif}
+  end;
 begin
   QueryPerformanceCounter(time);
   SetLength(result,Len);
@@ -7407,6 +7486,11 @@ begin
   end;
   {$endif}
   if not fromOS then begin
+    {$ifdef CPUINTEL}
+    if cfRAND in CpuFeatures then
+      for i := 0 to (Len shr 2)-1 do
+        PCardinalArray(p)^[i] := PCardinalArray(p)^[i] xor RdRand32;
+    {$endif}
     i := Len;
     repeat
       CreateGUID(g); // is genuine, not random, but may be used as fallback seed
@@ -7420,30 +7504,25 @@ begin
   end;
   // always xor some minimal entropy - it won't hurt
   sha.Init;
-  sha.Update(@time,sizeof(time));
-  sha.Update(@entropy,sizeof(entropy));  // bytes on CPU stack
-  ext := NowUTC;
-  sha.Update(@ext,sizeof(ext));
-  ext := Random;
-  sha.Update(@ext,sizeof(ext));
+  ShaInit;
   version := RecordSave(ExeVersion,TypeInfo(TExeVersion));
   sha.Update(pointer(version),length(version)); // exe and host/user info
+  sha.Final(entropy[3]);
+  ShaInit;
+  ext := NowUTC;
+  sha.Update(@ext,sizeof(ext));
+  sha.Final(entropy[2]);
+  ShaInit;
+  ext := Random;
+  sha.Update(@ext,sizeof(ext));
   threads[0] := HInstance;
   threads[1] := GetCurrentThreadId;
   threads[2] := MainThreadID;
   sha.Update(@threads,sizeof(threads));
   sha.Final(entropy[1]);
-  sha.Update(@time,sizeof(time));
-  sha.Update(@entropy,sizeof(entropy));
-  for i := 1 to 5 do begin
-    CreateGUID(g); // not random, but genuine
-    sha.Update(@g,sizeof(g));
-  end;
+  ShaInit;
   sha.Update(@SystemInfo,sizeof(SystemInfo));
   sha.Update(pointer(OSVersionText),Length(OSVersionText));
-  {$ifdef CPUINTEL}
-  sha.Update(@CpuFeatures,sizeof(CpuFeatures));
-  {$endif}
   SleepHiRes(0); // force non deterministic time shift
   QueryPerformanceCounter(time);
   sha.Update(@time,sizeof(time)); // include GetEntropy() execution time
@@ -7466,7 +7545,8 @@ begin
   EnterCriticalSection(fLock);
   PBKDF2_HMAC_SHA256(pass,salt,fSeedPBKDF2Rounds,key);
   fAES.EncryptInit(key,256);
-  FillCharFast(key,sizeof(key),0); // avoid the key appear in clear on stack
+  FillcharFast(key,sizeof(key),0); // avoid the key appear in clear on stack
+  FillcharFast(pointer(pass)^,length(pass),0); // remove entropy from heap
   assert(SALTLEN>=sizeof(fCTR));
   MoveFast(pointer(salt)^,fCTR,sizeof(fCTR));
   fCTR[0] := fCTR[0] xor fTotalBytes;
@@ -7560,16 +7640,18 @@ begin
   result := FillRandomAES;
 end;
 
-procedure _afdiffusesha256(buf,rnd: pointer; size: integer);
+procedure _afdiffusesha256(buf,rnd: pointer; size: cardinal);
 var sha: TSHA256;
     dig: TSHA256Digest;
-    last,i: integer;
+    last, iv: cardinal;
+    i: integer;
 begin
   XorMemory(buf,rnd,size);
   sha.Init;
   last := size div SizeOf(dig);
   for i := 0 to last-1 do begin
-    sha.Update(@i,SizeOf(i));
+    iv := bswap32(i); // host byte order independent hash IV (as in TKS1/LUKS)
+    sha.Update(@iv,SizeOf(iv));
     sha.Update(buf,SizeOf(dig));
     sha.Final(PSHA256Digest(buf)^);
     inc(PByte(buf),SizeOf(dig));
@@ -7577,14 +7659,15 @@ begin
   dec(size,last*SizeOf(dig));
   if size=0 then
     exit;
-  sha.Update(@last,SizeOf(last));
+  iv := bswap32(last);
+  sha.Update(@iv,SizeOf(iv));
   sha.Update(buf,size);
   sha.Final(dig);
   move(dig,buf^,size);
 end;
  
 function TAESPRNG.AFSplit(const Buffer; BufferBytes, StripesCount: integer): RawByteString;
-var P: pointer;
+var dst: pointer;
     tmp: TByteDynArray;
     i: integer;
 begin
@@ -7593,35 +7676,34 @@ begin
     SetLength(result,BufferBytes*(StripesCount+1));
   if result='' then
     exit;
-  P := pointer(result);
+  dst := pointer(result);
   SetLength(tmp,BufferBytes);
   for i := 1 to StripesCount do begin
-    FillRandom(P,BufferBytes);
-    _afdiffusesha256(pointer(tmp),P,BufferBytes);
-    inc(PByte(P),BufferBytes);
+    FillRandom(dst,BufferBytes);
+    _afdiffusesha256(pointer(tmp),dst,BufferBytes);
+    inc(PByte(dst),BufferBytes);
   end;
-  move(Buffer,P^,BufferBytes);
-  XorMemory(P,pointer(tmp),BufferBytes);
+  XorBlockN(@Buffer,dst,pointer(tmp),BufferBytes); // B[i] := A[i] xor C[i];
 end;
 
 class function TAESPRNG.AFUnsplit(const Split: RawByteString;
   out Buffer; BufferBytes: integer): boolean;
-var len,i: integer;
-    P: pointer;
+var len: cardinal;
+    i: integer;
+    src: pointer;
     tmp: TByteDynArray;
 begin
   len := length(Split);
-  result := (len<>0) and (len mod BufferBytes=0);
+  result := (len<>0) and (len mod cardinal(BufferBytes)=0);
   if not result then
     exit;
-  P := pointer(Split);
+  src := pointer(Split);
   SetLength(tmp,BufferBytes);
-  for i := 2 to len div BufferBytes do begin
-    _afdiffusesha256(pointer(tmp),P,BufferBytes);
-    inc(PByte(P),BufferBytes);
+  for i := 2 to len div cardinal(BufferBytes) do begin
+    _afdiffusesha256(pointer(tmp),src,BufferBytes);
+    inc(PByte(src),BufferBytes);
   end;
-  move(P^,Buffer,BufferBytes);
-  XorMemory(@Buffer,pointer(tmp),BufferBytes);
+  XorBlockN(src,@Buffer,pointer(tmp),BufferBytes);
 end;
 
 

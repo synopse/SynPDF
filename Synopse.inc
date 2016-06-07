@@ -195,6 +195,7 @@
 
   {$undef ENHANCEDRTL}    // there is no version of our Enhanced RTL for FPC
   {$undef DOPATCHTRTL}
+  {$define DELPHI5ORFPC}
   {$define USETYPEINFO}  // will use SynFPCTypInfo.pas wrapper
   {$define HASINLINE}
   {$define NODELPHIASM}   // ignore low-level System.@LStrFromPCharLen calls
@@ -202,41 +203,62 @@
   {$define HASTTHREADSTART}
   {$define HASINTERFACEASTOBJECT}
   {$define FPC_OR_UNICODE}
-  {$define DELPHI5ORFPC}
+  {$define FPC_ENUMHASINNER}
 
-  {$define FPCSQLITE3STATIC}
+  {.$define FPCSQLITE3STATIC}
   // allow static linking of the SQlite3 engine (including crypto) to the project
   // -> enabled to support static-linked SQLite3 engine, after retrieval of
   // the needed .o files from http://synopse.info/files/sqlite3fpc.7z
   // -> could be disabled to force external .so/.dll linking
   // -> only available for Win32 and Linux32 platforms by now
 
+  {$ifdef MSWINDOWS}
+    {$define FPCSQLITE3STATIC} // we supply Win32 and Win64 .obj
+  {$endif}
+  {$ifdef LINUX}
+    {$ifdef CPUX86}
+      {$define FPCSQLITE3STATIC} // we supply Linux 32-bit x86 .o
+    {$endif} 
+  {$endif} 
+
   {$ifdef ANDROID}
     {$define LINUX}
   {$endif}
+
   {$ifdef DARWIN}
-    {$define LINUX}
+    {$define LINUX} // not true, but a POSIX/BSD system
     {$define PUREPASCAL} // e.g. low-level stack layout differs
   {$endif}
 
   {$ifdef CPU64}
-    {$define PUREPASCAL}
-    {$define CPUINTEL}
-    {$ASMMODE INTEL} // as Delphi expects, and I use to write
+    {$define PUREPASCAL} // e.g. x64, AARCH64
+    {$ifdef CPUX64}
+      {$define CPUINTEL}
+      {$ASMMODE INTEL} // as Delphi expects
+    {$endif CPUX64}
   {$else}
     {$ifdef CPUARM}
-    {$define PUREPASCAL}
-    {$else}
-    {$ASMMODE INTEL} // as Delphi expects, and I use to write
-    {$define CPUINTEL}
-    {$endif}
+      {$define PUREPASCAL} // ARM32
+    {$endif CPUARM}
+    {$ifdef CPUX86}
+      {$define CPUINTEL}
+      {$ASMMODE INTEL} // as Delphi expects
+    {$endif CPUX86}
   {$endif CPU64}
 
   // FPC has its own RTTI layout only since late 3.x
   // when http://bugs.freepascal.org/view.php?id=26774 has been fixed
-  {$ifdef FPC_HAS_EXTENDEDINTERFACERTTI} // use dedicated trunk conditional
-    {$define HASINTERFACERTTI}
-  {$endif}
+  {$ifdef FPC_HAS_EXTENDEDINTERFACERTTI} // use dedicated branch conditional
+    {$ifdef CPUINTEL}
+      {$define HASINTERFACERTTI}
+    {$endif}
+    {$ifdef CPUARM}
+      {$define HASINTERFACERTTI}
+    {$endif}
+    {$ifdef CPUAARCH64}
+      {$define HASINTERFACERTTI}
+    {$endif}
+  {$endif FPC_HAS_EXTENDEDINTERFACERTTI}
 
   {$define FPC_OR_PUREPASCAL}
   {$define FPC_OR_KYLIX}
@@ -266,6 +288,9 @@
     // => this will change the TInvokeableVariantType.SetProperty() signature
     {$define FPC_VARIANTSETVAR}
   {$endif}
+  {$ifdef FPC_REQUIRES_PROPER_ALIGNMENT}
+    {$define FPC_ENUMHASINNER}
+  {$endif}
 
 {$else FPC}
 
@@ -280,6 +305,7 @@
   {$else CPUX64}
     {$define CPU32} // Delphi compiler for 32 bit CPU
     {$undef CPU64}
+    {$define CPUX86} // for compatibility with older versions of Delphi
   {$endif CPUX64}
 
   // defines if exceptions shall not be intercepted
@@ -300,7 +326,7 @@
       Kylix1/2 are unsupported
       {$ifend}
     {$else}
-      {$ifdef VER140} 
+      {$ifdef VER140}
         {$define ISDELPHI6ANDUP} // Delphi 6 or newer
         {$define DELPHI6OROLDER}
         {$define NOVARCOPYPROC}
@@ -318,7 +344,7 @@
     {$ifend}
     {$if CompilerVersion >= 18}
       {$define ISDELPHI2006ANDUP} // Delphi 2006 or newer
-      {$define HASNEWFILEAGE} 
+      {$define HASNEWFILEAGE}
       {$define HASINLINE}
       {$define HASREGION}
       {$define HASFASTMM4}
