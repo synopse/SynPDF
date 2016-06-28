@@ -5749,6 +5749,10 @@ function TypeInfoToName(aTypeInfo: pointer): RawUTF8; overload;
 procedure TypeInfoToName(aTypeInfo: pointer; var result: RawUTF8;
   const default: RawUTF8=''); overload;
 
+/// retrieve the unit name and type name from its low-level RTTI
+procedure TypeInfoToQualifiedName(aTypeInfo: pointer; var result: RawUTF8;
+  const default: RawUTF8='');
+
 /// retrieve the record size from its low-level RTTI
 function RecordTypeInfoSize(aRecordTypeInfo: pointer): integer;
 
@@ -6793,6 +6797,7 @@ type
   // before the ISO-8601 encoded TDateTime value
   // - woDateTimeWithZSuffix will append the Z suffix to the ISO-8601 encoded
   // TDateTime value, to identify the content as strict UTC value
+  // - TTimeLog would be serialized as Int64, unless woTimeLogAsText is defined
   // - by default, TSQLRawBlob properties are serialized as null, unless
   // woSQLRawBlobAsBase64 is defined
   // - if woHideSynPersistentPassword is set, TSynPersistentWithPassword.Password
@@ -6801,13 +6806,16 @@ type
   // objects, unless woObjectListWontStoreClassName is defined
   // - void strings would be serialized as "", unless woDontStoreEmptyString
   // is defined so that such properties would not be written
+  // - all inherited properties would be serialized, unless woDontStoreInherited
+  // is defined, and only the topmost class level properties would be serialized
   TTextWriterWriteObjectOption = (
     woHumanReadable, woDontStoreDefault, woFullExpand,
     woStoreClassName, woStorePointer, woStoreStoredFalse,
     woHumanReadableFullSetsAsStar, woHumanReadableEnumSetAsComment,
-    woEnumSetsAsText, woDateTimeWithMagic, woDateTimeWithZSuffix,
+    woEnumSetsAsText, woDateTimeWithMagic, woDateTimeWithZSuffix, woTimeLogAsText,
     woSQLRawBlobAsBase64, woHideSynPersistentPassword,
-    woObjectListWontStoreClassName, woDontStoreEmptyString);
+    woObjectListWontStoreClassName, woDontStoreEmptyString,
+    woDontStoreInherited);
   /// options set for TTextWriter.WriteObject() method
   TTextWriterWriteObjectOptions = set of TTextWriterWriteObjectOption;
 
@@ -7069,7 +7077,7 @@ type
     // - e.g. append '20110325 19241502 '
     // - you may set LocalTime=TRUE to write the local date and time instead
     // - this method is very fast, and avoid most calculation or API calls
-    procedure AddCurrentLogTime(LocalTime: boolean=false);
+    procedure AddCurrentLogTime(LocalTime: boolean=false; Use16msCache: boolean=true);
     /// append a time period, specified in micro seconds
     procedure AddMicroSec(MS: cardinal);
     /// append an Integer Value as a 4 digits String with comma
@@ -7190,6 +7198,9 @@ type
       Fmt: TTextWriterHTMLFormat=hfAnyWhere); overload;
     /// append some chars, escaping all HTML special chars as expected
     procedure AddHtmlEscapeString(const Text: string;
+      Fmt: TTextWriterHTMLFormat=hfAnyWhere);
+    /// append some chars, escaping all HTML special chars as expected
+    procedure AddHtmlEscapeUTF8(const Text: RawUTF8;
       Fmt: TTextWriterHTMLFormat=hfAnyWhere);
     /// convert some wiki-like text into proper HTML
     // - convert all #13#10 into <p>...</p>, *..* into <i>..</i> and +..+ into
@@ -12752,6 +12763,7 @@ procedure SetVariantByRef(const Source: Variant; var Dest: Variant);
 
 /// same as Dest := Source, but copying by value
 // - will unreference any varByRef content
+// - will convert any string value into RawUTF8 (varString) for consistency
 procedure SetVariantByValue(const Source: Variant; var Dest: Variant);
 
 /// same as FillChar(Value^,sizeof(TVarData),0)
@@ -14269,7 +14281,7 @@ function ConsoleKeyPressed(ExpectedKey: Word): Boolean;
 {$endif}
 
 /// direct conversion of a UTF-8 encoded string into a console OEM-encoded String
-// - under Windows, will use the OEM_CHARSET encoding
+// - under Windows, will use the CP_OEMCP encoding
 // - under Linux, will expect the console is defined with UTF-8 encoding
 function Utf8ToConsole(const S: RawUTF8): RawByteString;
   {$ifndef MSWINDOWS}{$ifdef HASINLINE}inline;{$endif}{$endif}
@@ -16138,7 +16150,7 @@ var c: cardinal;
     DestBegin: PAnsiChar;
     SourceCharsBegin: integer;
 {$endif}
-{$endif}
+{$endif MSWINDOWS}
 begin
   {$ifdef KYLIX3}
   SourceCharsBegin := SourceChars;
@@ -16153,7 +16165,7 @@ begin
       dec(SourceChars,2);
       inc(Source,2);
       c := c shr 8 or c;
-      PWord(Dest)^ := c; 
+      PWord(Dest)^ := c;
       inc(Dest,2);
     until SourceChars<2;
   if (SourceChars>0) and (ord(Source^)<128) then
@@ -18770,11 +18782,11 @@ type
   PDynArrayRec = ^TDynArrayRec;
 
   {$ifdef FPC}
-  {$PACKRECORDS C}
-  {$endif}
+    {$PACKRECORDS C}
+  {$endif FPC}
 
   PTypeInfo = ^TTypeInfo;
-  {$ifdef FPC}
+  {$ifdef HASDIRECTTYPEINFO}
   PTypeInfoStored = PTypeInfo;
   {$else}
   PTypeInfoStored = ^PTypeInfo;
@@ -18961,6 +18973,28 @@ end;
 var
   KnownTypeInfo: array of PTypeInfo;
 
+{$ifdef HASDIRECTTYPEINFO}
+type
+  Deref = PTypeInfo;
+{$else}
+function Deref(Info: PTypeInfoStored): PTypeInfo;
+{$ifdef HASINLINE} inline;
+begin
+  if Info=nil then
+    result := pointer(Info) else
+    result := Info^;
+end;
+{$else}
+asm // Delphi is so bad at compiling above code...
+    or eax,eax
+    jz @z
+    mov eax,[eax]
+    ret
+@z: db $f3 // rep ret
+end;
+{$endif HASINLINE}
+{$endif HASDIRECTTYPEINFO}
+
 /// add some TypeInfo() RTTI for TypeInfoSave/TypeInfoLoad function
 // - warning: calling this after TypeInfoLoad() would trigger GPF
 procedure TypeInfoSaveRegisterKnown(const Types: array of pointer);
@@ -19004,13 +19038,7 @@ var k: TTypeKind;
   var nfo: PTypeInfo;
       known: integer;
   begin
-    {$ifdef FPC}
-    nfo := nested;
-    {$else}
-    if nested=nil then
-      nfo := nil else
-      nfo := nested^;
-    {$endif}
+    nfo := Deref(nested);
     if nfo=nil then
       tmp.wrw(0) else
     if nfo=info then
@@ -19323,7 +19351,7 @@ asm // eax=@Dest text=edx len=ecx
 {$ifdef UNICODE}
 @3: push CP_UTF8 // UTF-8 code page for Delphi 2009+
     call System.@LStrFromPCharLen // we need a call, not a jmp here
-    ret
+    rep ret
 {$else}
     jmp System.@LStrFromPCharLen
 {$endif}
@@ -19404,14 +19432,13 @@ end;
 {$else}
 asm
     test eax,eax
-    jz @z
+    jz @n
     cmp dl,[eax]
     movzx ecx,byte ptr [eax+TTypeInfo.NameLen]
     jnz @n
     add eax,ecx
     ret
 @n: xor eax,eax
-@z:
 end;
 {$endif}
 
@@ -19431,13 +19458,13 @@ end;
 {$else}
 asm // eax=aTypeInfo edx=aExpectedKind
     test eax,eax
-    jz @z
+    jz @n
     movzx ecx,byte ptr [eax]
     bt edx,ecx
     movzx ecx,byte ptr [eax+TTypeInfo.NameLen]
     jnb @n
     add eax,ecx
-@z: ret
+    ret
 @n: xor eax,eax
 end;
 {$endif}
@@ -19451,7 +19478,7 @@ begin
   if info=nil then
     exit;
   if info^.elType<>nil then
-    result := info^.elType{$ifndef FPC}^{$endif};
+    result := Deref(info^.elType);
   if aDataSize<>nil then
     aDataSize^ := info^.elSize {$ifdef FPC}and $7FFFFFFF{$endif};
 end;
@@ -19463,6 +19490,21 @@ begin
     SetRawUTF8(result,PAnsiChar(@PTypeInfo(aTypeInfo)^.NameLen)+1,
       PTypeInfo(aTypeInfo)^.NameLen) else
     result := default;
+end;
+
+procedure TypeInfoToQualifiedName(aTypeInfo: pointer; var result: RawUTF8;
+  const default: RawUTF8='');
+var unitname: RawUTF8;
+begin
+  if aTypeInfo<>nil then begin
+    SetRawUTF8(result,PAnsiChar(@PTypeInfo(aTypeInfo)^.NameLen)+1,
+      PTypeInfo(aTypeInfo)^.NameLen);
+    if PTypeInfo(aTypeInfo)^.Kind=tkClass then begin
+      with GetTypeInfo(aTypeInfo,PTypeKind(aTypeInfo)^)^ do
+        SetRawUTF8(unitname,PAnsiChar(@UnitNameLen)+1,UnitNameLen);
+      result := unitname+'.'+result;
+    end;
+  end else result := default;
 end;
 
 function TypeInfoToName(aTypeInfo: pointer): RawUTF8;
@@ -19489,7 +19531,7 @@ begin
     {$ifdef FPC}
     if info^.{$ifdef FPC_ENUMHASINNER}inner.{$endif}EnumBaseType<>nil then
     {$endif}
-      info := GetTypeInfo(info^.{$ifdef FPC_ENUMHASINNER}inner.{$endif}EnumBaseType{$ifndef FPC}^{$endif},tkEnumeration);
+      info := GetTypeInfo(Deref(info^.{$ifdef FPC_ENUMHASINNER}inner.{$endif}EnumBaseType),tkEnumeration);
     MaxValue := info^.{$ifdef FPC_ENUMHASINNER}inner.{$endif}MaxValue;
     Names := @info.NameList;
     result := true;
@@ -19499,7 +19541,7 @@ end;
 {$else}
 asm // eax=aTypeInfo edx=@MaxValue ecx=@Names
     test eax,eax
-    jz @z
+    jz @n
     cmp byte ptr [eax],tkEnumeration
     jnz @n
     push ecx
@@ -19516,7 +19558,6 @@ asm // eax=aTypeInfo edx=@MaxValue ecx=@Names
     mov al,1
     ret
 @n: xor eax,eax
-@z:
 end;
 {$endif}
 
@@ -19530,7 +19571,7 @@ begin
     if info^.SetBaseType=nil then
       result := GetEnumInfo(aTypeInfo,MaxValue,Names) else
     {$endif}
-      result := GetEnumInfo(info^.SetBaseType{$ifndef FPC}^{$endif},MaxValue,Names) else
+      result := GetEnumInfo(Deref(info^.SetBaseType),MaxValue,Names) else
     result := false;
 end;
 
@@ -19578,13 +19619,14 @@ asm // eax=aTypeInfo edx=aIndex
     pop    edx
     and    edx,3
     jnz    @s
-@z: ret
-@1: pop    edx 
+    ret
+@1: pop    edx
 @s: movzx  ecx,byte ptr [eax]
     dec    edx
     lea    eax,[eax+ecx+1] // next short string
     jnz    @s
     ret
+@z: rep ret
 @0: lea    eax,NULL_SHORTSTRING
 end;
 {$endif}
@@ -19973,9 +20015,9 @@ begin
   if VType=varByRef or varString then begin
     wasString := true;
     {$ifdef HASCODEPAGE}
-      AnyAnsiToUTF8(PRawByteString(VString)^,result);
+    AnyAnsiToUTF8(PRawByteString(VString)^,result);
     {$else}
-      result := PRawUTF8(VString)^;
+    result := PRawUTF8(VString)^;
     {$endif}
   end else
   if VType=varByRef or varOleStr then begin
@@ -20644,8 +20686,8 @@ asm  // fast implementation by John O'Harrow, modified for Delphi 2009+
 {$ifdef UNICODE}
   jbe  @@TrimRight
   push CP_UTF8 // UTF-8 code page for Delphi 2009+
-  call  System.@LStrFromPCharLen // we need a call, not a jmp here
-  ret
+  call System.@LStrFromPCharLen // we need a call, not a jmp here
+  rep  ret
 {$else}
   ja   System.@LStrFromPCharLen
 {$endif}
@@ -22277,7 +22319,8 @@ asm // slower than x86/SSE* StrLen(), but won't read any byte beyond the string
     add eax,4
     jmp @s
 @1: inc eax
-@0: ret
+    ret
+@0: rep ret
 @2: add eax,2; ret
 @3: add eax,3
 end;
@@ -22299,7 +22342,7 @@ asm // no branch taken in case of not equal first char
 @exit:  movzx eax,cl
         movzx edx,ch
         sub   eax,edx
-@exit2: ret
+        ret
 @maynil:test  eax,eax  // Str1='' ?
         jz    @max
         test  edx,edx  // Str2='' ?
@@ -24677,37 +24720,33 @@ function IdemPCharW(p: PWideChar; up: PUTF8Char): boolean;
 // if the beginning of p^ is same as up^ (ignore case - up^ must be already Upper)
 // eax=p edx=up
 asm
-  test eax,eax
-  jz @e // P=nil -> false
-  test edx,edx
-  push ebx
-  push esi
-  jz @z // up=nil -> true
-  mov esi,offset NormToUpper
-  xor ebx,ebx
-  xor ecx,ecx
-@1:
-  mov bx,[eax] // bl=p^
-  mov cl,[edx] // cl=up^
-  test bh,bh     // p^ > #255 -> FALSE
-  jnz @n
-  test cl,cl
-  mov bl,[ebx+esi] // bl=NormToUpper[p^]
-  jz @z // up^=#0 -> OK
-  lea edx,[edx+1] // = inc edx without changing flags
-  cmp bl,cl
-  lea eax,[eax+2]
-  je @1
-@n:
-  pop esi
-  pop ebx
-  xor eax,eax
-@e:
-  ret
-@z:
-  mov al,1 // up^=#0 -> OK
-  pop esi
-  pop ebx
+    test eax,eax
+    jz @e // P=nil -> false
+    test edx,edx
+    push ebx
+    push esi
+    jz @z // up=nil -> true
+    mov esi,offset NormToUpper
+    xor ebx,ebx
+    xor ecx,ecx
+@1: mov bx,[eax] // bl=p^
+    mov cl,[edx] // cl=up^
+    test bh,bh     // p^ > #255 -> FALSE
+    jnz @n
+    test cl,cl
+    mov bl,[ebx+esi] // bl=NormToUpper[p^]
+    jz @z // up^=#0 -> OK
+    lea edx,[edx+1] // = inc edx without changing flags
+    cmp bl,cl
+    lea eax,[eax+2]
+    je @1
+@n: pop esi
+    pop ebx
+@e: xor eax,eax
+    ret
+@z: mov al,1 // up^=#0 -> OK
+    pop esi
+    pop ebx
 end;
 {$endif}
 {$else}
@@ -25641,7 +25680,7 @@ end;
 {$else}
 asm // eax=P, edx=Count, Value=ecx
         test eax,eax
-        jz @end // avoid GPF
+        jz @z // avoid GPF
         cmp edx,8
         jae @s1
         jmp dword ptr [edx*4+@Table]
@@ -25669,7 +25708,7 @@ asm // eax=P, edx=Count, Value=ecx
 @2:     cmp [eax+4],ecx;    je @ok
 @1:     cmp [eax],ecx;      je @ok
 @z:     xor eax,eax
-@end:   ret
+        ret
 @ok:    mov al,1
 end;
 {$endif}
@@ -25750,7 +25789,8 @@ asm // eax=P, edx=Count, Value=ecx
        cmp [eax+20],ecx; je @ok20; dec edx; jz @z
        cmp [eax+24],ecx; je @ok24
 @z:    xor eax,eax // return nil if not found
-@ok0:  ret
+       ret
+@ok0:  rep ret
 @ok28: lea eax,[eax+28]; ret
 @ok24: lea eax,[eax+24]; ret
 @ok20: lea eax,[eax+20]; ret
@@ -29281,8 +29321,9 @@ asm
   jnz  @head
   pop  ebx
   not eax
-@ret:
   ret
+@ret:
+  rep ret
 @aligned:
   sub  edx, ecx
   add  ecx, 8
@@ -29580,7 +29621,7 @@ end;
 procedure Iso8601ToDateTimePUTF8CharVar(P: PUTF8Char; L: integer; var result: TDateTime);
 var i: integer;
     B: cardinal;
-    Y,M,D, H,MI,SS: cardinal;
+    Y,M,D, HH,MI,SS: cardinal;
 // expect 'YYYYMMDDThhmmss' format but handle also 'YYYY-MM-DDThh:mm:ss'
 begin
   unaligned(result) := 0;
@@ -29626,14 +29667,18 @@ begin
     if L<15 then
       exit; // not enough space to retrieve the time
   end;
-  H := ord(P[9])*10+ord(P[10])-(48+480);
-  if P[11]=':' then inc(P); // allow hh:mm:ss
-  MI := ord(P[11])*10+ord(P[12])-(48+480);
-  if P[13]=':' then inc(P); // allow hh:mm:ss
-  SS := ord(P[13])*10+ord(P[14])-(48+480);
-  if (H<24) and (MI<60) and (SS<60) then // inlined EncodeTime()
-    result := result+(H*(MinsPerHour*SecsPerMin*MSecsPerSec)+
-              MI*(SecsPerMin*MSecsPerSec)+SS*MSecsPerSec)/MSecsPerDay;
+  HH := ord(P[9])*10+ord(P[10])-(48+480);
+  if HH<24 then begin
+    if P[11]=':' then inc(P);
+    MI := ord(P[11])*10+ord(P[12])-(48+480);
+    if MI<60 then begin
+      if P[13]=':' then inc(P);
+      SS := ord(P[13])*10+ord(P[14])-(48+480);
+      if SS<60 then // inlined EncodeTime()
+        result := result+(HH*(MinsPerHour*SecsPerMin*MSecsPerSec)+
+                MI*(SecsPerMin*MSecsPerSec)+SS*MSecsPerSec)/MSecsPerDay;
+    end;
+  end;
 end;
 
 function Iso8601ToTimePUTF8Char(P: PUTF8Char; L: integer=0): TDateTime;
@@ -31134,7 +31179,7 @@ asm // eax=V
 {$ifdef UNICODE}
     push CP_UTF8 // UTF-8 code page for Delphi 2009+ + call below, not jump
     call System.@LStrFromPCharLen // eax=Dest edx=Source ecx=Length
-    ret // we need a call just above for right push CP_UTF8 retrieval
+    rep ret // we need a call just above for right push CP_UTF8 retrieval
 {$else}
     jmp System.@LStrFromPCharLen // eax=dest edx=source ecx=length(source)
 {$endif}
@@ -32726,8 +32771,8 @@ begin
           exit;
       {$endif}
       tkRecord{$ifdef FPC},tkObject{$endif}:
-        if RecordEquals(A^,B^,Field^.TypeInfo{$ifndef FPC}^{$endif}) then
-          Diff := RecordTypeInfoSize(Field^.TypeInfo{$ifndef FPC}^{$endif}) else
+        if RecordEquals(A^,B^,Field^.TypeInfo{$ifndef HASDIRECTTYPEINFO}^{$endif}) then
+          Diff := RecordTypeInfoSize(Field^.TypeInfo{$ifndef HASDIRECTTYPEINFO}^{$endif}) else
           exit;
       {$ifndef NOVARIANTS}
       tkVariant:
@@ -32737,8 +32782,8 @@ begin
       {$endif}
       {$ifndef DELPHI5OROLDER} // do not know why Delphi 5 compiler does not like it
       tkDynArray: begin
-        DynA.Init(Field^.TypeInfo{$ifndef FPC}^{$endif},A^);
-        DynB.Init(Field^.TypeInfo{$ifndef FPC}^{$endif},B^);
+        DynA.Init(Deref(Field^.TypeInfo),A^);
+        DynB.Init(Deref(Field^.TypeInfo),B^);
         if DynA.Equals(DynB) then
           Diff := sizeof(pointer) else
           exit;
@@ -32793,7 +32838,7 @@ begin
     P := pointer(R+Field.Offset);
     case Field.TypeInfo^.Kind of
       tkDynArray: begin
-        DynArray.Init(Field.TypeInfo{$ifndef FPC}^{$endif},P^);
+        DynArray.Init(Deref(Field.TypeInfo),P^);
         inc(result,DynArray.SaveToLength-sizeof(PtrUInt));
       end;
       tkLString,tkWString{$ifdef FPC},tkLStringOld{$endif}:
@@ -32808,13 +32853,13 @@ begin
           inc(result,ToVarUInt32LengthWithData(PStrRec(Pointer(P^-STRRECSIZE))^.length*2)-sizeof(PtrUInt));
       {$endif}
       tkRecord{$ifdef FPC},tkObject{$endif}: begin
-        Len := RecordSaveLength(P^,Field.TypeInfo{$ifndef FPC}^{$endif});
+        infoNested := Deref(Field.TypeInfo); // inlined GetTypeInfo()
+        Len := RecordSaveLength(P^,infoNested);
         if Len=0 then begin
           result := 0;
           exit; // invalid/unhandled nested record content
         end;
         inc(result,Len);
-        infoNested := Field.TypeInfo{$ifndef FPC}^{$endif}; // inlined GetTypeInfo()
         {$ifdef FPC_REQUIRES_PROPER_ALIGNMENT}
         infoNested := GetFPCAlignPtr(infoNested);
         {$else}
@@ -32870,7 +32915,7 @@ begin
     Kind := Field.TypeInfo^.Kind;
     case Kind of
     tkDynArray: begin
-      DynArray.Init(Field.TypeInfo{$ifndef FPC}^{$endif},R^);
+      DynArray.Init(Deref(Field.TypeInfo),R^);
       Dest := DynArray.SaveTo(Dest);
       Diff := sizeof(PtrUInt); // size of tkDynArray in record
     end;
@@ -32891,12 +32936,12 @@ begin
       Diff := sizeof(PtrUInt); // size of tkLString+tkWString+tkUString in record
     end;
     tkRecord{$ifdef FPC},tkObject{$endif}: begin
-      Dest := RecordSave(R^,Dest,Field.TypeInfo{$ifndef FPC}^{$endif});
+      infoNested := Deref(Field.TypeInfo); // inlined GetTypeInfo()
+      Dest := RecordSave(R^,Dest,infoNested);
       if Dest=nil then begin
         result := nil; // invalid/unhandled record content
         exit;
       end;
-      infoNested := Field.TypeInfo{$ifndef FPC}^{$endif}; // inlined GetTypeInfo()
       {$ifdef FPC_REQUIRES_PROPER_ALIGNMENT}
       infoNested := GetFPCAlignPtr(infoNested);
       {$else}
@@ -33061,7 +33106,7 @@ begin
   Field := @info^.ManagedFields[0];
   if Source=nil then begin  // inline RecordClear() function
     for F := 1 to  info^.ManagedCount do begin
-      _Finalize(R+Field^.Offset,Field^.TypeInfo{$ifndef FPC}^{$endif});
+      _Finalize(R+Field^.Offset,Deref(Field^.TypeInfo));
       inc(Field);
     end;
     result := nil;
@@ -33078,7 +33123,7 @@ begin
     Kind := Field.TypeInfo^.Kind;
     case Kind of
     tkDynArray: begin
-      DynArray.Init(Field.TypeInfo{$ifndef FPC}^{$endif},R^);
+      DynArray.Init(Deref(Field.TypeInfo),R^);
       Source := DynArray.LoadFrom(Source);
       Diff := sizeof(PtrUInt); // size of tkDynArray in record
     end;
@@ -33090,9 +33135,11 @@ begin
           SetString(PRawByteString(R)^,Source,LenBytes);
           {$ifdef HASCODEPAGE}
           { Delphi 2009+: set Code page for this AnsiString }
-          if LenBytes<>0 then
-            SetCodePage(PRawByteString(R)^,PWord(PtrUInt(Field.TypeInfo{$ifndef FPC}^{$endif})+
-              Field.TypeInfo{$ifndef FPC}^{$endif}^.NameLen+2)^,false);
+          if LenBytes<>0 then begin
+            infoNested := Deref(Field.TypeInfo); 
+            SetCodePage(PRawByteString(R)^,
+              PWord(PtrUInt(infoNested)+infoNested^.NameLen+2)^,false);
+          end;
           {$endif}
         end;
         tkWString:
@@ -33106,8 +33153,8 @@ begin
       Diff := sizeof(PtrUInt); // size of tkLString+tkWString+tkUString in record
     end;
     tkRecord{$ifdef FPC},tkObject{$endif}: begin
-      Source := RecordLoad(R^,Source,Field.TypeInfo{$ifndef FPC}^{$endif});
-      infoNested := Field.TypeInfo{$ifndef FPC}^{$endif}; // inlined GetTypeInfo()
+      infoNested := Deref(Field.TypeInfo); // inlined GetTypeInfo()
+      Source := RecordLoad(R^,Source,infoNested);
       {$ifdef FPC_REQUIRES_PROPER_ALIGNMENT}
       infoNested := GetFPCAlignPtr(infoNested);
       {$else}
@@ -33971,8 +34018,8 @@ asm // eax=source edx=dest ecx=count
 @sml24: fistp   qword ptr [edx+8]     // save second 8
 @sml16: fistp   qword ptr [edx]       // save first 8
         fistp   qword ptr [edx+ecx]   // save last 8
-@exit:  ret
-        lea eax,[eax+0]  // for 4-byte alignment of @table
+        ret
+@exit:  rep ret
 @table: dd @exit,@m01,@m02,@m03,@m04,@m05,@m06,@m07,@m08
 @lrgfwd:push    edx
         fild    qword ptr [eax]       // first 8
@@ -33992,7 +34039,7 @@ asm // eax=source edx=dest ecx=count
         pop     edx
         fistp   qword ptr [edx]       // first 8
         ret
-@lrg:   jng     @done                 // count < 0
+@lrg:   jng     @exit                 // count < 0
         cmp     eax,edx
         ja      @lrgfwd
         sub     edx,ecx
@@ -34013,7 +34060,7 @@ asm // eax=source edx=dest ecx=count
         pop     ecx
         fistp   qword ptr [edx]       // first 8
         fistp   qword ptr [edx+ecx]   // last 8
-@done:  ret
+        ret
 @m01:   movzx   ecx,byte ptr [eax]
         mov     [edx],cl
         ret
@@ -34053,7 +34100,7 @@ function StrLenX86(S: pointer): PtrInt;
 // pure x86 function (if SSE2 not available) - faster than SysUtils' version
 asm
      test eax,eax
-     jz @@z
+     jz @@0
      cmp   byte ptr [eax+0],0; je @@0
      cmp   byte ptr [eax+1],0; je @@1
      cmp   byte ptr [eax+2],0; je @@2
@@ -34074,7 +34121,7 @@ asm
      shr   edx,3               { Byte Offset of First #0 }
      add   eax,edx             { Address of First #0 }
      sub   eax,ecx             { Returns Length }
-@@z: ret
+     ret
 @@0: xor eax,eax; ret
 @@1: mov eax,1;   ret
 @@2: mov eax,2;   ret
@@ -34190,7 +34237,8 @@ asm // warning: may read up to 15 bytes beyond the string itself
         {$endif}
         jnz       @loop
         mov       eax,ecx
-@null:  ret
+        ret
+        nop   // for @loop alignment
 @loop:  add       eax,16
         {$ifdef HASAESNI}
         pcmpistri xmm0,dqword [edx+eax],EQUAL_EACH  // comparison result in ecx
@@ -34199,6 +34247,8 @@ asm // warning: may read up to 15 bytes beyond the string itself
         {$endif}
         jnz       @loop
 @ok:    add       eax,ecx
+        ret
+@null:  db $f3 // rep ret
 end;
 
 {$endif DELPHI5OROLDER}
@@ -34709,7 +34759,7 @@ begin
       fDataSize := info^.arraySize;
       fFixedSize := fDataSize div info^.elCount;
       fNestedArray := TJSONCustomParserRTTI.CreateFromRTTI(
-        '',info^.arrayType{$ifndef FPC}^{$endif},fFixedSize);
+        '',Deref(info^.arrayType),fFixedSize);
       exit; // success
     end;
     tkDynArray: begin
@@ -35832,20 +35882,18 @@ begin // only tkRecord is needed here
     if i=FieldTable^.AllCount-1 then
       ItemFieldSize := FieldSize-ItemFields[i].Offset else
       ItemFieldSize := ItemFields[i+1].Offset-ItemFields[i].Offset;
-    if ItemFields[i]^.TypeInfo<>nil then
-      ItemField := ItemFields[i]^.TypeInfo{$ifndef FPC}^{$endif} else
-      ItemField := nil;
+    ItemField := Deref(ItemFields[i]^.TypeInfo);
     SetRawUTF8(ItemFieldName,PAnsiChar(@ItemFields[i]^.NameLen)+1,ItemFields[i]^.NameLen);
     Item := AddItemFromRTTI(ItemFieldName,ItemField,ItemFieldSize);
     Props.fNestedProperty[i] := Item;
     case Item.PropertyType of
     ptArray: begin
       inc(PByte(ItemField),ItemField^.NameLen);
-      ItemArray := AddItemFromRTTI('',ItemField^.elType2{$ifndef FPC}^{$endif},
+      ItemArray := AddItemFromRTTI('',Deref(ItemField^.elType2),
         ItemField^.elSize {$ifdef FPC}and $7FFFFFFF{$endif});
       if (ItemArray.PropertyType=ptCustom) and
          (ItemArray.ClassType=TJSONCustomParserRTTI) then
-        FromEnhancedRTTI(Item,ItemField^.elType2{$ifndef FPC}^{$endif}) else begin
+        FromEnhancedRTTI(Item,Deref(ItemField^.elType2)) else begin
         SetLength(Item.fNestedProperty,1);
         Item.fNestedProperty[0] := ItemArray;
         Item.ComputeNestedDataSize;
@@ -35990,12 +36038,9 @@ begin
     else
       if VType=varVariant or varByRef then
         result := VarIsVoid(PVariant(VPointer)^) else
-      if VType=varByRef or varOleStr then
+      if (VType=varByRef or varString) or (VType=varByRef or varOleStr)
+         {$ifdef HASVARUSTRING} or (VType=varByRef or varUString) {$endif} then
         result := PPointer(VAny)^=nil else
-      {$ifdef HASVARUSTRING}
-        if VType=varByRef or varUString then
-        result := PPointer(VAny)^=nil else
-      {$endif}
       {$ifndef NOVARIANTS}
       if VType=word(DocVariantVType) then
         result := TDocVariantData(V).Count=0 else
@@ -36027,15 +36072,38 @@ begin
 end;
 
 procedure SetVariantByValue(const Source: Variant; var Dest: Variant);
+var s: TVarData absolute Source;
+    d: TVarData absolute Dest;
 begin
-  if TVarData(Dest).VType and VTYPE_STATIC<>0 then
+  if d.VType and VTYPE_STATIC<>0 then
     VarClear(Dest);
-  if TVarData(Source).VType in [varEmpty..varDate,varBoolean,varShortInt..varWord64] then
-    TVarData(Dest) := TVarData(Source) else
-  if not SetVariantUnRefSimpleValue(Source,TVarData(Dest)) then
-    if TVarData(Source).VType=varVariant or varByRef then
-      Dest := PVariant(TVarData(Source).VPointer)^ else
+  case s.VType of
+  varEmpty..varDate,varBoolean,varShortInt..varWord64: begin
+    d.VType := s.VType;
+    d.VInt64 := s.VInt64;
+  end;
+  varString: begin
+    d.VType := varString;
+    d.VAny := nil;
+    RawByteString(d.VAny) := RawByteString(s.VAny);
+  end;
+  varVariant or varByRef:
+    Dest := PVariant(s.VPointer)^;
+  varByRef or varString: begin
+    d.VType := varString;
+    d.VAny := nil;
+    RawByteString(d.VAny) := PRawByteString(s.VAny)^;
+  end;
+  {$ifdef HASVARUSTRING} varUString, varByRef or varUString, {$endif}
+  varOleStr, varByRef or varOleStr: begin
+    d.VType := varString;
+    d.VAny := nil;
+    VariantToUTF8(Source,RawUTF8(d.VAny)); // store a RawUTF8 instance
+  end;
+  else
+    if not SetVariantUnRefSimpleValue(Source,d) then
       Dest := Source;
+  end;
 end;
 
 procedure ZeroFill(Value: PVarData);
@@ -40424,7 +40492,7 @@ rec:    inc(PtrUInt(nested),(nested^.NameLen));
             tkUString: fKnownType := djString;
             {$endif}
             tkRecord{$ifdef FPC},tkObject{$endif}: begin
-              nested := pointer(TypeInfo{$ifndef FPC}^{$endif});
+              nested := Deref(TypeInfo);
               goto Rec;
             end;
             {$ifndef NOVARIANTS}
@@ -41224,13 +41292,19 @@ begin
   {$endif}
   fElemSize := PTypeInfo(aTypeInfo)^.elSize {$ifdef FPC}and $7FFFFFFF{$endif};
   fElemType := PTypeInfo(aTypeInfo)^.elType;
-  if fElemType<>nil then
-    {$ifndef FPC}
+  if fElemType<>nil then begin
+    {$ifndef HASDIRECTTYPEINFO}
+    // FPC compatibility: if you have a GPF here at startup, your 3.1 trunk
+    // revision seems older than June 2016
+    // -> enable HASDIRECTTYPEINFO conditional below $ifdef VER3_1 in Synopse.inc
+    // or in your project's options
     fElemType := PPointer(fElemType)^;
-    {$else} 
+    {$endif}
+    {$ifdef FPC}
     if not (PTypeKind(fElemType)^ in tkManagedTypes) then
       fElemType := nil; // as with Delphi
     {$endif}
+  end;
   fCountP := aCountPointer;
   if fCountP<>nil then
     fCountP^ := 0;
@@ -43397,22 +43471,24 @@ var // can be safely made global since timing is multi-thread safe
     clock: cardinal; // avoid slower API call
   end;
 
-procedure TTextWriter.AddCurrentLogTime(LocalTime: boolean);
+procedure TTextWriter.AddCurrentLogTime(LocalTime, Use16msCache: boolean);
 var Ticks: cardinal;
 begin
   if BEnd-B<=17 then
     FlushToStream;
   with GlobalLogTime[LocalTime] do begin
-    Ticks := GetTickCount; // this call is very fast (just one integer mul)
-    if clock<>Ticks then begin // typically in range of 10-16 ms
-      clock := Ticks;
-      if LocalTime then
-        GetLocalTime(time) else
-        {$ifdef MSWINDOWS}
-        GetSystemTime(time);
-        {$else}
-        GetNowUTCSystem(time);
-        {$endif}
+    if Use16msCache then begin
+      Ticks := GetTickCount; // this call is very fast (just one integer mul)
+      if clock<>Ticks then begin // typically in range of 10-16 ms
+        clock := Ticks;
+        if LocalTime then
+          GetLocalTime(time) else
+          {$ifdef MSWINDOWS}
+          GetSystemTime(time);
+          {$else}
+          GetNowUTCSystem(time);
+          {$endif}
+      end;
     end;
     inc(B);
     YearToPChar(time.{$ifdef MSWINDOWS}wYear{$else}Year{$endif},B);
@@ -43422,7 +43498,7 @@ begin
     PWord(B+9)^ := TwoDigitLookupW[time.{$ifdef MSWINDOWS}wHour{$else}Hour{$endif}];
     PWord(B+11)^ := TwoDigitLookupW[time.{$ifdef MSWINDOWS}wMinute{$else}Minute{$endif}];
     PWord(B+13)^ := TwoDigitLookupW[time.{$ifdef MSWINDOWS}wSecond{$else}Second{$endif}];
-    PWord(B+15)^ := TwoDigitLookupW[time.{$ifdef MSWINDOWS}wMilliseconds{$else}Millisecond{$endif} shr 4]; // range 0..62 = 16 ms
+    PWord(B+15)^ := TwoDigitLookupW[time.{$ifdef MSWINDOWS}wMilliseconds{$else}Millisecond{$endif} shr 4];
     B[17] := ' ';
     inc(B,16);
   end;
@@ -44422,6 +44498,11 @@ end;
 procedure TTextWriter.AddHtmlEscapeString(const Text: string; Fmt: TTextWriterHTMLFormat);
 begin
   AddHtmlEscape(pointer(StringToUTF8(Text)),Fmt);
+end;
+
+procedure TTextWriter.AddHtmlEscapeUTF8(const Text: RawUTF8; Fmt: TTextWriterHTMLFormat);
+begin
+  AddHtmlEscape(pointer(Text),length(Text),Fmt);
 end;
 
 procedure TTextWriter.AddHtmlEscapeWiki(P: PUTF8Char);
@@ -45917,7 +45998,7 @@ function GetJSONField(P: PUTF8Char; out PDest: PUTF8Char;
   wasString: PBoolean=nil; EndOfObject: PUTF8Char=nil): PUTF8Char;
 // this code is very fast
 var D: PUTF8Char;
-    b,c4: integer;
+    b,c4,surrogate,j: integer;
 label slash,num;
 begin
   if wasString<>nil then
@@ -45993,7 +46074,7 @@ slash:inc(P);
         'n': D^ := #$0a;
         'f': D^ := #$0c;
         'r': D^ := #$0d;
-        'u': begin // inlined decoding of '\0123' UTF-16 codepoint into UTF-8
+        'u': begin // inlined decoding of '\u0123' UTF-16 codepoint into UTF-8
           c4 := ConvertHexToBin[ord(P[1])];
           if c4<=15 then begin
             b := ConvertHexToBin[ord(P[2])];
@@ -46005,24 +46086,59 @@ slash:inc(P);
                 b := ConvertHexToBin[ord(P[4])];
                 if b<=15 then begin
                   c4 := c4 shl 4+b;
-                  if c4<>0 then begin
-                    if c4<=$7F then begin
-                      D^ := AnsiChar(c4);
-                      inc(D);
-                    end else
-                    if c4>$7ff then begin
-                      D^ := AnsiChar($E0 or (c4 shr 12));
-                      D[1] := AnsiChar($80 or ((c4 shr 6) and $3F));
-                      D[2] := AnsiChar($80 or (c4 and $3F));
-                      inc(D,3);
-                    end else begin
-                      D^ := AnsiChar($C0 or (c4 shr 6));
-                      D[1] := AnsiChar($80 or (c4 and $3F));
-                      inc(D,2);
-                    end;
-                    inc(P,5);
-                    continue;
+                  case c4 of
+                  0: begin
+                    D^ := '?'; // \u0000 is an invalid value
+                    inc(D);
                   end;
+                  1..$7f: begin
+                    D^ := AnsiChar(c4);
+                    inc(D);
+                  end;
+                  $80..$7ff: begin
+                    D[0] := AnsiChar($C0 or (c4 shr 6));
+                    D[1] := AnsiChar($80 or (c4 and $3F));
+                    inc(D,2);
+                  end;
+                  UTF16_HISURROGATE_MIN..UTF16_LOSURROGATE_MAX:
+                    if PWord(P+5)^=ord('\')+ord('u') shl 8 then begin
+                      inc(P,6);
+                      surrogate := (ConvertHexToBin[ord(P[1])] shl 12)+
+                                   (ConvertHexToBin[ord(P[2])] shl 8)+
+                                   (ConvertHexToBin[ord(P[3])] shl 4)+
+                                    ConvertHexToBin[ord(P[4])]; // optimistic approach
+                      case c4 of // inlined UTF16CharToUtf8()
+                      UTF16_HISURROGATE_MIN..UTF16_HISURROGATE_MAX:
+                        c4 := ((c4-$D7C0)shl 10)+(surrogate xor UTF16_LOSURROGATE_MIN);
+                      UTF16_LOSURROGATE_MIN..UTF16_LOSURROGATE_MAX:
+                        c4 := ((surrogate-$D7C0)shl 10)+(c4 xor UTF16_LOSURROGATE_MIN);
+                      end;
+                      case c4 of
+                      0..$7ff: b := 2;
+                      $800..$ffff: b := 3;
+                      $10000..$1FFFFF: b := 4;
+                      $200000..$3FFFFFF: b := 5;
+                      else b := 6;
+                      end;
+                      for j := b-1 downto 1 do begin
+                        D[j] := AnsiChar((c4 and $3f)+$80);
+                        c4 := c4 shr 6;
+                      end;
+                      D^ := AnsiChar(Byte(c4) or UTF8_FIRSTBYTE[b]);
+                      inc(D,b);
+                    end else begin
+                      D^ := '?'; // unexpected surrogate without its pair
+                      inc(D);
+                    end;
+                  else begin
+                    D[0] := AnsiChar($E0 or (c4 shr 12));
+                    D[1] := AnsiChar($80 or ((c4 shr 6) and $3F));
+                    D[2] := AnsiChar($80 or (c4 and $3F));
+                    inc(D,3);
+                  end;
+                  end;
+                  inc(P,5);
+                  continue;
                 end;
               end;
             end;
@@ -47479,7 +47595,7 @@ end;
 function Utf8ToConsole(const S: RawUTF8): RawByteString;
 begin
   {$ifdef MSWINDOWS}
-  result := TSynAnsiConvert.Engine(OEM_CHARSET).UTF8ToAnsi(S);
+  result := TSynAnsiConvert.Engine(CP_OEMCP).UTF8ToAnsi(S);
   {$else}
   result := S;
   {$endif}
@@ -51987,8 +52103,8 @@ asm
     bt [offset @f],edx
     mov ecx,offset @c
     jb @2
-    xor eax,eax
-@z: ret
+@z: xor eax,eax
+    ret
 @f: dd 0,$03FF0010,$87FFFFFE,$07FFFFFE,0,0,0,0 // IsJsonIdentifierFirstChar
 @c: dd 0,$03FF4000,$AFFFFFFE,$07FFFFFE,0,0,0,0 // IsJsonIdentifier
 @s: mov dl,[eax]
@@ -53819,7 +53935,7 @@ begin
     B := P;
     repeat
       inc(P);
-    until P^ in [#0..' ',';',')'];
+    until P^ in [#0..' ',';',')',','];
     SetString(Where.Value,B,P-B);
     {$ifndef NOVARIANTS}
     Where.ValueVariant := VariantLoadJSON(Where.Value);
@@ -53848,6 +53964,43 @@ begin
   end;
   result := true;
 end;
+{$ifndef NOVARIANTS}
+function GetWhereValues(var Where: TSynTableStatementWhere): boolean;
+var v: TSynTableStatementWhereDynArray;
+    n, w: integer;
+    tmp: RawUTF8;
+begin
+  result := false;
+  if Where.ValueSQLLen<2 then
+    exit;
+  SetString(tmp,PAnsiChar(Where.ValueSQL)+1,Where.ValueSQLLen-2);
+  P := pointer(tmp); // parse again the IN (...,...,... ) expression
+  n := 0;
+  try
+    repeat
+      if n=length(v) then
+        SetLength(v,n+n shr 3+8);
+      if not GetWhereValue(v[n]) then
+        exit;
+      inc(n);
+      if P^=#0 then
+        break;
+      if P^<>',' then
+        exit;
+      inc(P);
+    until false;
+  finally
+    P := Where.ValueSQL+Where.ValueSQLLen; // continue parsing as usual
+  end;
+  with TDocVariantData(Where.ValueVariant) do begin
+    InitFast(n,dvArray);
+    for w := 0 to n-1 do
+      AddItem(v[w].ValueVariant);
+    Where.Value := ToJSON;
+  end;
+  result := true;
+end;
+{$endif}
 function GetWhereExpression(FieldIndex: integer; var Where: TSynTableStatementWhere): boolean;
 begin
   result := false;
@@ -53918,11 +54071,7 @@ begin
        SetString(Where.Value,PAnsiChar(B),P-B);
        Where.ValueSQL := B;
        Where.ValueSQLLen := P-B;
-       Where.Value[1] := '[';
-       Where.Value[P-B] := ']';
-       TDocVariantData(Where.ValueVariant).InitJSONInPlace(
-         pointer(Where.Value),JSON_OPTIONS_FAST);
-       result := true;
+       result := GetWhereValues(Where);
        exit;
     end;
     {$endif}
