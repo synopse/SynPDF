@@ -237,7 +237,7 @@ function CompressStream(src: pointer; srcLen: integer;
 /// ZLib INFLATE decompression from memory into a stream
 // - return the number of bytes written into the stream
 // - if checkCRC if not nil, it will contain thecrc32  (if aStream is nil, it will
-// fast calculate the crc of the the uncompressed memory block)
+// only calculate the crc of the the uncompressed memory block)
 // - by default, will use the deflate/.zip header-less format, but you may set
 // ZlibFormat=true to add an header, as expected by zlib (and pdf)
 function UnCompressStream(src: pointer; srcLen: integer; aStream: TStream;
@@ -631,6 +631,7 @@ type
     FirstFileHeader: PFileHeader;
     ReadOffset: cardinal;
     procedure UnMap;
+    function UnZipStream(aIndex: integer; const aInfo: TFileInfo; aDest: TStream): boolean;
   public
     /// the number of files inside a .zip archive
     Count: integer;
@@ -654,6 +655,8 @@ type
     function NameToIndex(const aName: TFileName): integer;
     /// uncompress a file stored inside the .zip archive into memory
     function UnZip(aIndex: integer): ZipString; overload;
+    /// uncompress a file stored inside the .zip archive into a stream
+    function UnZip(aIndex: integer; aDest: TStream): boolean; overload;
     /// uncompress a file stored inside the .zip archive into a destination directory
     function UnZip(aIndex: integer; const DestDir: TFileName;
       DestDirIsFileName: boolean=false): boolean; overload;
@@ -1420,12 +1423,37 @@ begin
   end;
 end;
 
+function TZipRead.UnZipStream(aIndex: integer; const aInfo: TFileInfo; aDest: TStream): boolean;
+var crc: cardinal;
+begin
+  result := false;
+  case aInfo.zZipMethod of
+  Z_STORED: begin
+    aDest.Write(Entry[aIndex].data^,aInfo.zfullsize);
+    crc := SynZip.crc32(0,Entry[aIndex].data,aInfo.zfullSize);
+  end;
+  Z_DEFLATED:
+    if UnCompressStream(Entry[aIndex].data,aInfo.zzipsize,aDest,@crc)<>aInfo.zfullsize then
+      exit;
+  else raise ESynZipException.CreateFmt('Unsupported method %d for %s',
+    [aInfo.zZipMethod,Entry[aIndex].zipName]);
+  end;
+  result := crc=aInfo.zcrc32;
+end;
+
+function TZipRead.UnZip(aIndex: integer; aDest: TStream): boolean;
+var info: TFileInfo;
+begin
+  if not RetrieveFileInfo(aIndex,info) then
+    result := false else
+    result := UnZipStream(aIndex,info,aDest);
+end;
+
 function TZipRead.UnZip(aIndex: integer; const DestDir: TFileName;
   DestDirIsFileName: boolean): boolean;
 var FS: TFileStream;
     Path: TFileName;
     info: TFileInfo;
-    CRC: Cardinal;
 begin
   result := false;
   if not RetrieveFileInfo(aIndex,info) then
@@ -1440,21 +1468,10 @@ begin
     end;
   FS := TFileStream.Create(Path,fmCreate);
   try
-    case info.zZipMethod of
-    Z_STORED: begin
-      FS.Write(Entry[aIndex].data^,info.zfullsize);
-      CRC := SynZip.crc32(0,Entry[aIndex].data,info.zfullSize);
-    end;
-    Z_DEFLATED:
-      if UnCompressStream(Entry[aIndex].data,info.zzipsize,FS,@CRC)<>info.zfullsize then
-        exit;
-    else raise ESynZipException.CreateFmt('Unsupported method %d for %s',
-      [info.zZipMethod,Entry[aIndex].zipName]);
-    end;
-    result := CRC=info.zcrc32;
-    if info.zlastMod<>0 then
+    result := UnZipStream(aIndex,info,FS);
+    if result and (info.zlastMod<>0) then
 {$ifdef CONDITIONALEXPRESSIONS}
-  {$WARN SYMBOL_PLATFORM OFF}
+  {$WARN SYMBOL_PLATFORM OFF} // zip expects a Windows timestamp
 {$endif}
       FileSetDate(FS.Handle,info.zlastMod);
 {$ifdef CONDITIONALEXPRESSIONS}
@@ -4598,13 +4615,13 @@ var
 function crc32(crc: cardinal; buf: PAnsiChar; len: cardinal): cardinal;
 // adapted from fast Aleksandr Sharahov version
 asm
-{$ifdef BYFOUR}
   test edx, edx
   jz   @ret
   neg  ecx
   jz   @ret
   not eax
   push ebx
+{$ifdef BYFOUR}
 @head:
   test dl, 3
   jz   @bodyinit
@@ -4617,8 +4634,9 @@ asm
   jnz  @head
   pop  ebx
   not eax
-@ret:
   ret
+@ret:
+  rep ret
 @bodyinit:
   sub  edx, ecx
   add  ecx, 8
@@ -4693,13 +4711,7 @@ asm
   pop ebx
   not eax
 {$else}
-  test edx, edx
-  jz @ret
-  neg ecx
-  jz @ret
-  not eax
   sub edx,ecx
-  push ebx
 @next:
   movzx ebx, byte [edx + ecx]
   xor bl, al
@@ -4709,7 +4721,9 @@ asm
   jnz @next
   pop ebx
   not eax
+  ret
 @ret:
+  db $f3 // rep ret
 {$endif BYFOUR}
 end;
 
@@ -4824,7 +4838,7 @@ function CompressStream(src: pointer; srcLen: integer;
   aStream: TStream; CompressionLevel: integer=6; ZlibFormat: Boolean=false): cardinal;
 var strm: TZStream;
     code: integer;
-    buf: array[word] of byte;
+    buf: array[word] of cardinal; // 256KB of temporary buffer on stack
 procedure FlushBuf;
 var Count: integer;
 begin
@@ -4878,14 +4892,13 @@ begin
   assert(crc32(0,dst,result)=R.Hi); Z.Free; }
 end;
 
-function UnCompressStream(
-  src: pointer; srcLen: integer; aStream: TStream; checkCRC: PCardinal;
-  ZlibFormat: Boolean): cardinal;
+function UnCompressStream(src: pointer; srcLen: integer; aStream: TStream;
+  checkCRC: PCardinal; ZlibFormat: Boolean): cardinal;
 // result:=dstLen  checkCRC(<>nil)^:=crc32  (if aStream=nil -> fast crc calc)
 var strm: TZStream;
     code: integer;
     Bits: integer;
-    buf: array[word] of byte;
+    buf: array[word] of cardinal; // 256KB of temporary buffer on stack
 procedure FlushBuf;
 var Count: integer;
 begin

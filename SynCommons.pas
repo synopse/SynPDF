@@ -6798,6 +6798,9 @@ type
   // - woDateTimeWithZSuffix will append the Z suffix to the ISO-8601 encoded
   // TDateTime value, to identify the content as strict UTC value
   // - TTimeLog would be serialized as Int64, unless woTimeLogAsText is defined
+  // - since TSQLRecord.ID could be huge Int64 numbers, they may be truncated
+  // on client side, e.g. to 53-bit range in JavaScript: you could define
+  // woIDAsIDstr to append an additional "ID_str":"##########" field 
   // - by default, TSQLRawBlob properties are serialized as null, unless
   // woSQLRawBlobAsBase64 is defined
   // - if woHideSynPersistentPassword is set, TSynPersistentWithPassword.Password
@@ -6813,7 +6816,7 @@ type
     woStoreClassName, woStorePointer, woStoreStoredFalse,
     woHumanReadableFullSetsAsStar, woHumanReadableEnumSetAsComment,
     woEnumSetsAsText, woDateTimeWithMagic, woDateTimeWithZSuffix, woTimeLogAsText,
-    woSQLRawBlobAsBase64, woHideSynPersistentPassword,
+    woIDAsIDstr, woSQLRawBlobAsBase64, woHideSynPersistentPassword,
     woObjectListWontStoreClassName, woDontStoreEmptyString,
     woDontStoreInherited);
   /// options set for TTextWriter.WriteObject() method
@@ -8065,7 +8068,11 @@ type
     procedure AddRawUTF8List(List: TRawUTF8List);
     /// delete a stored RawUTF8 item, and its associated TObject
     // - raise no exception in case of out of range supplied index
-    procedure Delete(Index: PtrInt); virtual;
+    procedure Delete(Index: PtrInt); overload; virtual;
+    /// delete a stored RawUTF8 item, and its associated TObject
+    // - will search for the value using IndexOf(aText), and returns its index
+    // - returns -1 if no entry was found and deleted
+    function Delete(const aText: RawUTF8): PtrInt; overload; virtual;
     /// delete a stored RawUTF8 item, and its associated TObject, from
     // a given Name when stored as 'Name=Value' pairs
     // - raise no exception in case of out of range supplied index
@@ -8219,8 +8226,11 @@ type
     function AddObjectIfNotExisting(const aText: RawUTF8; aObject: TObject;
       wasAdded: PBoolean=nil): PtrInt; override;
     /// find and delete an RawUTF8 item in the stored Strings[] list
+    // - just a wrapper over inherited Delete(aText) using Safe.Lock/Unlock
+    function Delete(const aText: RawUTF8): PtrInt; override;
+    /// find and delete an RawUTF8 item from its Name=... in the stored Strings[] list
     // - just a wrapper over inherited DeleteFromName() using Safe.Lock/Unlock
-    function DeleteFromName(const aText: RawUTF8): PtrInt; override;
+    function DeleteFromName(const Name: RawUTF8): PtrInt; override;
     /// retrieve and delete the first RawUTF8 item in the list
     // - could be used as a FIFO
     // - just a wrapper over inherited PopFirst() using Safe.Lock/Unlock
@@ -8229,6 +8239,9 @@ type
     // - could be used as a FILO
     // - just a wrapper over inherited PopLast() using Safe.Lock/Unlock
     function PopLast(out aText: RawUTF8; aObject: PObject=nil): boolean; override;
+    /// delete all RawUTF8 items in the list
+    // - just a wrapper over inherited Clear using Safe.Lock/Unlock
+    procedure Clear; override;
   end;
 
   /// This class is able to emulate a TStringList with our native UTF-8 string
@@ -11217,6 +11230,7 @@ type
   TFileVersion = class
   protected
     fDetailed: string;
+    fFileName: TFileName;
     fBuildDateTime: TDateTime;
     /// change the version (not to be used in most cases)
     procedure SetVersion(aMajor,aMinor,aRelease,aBuild: integer);
@@ -11246,9 +11260,14 @@ type
     function Version32: integer;
     /// build date and time of this exe file, as plain text
     function BuildDateTimeString: string;
+    /// returns the version information of this exe file as text
+    // - includes FileName (without path), Detailed and BuildDateTime properties
+    // - e.g. 'myprogram.exe 3.1.0.123 2016-06-14 19:07:55'
+    function VersionInfo: RawUTF8;
     /// returns the version information of a specified exe file as text
-    // - includes Detailed and BuildDateTime
-    class function GetVersionInfo(const aFileName: TFileName): RawUTF8;
+    // - includes FileName (without path), Detailed and BuildDateTime properties
+    // - e.g. 'myprogram.exe 3.1.0.123 2016-06-14 19:07:55'
+    class function GetVersionInfo(const aFileName: TFileName): RawUTF8; 
   published
     /// version info of the exe file as '3.1.0.123'
     // - return "string" type, i.e. UnicodeString for Delphi 2009+
@@ -31946,6 +31965,7 @@ var M,D: word;
     tmp: TFileName;
 {$endif}
 begin
+  fFileName := aFileName;
   {$ifdef MSWINDOWS}
   if aFileName<>'' then begin
     // GetFileVersionInfo modifies the filename parameter data while parsing.
@@ -32006,11 +32026,16 @@ begin
   DateTimeToIso8601StringVar(fBuildDateTime,' ',result);
 end;
 
+function TFileVersion.VersionInfo: RawUTF8;
+begin
+  FormatUTF8('% % %',[ExtractFileName(fFileName),fDetailed,BuildDateTimeString],result);
+end;
+
 class function TFileVersion.GetVersionInfo(const aFileName: TFileName): RawUTF8;
 begin
   with Create(aFileName,0,0,0,0) do
   try
-    FormatUTF8('% % %',[ExtractFileName(aFileName),Detailed,BuildDateTimeString],result);
+    result := VersionInfo;
   finally
     Free;
   end;
@@ -41415,9 +41440,11 @@ begin // this method is faster than default System.DynArraySetLength() function
     OldLength := 0;
   // calculate the needed size of the resulting memory structure on heap
   NeededSize := NewLength*ElemSize+Sizeof(TDynArrayRec);
-  if NeededSize>1024*1024*512 then // max allowed memory block is 512MB
+  {$ifndef CPU64}
+  if NeededSize>1024*1024*1024 then // max workable memory block is 1 GB
     raise ERangeError.CreateFmt('TDynArray SetLength(%s,%d) size concern',
       [PShortString(@PTypeInfo(ArrayType).NameLen)^,NewLength]);
+  {$endif}
   // if not shared (refCnt=1), resize; if shared, create copy (not thread safe)
   if (p=nil) or (p^.refCnt=1) then begin
     if NewLength<OldLength then
@@ -47340,7 +47367,7 @@ end;
 
 procedure InvalidTextLengthMin(min: integer; var result: string);
 begin
-  result := Format(sInvalidTextLengthMin,[1,Character01n(1)]);
+  result := Format(sInvalidTextLengthMin,[min,Character01n(min)]);
 end;
 
 function TSynValidateNonVoidText.Process(aFieldIndex: integer; const Value: RawUTF8;
@@ -49268,6 +49295,13 @@ begin
   Changed;
 end;
 
+function TRawUTF8List.Delete(const aText: RawUTF8): PtrInt;
+begin
+  Result := IndexOf(aText);
+  if Result>=0 then
+    Delete(Result);
+end;
+
 function TRawUTF8List.DeleteFromName(const Name: RawUTF8): PtrInt;
 begin
   Result := IndexOfName(Name);
@@ -50072,11 +50106,25 @@ begin
   end;
 end;
 
-function TRawUTF8ListHashedLocked.DeleteFromName(const aText: RawUTF8): PtrInt;
+function TRawUTF8ListHashedLocked.Delete(const aText: RawUTF8): PtrInt;
 begin
   fSafe.Lock;
   try
-    result := inherited DeleteFromName(aText);
+    result := inherited IndexOf(aText);
+    if result>=0 then
+      inherited Delete(result);
+  finally
+    fSafe.UnLock;
+  end;
+end;
+
+function TRawUTF8ListHashedLocked.DeleteFromName(const Name: RawUTF8): PtrInt;
+begin
+  fSafe.Lock;
+  try
+    result := inherited IndexOfName(Name);
+    if result>=0 then
+      inherited Delete(result);
   finally
     fSafe.UnLock;
   end;
@@ -50097,6 +50145,16 @@ begin
   fSafe.Lock;
   try
     result := inherited PopLast(aText,aObject);
+  finally
+    fSafe.UnLock;
+  end;
+end;
+
+procedure TRawUTF8ListHashedLocked.Clear;
+begin
+  fSafe.Lock;
+  try
+    inherited Clear;
   finally
     fSafe.UnLock;
   end;
@@ -53841,8 +53899,8 @@ end;
 
 
 constructor TSynTableStatement.Create(const SQL: RawUTF8;
-  GetFieldIndex: TSynTableFieldIndex; SimpleFieldsBits: TSQLFieldBits=[0..MAX_SQLFIELDS-1];
-  FieldProp: TSynTableFieldProperties=nil);
+  GetFieldIndex: TSynTableFieldIndex; SimpleFieldsBits: TSQLFieldBits;
+  FieldProp: TSynTableFieldProperties);
 var Prop, whereBefore: RawUTF8;
     P, B: PUTF8Char;
     ndx,err,len,selectCount,whereCount: integer;
@@ -54567,16 +54625,16 @@ begin
           if (Head.Magic<>Magic) or
              (Head.CompressedSize>Count) then
             exit;
-          if Head.CompressedSize>Length(src) then
+          if Head.CompressedSize>length(src) then
             SetString(src,nil,Head.CompressedSize);
-          if dst='' then
-            SetString(dst,nil,Head.UnCompressedSize);
           if S.Read(pointer(src)^,Head.CompressedSize)<>Head.CompressedSize then
             exit;
           dec(Count,Head.CompressedSize);
           if (Hash32(pointer(src),Head.CompressedSize)<>Head.HashCompressed) or
              (SynLZdecompressdestlen(pointer(src))<>Head.UnCompressedSize) then
             exit;
+          if Head.UnCompressedSize>length(dst) then
+            SetString(dst,nil,Head.UnCompressedSize);
           if (SynLZDecompress1(pointer(src),Head.CompressedSize,pointer(dst))<>Head.UnCompressedSize) or
              (Hash32(pointer(dst),Head.UnCompressedSize)<>Head.HashUncompressed) then
             exit;
