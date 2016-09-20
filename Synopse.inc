@@ -216,7 +216,11 @@
   // -> only available for Win32 and Linux32 platforms by now
 
   {$ifdef MSWINDOWS}
-    {$define FPCSQLITE3STATIC} // we supply Win32 and Win64 .obj
+  {$ifdef CPUX86}
+    {$define FPCSQLITE3STATIC} // we supply Win32 .obj
+  {$else}
+    {$define FPCSQLITE3STATIC} // we supply Win64 .o (compiled with -O1)
+  {$endif}
   {$endif}
   {$ifdef LINUX}
     {$ifdef CPUX86}
@@ -358,6 +362,12 @@
       {$define HASREGION}
       {$define HASFASTMM4}
     {$ifend}
+    {$ifdef VER180}
+      {$define ISDELPHI20062007} // to circumvent some specific bugs
+    {$endif}
+    {$ifdef VER185}
+      {$define ISDELPHI20062007}
+    {$endif}
     {$if CompilerVersion > 18}
       {$define ISDELPHI2007ANDUP} // Delphi 2007 or newer
     {$ifend}
@@ -501,7 +511,7 @@
     {$define NOSQLITE3STATIC}
   {$endif}
 {$endif}
-{$ifdef CPU64}
+{$ifndef CPUINTEL}
   {$define NOSQLITE3STATIC}
 {$endif}
 {$ifdef ANDROID}

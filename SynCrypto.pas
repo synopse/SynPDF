@@ -309,10 +309,10 @@ type
   PAESBlock = ^TAESBlock;
 
   /// 128 bits memory block for AES data cypher/uncypher
-  TAESBlock = packed array[0..AESBlockSize-1] of byte;
+  TAESBlock = THash128;
 
   /// 256 bits memory block for maximum AES key storage
-  TAESKey = packed array[0..AESKeySize-1] of byte;
+  TAESKey = THash256;
 
   PAES = ^TAES;
   /// handle AES cypher/uncypher
@@ -382,7 +382,7 @@ type
     fKeySizeBytes: cardinal;
     fKey: TAESKey;
     fIV: TAESBlock;
-    procedure DecryptLen(var InputLen,iv: integer; Input: pointer; IVAtBeginning: boolean);
+    procedure DecryptLen(var InputLen,ivsize: integer; Input: pointer; IVAtBeginning: boolean);
   public
     /// Initialize AES contexts for cypher
     // - first method to call before using this class
@@ -452,6 +452,14 @@ type
     // use EncryptPKCS7Length() to compute the exact needed number of bytes
     function EncryptPKCS7Buffer(Input,Output: Pointer; InputLen,OutputLen: cardinal;
       IVAtBeginning: boolean): boolean;
+    /// decrypt a memory buffer using a PKCS7 padding pattern
+    // - PKCS7 padding is described in RFC 5652 - it will trim up to 16 bytes from
+    // the input buffer; note this method uses the padding only, not the whole
+    // PKCS#7 Cryptographic Message Syntax
+    // - if IVAtBeginning is TRUE, the Initialization Vector will be taken
+    // from the beginning of the input binary buffer
+    function DecryptPKCS7Buffer(Input: Pointer; InputLen: integer;
+      IVAtBeginning: boolean): RawByteString;
 
     /// simple wrapper able to cypher/decypher any content
     // - here all data variable could be text or binary
@@ -654,6 +662,7 @@ type
 
 type
   /// cryptographic pseudorandom number generators (CSPRNG) based on AES-256
+  // - use as a shared instance via TAESPRNG.Fill() overloaded class methods
   // - this class is able to generate some random output by encrypting successive
   // values of a counter with AES-256 and a secret key
   // - the internal secret key is generated from PBKDF2 derivation of OS-supplied
@@ -695,22 +704,45 @@ type
     /// returns a binary buffer filled with some pseudorandom data
     // - this method is thread-safe
     function FillRandomBytes(Len: integer): TBytes;
+    /// computes a random ASCII password
+    // - will contain uppercase/lower letters, digits and punctuations
+    function RandomPassword(Len: integer): RawUTF8;
     /// would force the internal generator to re-seed its private key
-    // - avoid potential attacks on backward or forward security 
+    // - avoid potential attacks on backward or forward security
     // - would be called by FillRandom() methods, according to SeedAfterBytes
     // - this method is thread-safe
     procedure Seed;
     /// retrieve some entropy bytes from the Operating System
     // - entropy comes from CryptGenRandom API on Windows, and /dev/urandom or
     // /dev/random on Linux
-    // - depending on the system, entropy may not be true randomness: if you
-    // need some truly random values, use TAESPRNG.Main.FillRandom() methods,
-    // NOT this class function (which would be much slower, BTW)
+    // - depending on the system, entropy may not be true randomness: if you need
+    // some truly random values, use TAESPRNG.Main.FillRandom() or TAESPRNG.Fill()
+    // methods, NOT this class function (which will be much slower, BTW)
     class function GetEntropy(Len: integer): RawByteString; virtual;
     /// returns a shared instance of a TAESPRNG instance
     // - if you need to generate some random content, just call the
-    // TAESPRNG.Main.FillRandom() overloaded methods
+    // TAESPRNG.Main.FillRandom() overloaded methods, or directly TAESPRNG.Fill()
     class function Main: TAESPRNG;
+    /// just a wrapper around TAESPRNG.Main.FillRandom() function
+    // - this method is thread-safe, but you may use your own TAESPRNG instance
+    // if you need some custom entropy level
+    class procedure Fill(Buffer: pointer; Len: integer); overload;
+      {$ifdef HASINLINE}inline;{$endif}
+    /// just a wrapper around TAESPRNG.Main.FillRandom() function
+    // - this method is thread-safe, but you may use your own TAESPRNG instance
+    // if you need some custom entropy level
+    class procedure Fill(out Block: TAESBlock); overload;
+      {$ifdef HASINLINE}inline;{$endif}
+    /// just a wrapper around TAESPRNG.Main.FillRandom() function
+    // - this method is thread-safe, but you may use your own TAESPRNG instance
+    // if you need some custom entropy level
+    class function Fill(Len: integer): RawByteString; overload;
+      {$ifdef HASINLINE}inline;{$endif}
+    /// just a wrapper around TAESPRNG.Main.FillRandomBytes() function
+    // - this method is thread-safe, but you may use your own TAESPRNG instance
+    // if you need some custom entropy level
+    class function Bytes(Len: integer): TBytes;
+      {$ifdef HASINLINE}inline;{$endif}
     /// create an anti-forensic representation of a key for safe storage
     // - a binary buffer will be split into StripesCount items, ready to be
     // saved on disk; returned length is BufferBytes*(StripesCount+1) bytes
@@ -729,8 +761,10 @@ type
     // - returns TRUE if the input buffer matches BufferBytes value
     class function AFUnsplit(const Split: RawByteString; out Buffer; BufferBytes: integer): boolean;
     /// after how many generated bytes Seed method would be called
+    // - default is 1 MB
     property SeedAfterBytes: integer read fSeedAfterBytes;
     /// how many PBKDF2_HMAC_SHA256 count is applied by Seed to the entropy
+    // - default is 256 rounds, which is enough for entropy gathering
     property SeedPBKDF2Rounds: integer read fSeedPBKDF2Rounds;
     /// how many bytes this generator did compute
     property TotalBytes: Int64 read fTotalBytes;
@@ -764,7 +798,7 @@ type
 
   PSHA256Digest = ^TSHA256Digest;
   /// 256 bits (32 bytes) memory block for SHA256 hash digest storage
-  TSHA256Digest = packed array[0..31] of byte;
+  TSHA256Digest = THash256;
 
   PSHA256 = ^TSHA256;
   /// handle SHA256 hashing
@@ -789,7 +823,7 @@ type
   TMD5In = array[0..15] of cardinal;
   PMD5In = ^TMD5In;
   /// 128 bits memory block for MD5 hash digest storage
-  TMD5Digest = array[0..15] of Byte;
+  TMD5Digest = THash128;
   PMD5Digest = ^TMD5Digest;
   PMD5 = ^TMD5;
   TMD5Buf = array[0..3] of cardinal;
@@ -954,6 +988,13 @@ function SHA256(const s: RawByteString): RawUTF8; overload;
 // - result is returned in hexadecimal format
 function SHA256(Data: pointer; Len: integer): RawUTF8; overload;
 
+/// direct SHA256 hash calculation of some binary data
+// - result is returned in TSHA256Digest binary format
+// - since the result would be stored temporarly in the stack, it may be
+// safer to use an explicit TSHA256Digest variable, which would be filled
+// with zeros by a ... finally FillZero( 
+function SHA256Digest(Data: pointer; Len: integer): TSHA256Digest;
+
 /// direct SHA256 hash calculation of some data (string-encoded)
 // - result is returned in hexadecimal format
 // - this procedure has a weak password protection: small incoming data
@@ -1043,17 +1084,32 @@ function AESBlockToShortString(const block: TAESBlock): short32; overload;
 // - fill a stack-allocated short string
 procedure AESBlockToShortString(const block: TAESBlock; out result: short32); overload;
 
+/// compute the hexadecial representation of an AES 16-byte block
+function AESBlockToString(const block: TAESBlock): RawUTF8;
+
 /// compute the hexadecimal representation of a SHA1 digest
 function SHA1DigestToString(const D: TSHA1Digest): RawUTF8;
+
+/// compute the SHA-1 digest from its hexadecimal representation
+// - returns true on success (i.e. Source has the expected size and characters)
+// - just a wrapper around SynCommons.HexToBin()
+function SHA1StringToDigest(const Source: RawUTF8; out Dest: TSHA1Digest): boolean;
 
 /// compute the hexadecimal representation of a SHA256 digest
 function SHA256DigestToString(const D: TSHA256Digest): RawUTF8;
 
-/// compare two supplied MD5 digests
-function MD5DigestsEqual(const A, B: TMD5Digest): Boolean;
+/// compute the SHA-256 digest from its hexadecimal representation
+// - returns true on success (i.e. Source has the expected size and characters)
+// - just a wrapper around SynCommons.HexToBin()
+function SHA256StringToDigest(const Source: RawUTF8; out Dest: TSHA256Digest): boolean;
 
 /// compute the hexadecimal representation of a MD5 digest
 function MD5DigestToString(const D: TMD5Digest): RawUTF8;
+
+/// compute the MD5 digest from its hexadecimal representation
+// - returns true on success (i.e. Source has the expected size and characters)
+// - just a wrapper around SynCommons.HexToBin()
+function MD5StringToDigest(const Source: RawUTF8; out Dest: TMD5Digest): boolean;
 
 /// apply the XOR operation to the supplied binary buffers of 16 bytes
 procedure XorBlock16(A,B: {$ifdef CPU64}PInt64Array{$else}PCardinalArray{$endif});
@@ -1352,7 +1408,6 @@ var
   Td0, Td1, Td2, Td3, Te0, Te1, Te2, Te3: array[byte] of cardinal;
   Xor32Byte: TByteArray absolute Td0;  // 2^13=$2000=8192 bytes of XOR tables ;)
 
-
 procedure ComputeAesStaticTables; // will compute 4.5 KB of constant tables
 var i, x,y: byte;
     pow,log: array[byte] of byte;
@@ -1514,20 +1569,20 @@ var SHA: TSHA256;
 begin
   // 1. Hash complete RawByteString
   SHA.Full(pointer(s),length(s),Digest);
-  result := CompareMem(@Digest,@TDig,sizeof(Digest));
+  result := IsEqual(Digest,TDig);
   if not result then exit;
   // 2. one update call for all chars
   SHA.Init;
   for i := 1 to length(s) do
     SHA.Update(@s[i],1);
   SHA.Final(Digest);
-  result := CompareMem(@Digest,@TDig,sizeof(Digest));
+  result := IsEqual(Digest,TDig);
   // 3. test consistency with Padlock engine down results
 {$ifdef USEPADLOCK}
   if not result or not padlock_available then exit;
   padlock_available := false;  // force PadLock engine down
   SHA.Full(pointer(s),length(s),Digest);
-  result := CompareMem(@Digest,@TDig,sizeof(Digest));
+  result := Equals(Digest,TDig);
 {$ifdef PADLOCKDEBUG} write('=padlock '); {$endif}
   padlock_available := true;
 {$endif}
@@ -1547,7 +1602,7 @@ begin
      SingleTest('abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq', D2);
   if not result then exit;
   SHA256Weak('lagrangehommage',Digest); // test with len=256>64
-  result := Comparemem(@Digest,@D3,sizeof(Digest));
+  result := IsEqual(Digest,D3);
   {$ifdef CPU64}
   {$ifdef CPUINTEL}
   if cfSSE41 in CpuFeatures then begin
@@ -1566,7 +1621,7 @@ var MD5: TMD5;
 begin
   MD5.Full(pointer(s),Length(s),D);
   result := MD5DigestToString(D);
-  FillcharFast(D,sizeof(D),0);
+  FillZero(D);
 end;
 
 function SHA1(const s: RawByteString): RawUTF8;
@@ -1629,7 +1684,7 @@ var SHA: TSHA256;
 begin
   SHA.Full(pointer(s),length(s),Digest);
   result := SHA256DigestToString(Digest);
-  FillcharFast(Digest,sizeof(Digest),0);
+  FillZero(Digest);
 end;
 
 function SHA256(Data: pointer; Len: integer): RawUTF8;
@@ -1638,7 +1693,13 @@ var SHA: TSHA256;
 begin
   SHA.Full(Data,Len,Digest);
   result := SHA256DigestToString(Digest);
-  FillcharFast(Digest,sizeof(Digest),0);
+  FillZero(Digest);
+end;
+
+function SHA256Digest(Data: pointer; Len: integer): TSHA256Digest;
+var SHA: TSHA256;
+begin
+  SHA.Full(Data,Len,result);
 end;
 
 procedure HMAC_SHA256(const key,msg: RawByteString; out result: TSHA256Digest);
@@ -1816,7 +1877,7 @@ begin
       A.DecryptInit(Key,ks);
       A.Decrypt(b,p);
       A.Done;
-      if not CompareMem(@p,@s,AESBLockSize) then begin
+      if not IsEqual(p,s) then begin
         writeln('AESSelfTest compareError with keysize=',ks);
         exit;
       end;
@@ -5122,6 +5183,7 @@ var n, LastLen: cardinal;
     i: integer;
     Last: TAESBlock;
 begin
+  result := 0; // makes FixInsight happy
   Tmp := nil;
   outStreamCreated := nil;
   Head.SourceLen := InLen;
@@ -5269,7 +5331,7 @@ var Digest: TSHA256Digest;
 begin
   SHA256Weak(Password,Digest);
   AES(Digest,sizeof(Digest)*8,bIn,bOut,Len,Encrypt);
-  FillcharFast(Digest,sizeof(Digest),0);
+  FillZero(Digest);
 end;
 
 function AESSHA256(const s, Password: RawByteString; Encrypt: boolean): RawByteString;
@@ -6356,11 +6418,6 @@ begin
   MD5.Full(@Buffer,Len,result);
 end;
 
-function MD5DigestsEqual(const A,B: TMD5Digest): Boolean;
-begin
-  result := CompareMem(@A,@B,sizeof(TMD5Digest));
-end;
-
 const Digits: array[0..15] of AnsiChar = '0123456789abcdef';
 
 function AESBlockToShortString(const block: TAESBlock): short32;
@@ -6372,6 +6429,12 @@ procedure AESBlockToShortString(const block: TAESBlock; out result: short32);
 begin
   result[0] := #32;
   SynCommons.BinToHex(@block,@result[1],16);
+end;
+
+function AESBlockToString(const block: TAESBlock): RawUTF8;
+begin
+  SetString(result,nil,32);
+  SynCommons.BinToHex(@block,pointer(result),16);
 end;
 
 function MD5DigestToString(const D: TMD5Digest): RawUTF8;
@@ -6387,6 +6450,11 @@ begin
   end;
 end;
 
+function MD5StringToDigest(const Source: RawUTF8; out Dest: TMD5Digest): boolean;
+begin
+  result := SynCommons.HexToBin(pointer(Source), @Dest, sizeof(Dest));
+end;
+
 function SHA1DigestToString(const D: TSHA1Digest): RawUTF8;
 var P: PAnsiChar;
     I: Integer;
@@ -6400,6 +6468,11 @@ begin
   end;
 end;
 
+function SHA1StringToDigest(const Source: RawUTF8; out Dest: TSHA1Digest): boolean;
+begin
+  result := SynCommons.HexToBin(pointer(Source), @Dest, sizeof(Dest));
+end;
+
 function SHA256DigestToString(const D: TSHA256Digest): RawUTF8;
 var P: PAnsiChar;
     I: Integer;
@@ -6411,6 +6484,11 @@ begin
     P[1] := Digits[D[I] and 15];
     Inc(P,2);
   end;
+end;
+
+function SHA256StringToDigest(const Source: RawUTF8; out Dest: TSHA256Digest): boolean;
+begin
+  result := SynCommons.HexToBin(pointer(Source), @Dest, sizeof(Dest));
 end;
 
 function htdigest(const user, realm, pass: RawByteString): RawUTF8;
@@ -6692,7 +6770,7 @@ end;
 destructor TAESAbstract.Destroy;
 begin
   inherited Destroy;
-  FillCharFast(fKey,sizeof(fKey),0);
+  FillZero(fKey);
 end;
 
 function TAESAbstract.EncryptPKCS7(const Input: RawByteString;
@@ -6721,13 +6799,13 @@ end;
 
 function TAESAbstract.EncryptPKCS7Buffer(Input,Output: Pointer; InputLen,OutputLen: cardinal;
   IVAtBeginning: boolean): boolean;
-var padding, iv: cardinal;
+var padding, ivsize: cardinal;
 begin
   padding := AESBlockSize-(InputLen and (AESBlockSize-1));
   if IVAtBeginning then
-    iv := AESBlockSize else
-    iv := 0;
-  if OutputLen<>iv+InputLen+padding then begin
+    ivsize := AESBlockSize else
+    ivsize := 0;
+  if OutputLen<>ivsize+InputLen+padding then begin
     result := false;
     exit;
   end;
@@ -6735,14 +6813,14 @@ begin
     TAESPRNG.Main.FillRandom(fIV);
     PAESBlock(Output)^ := fIV;
   end;
-  MoveFast(Input^,PByteArray(Output)^[iv],InputLen);
-  FillcharFast(PByteArray(Output)^[iv+InputLen],padding,padding);
-  Inc(PByte(Output),iv);
+  MoveFast(Input^,PByteArray(Output)^[ivsize],InputLen);
+  FillcharFast(PByteArray(Output)^[ivsize+InputLen],padding,padding);
+  Inc(PByte(Output),ivsize);
   Encrypt(Output,Output,InputLen+padding);
   result := true;
 end;
 
-procedure TAESAbstract.DecryptLen(var InputLen,iv: Integer;
+procedure TAESAbstract.DecryptLen(var InputLen,ivsize: Integer;
   Input: pointer; IVAtBeginning: boolean);
 begin
   if (InputLen<AESBlockSize) or (InputLen and (AESBlockSize-1)<>0) then
@@ -6750,37 +6828,42 @@ begin
   if IVAtBeginning then begin
     fIV := PAESBlock(Input)^;
     dec(InputLen,AESBlockSize);
-    iv := AESBlockSize;
+    ivsize := AESBlockSize;
   end else
-    iv := 0;
+    ivsize := 0;
+end;
+
+function TAESAbstract.DecryptPKCS7Buffer(Input: Pointer; InputLen: integer;
+  IVAtBeginning: boolean): RawByteString;
+var ivsize,padding: integer;
+begin
+  DecryptLen(InputLen,ivsize,Input,IVAtBeginning);
+  SetString(result,nil,InputLen);
+  Decrypt(@PByteArray(Input)^[ivsize],pointer(result),InputLen);
+  padding := ord(result[InputLen]); // result[1..len]
+  if padding>AESBlockSize then
+    result := '' else
+    SetLength(result,InputLen-padding);
 end;
 
 function TAESAbstract.DecryptPKCS7(const Input: RawByteString;
   IVAtBeginning: boolean): RawByteString;
-var len,iv,padding: integer;
 begin
-  len := length(Input);
-  DecryptLen(len,iv,pointer(Input),IVAtBeginning);
-  SetString(result,nil,len);
-  Decrypt(@PByteArray(Input)^[iv],pointer(result),len);
-  padding := ord(result[len]); // result[1..len]
-  if padding>AESBlockSize then
-    raise ESynCrypto.CreateUTF8('%.DecryptPKCS7: Invalid content',[self]);
-  SetLength(result,len-padding);
+  result := DecryptPKCS7Buffer(pointer(Input),length(Input),IVAtBeginning);
 end;
 
 function TAESAbstract.DecryptPKCS7(const Input: TBytes;
   IVAtBeginning: boolean): TBytes;
-var len,iv,padding: integer;
+var len,ivsize,padding: integer;
 begin
   len := length(Input);
-  DecryptLen(len,iv,pointer(Input),IVAtBeginning);
+  DecryptLen(len,ivsize,pointer(Input),IVAtBeginning);
   SetLength(result,len);
-  Decrypt(@PByteArray(Input)^[iv],pointer(result),len);
+  Decrypt(@PByteArray(Input)^[ivsize],pointer(result),len);
   padding := result[len-1]; // result[0..len-1]
   if padding>AESBlockSize then
-    raise ESynCrypto.CreateUTF8('%.DecryptPKCS7: Invalid content',[self]);
-  SetLength(result,len-padding);
+    result := nil else
+    SetLength(result,len-padding);
 end;
 
 class function TAESAbstract.SimpleEncrypt(const Input,Key: RawByteString;
@@ -6946,16 +7029,16 @@ end;
 { TAESCFB }
 
 {$ifdef USEAESNI32}
-procedure AesNiTrailer;
-asm
+procedure AesNiTrailer; // = TAESAbstractSyn.EncryptTrailer from AES-NI asm
+asm // eax=TAESContext ecx=len xmm7=CV esi=BufIn edi=BufOut
     and    ecx,15
     jz     @0
-    call   AesNiEncryptXmm7
+    call   AesNiEncryptXmm7 // = AES.Encrypt(fCV,fCV)
     lea    edx,[eax].TAESContext.buf
     movdqu [edx],xmm7
     cld
 @s: lodsb
-    xor    al,[edx]
+    xor    al,[edx] // = XorBlockN(pointer(fIn),pointer(fOut),@fCV,len);
     inc    edx
     stosb
     loop   @s
@@ -7472,8 +7555,8 @@ begin
       i := Len;
       repeat
         dec(i,FileRead(dev,p^[Len-i],i));
-      until i=0;
-      fromOS := true;
+      until i<=0;
+      fromOS := i=0;
     finally
       FileClose(dev);
     end;
@@ -7540,20 +7623,23 @@ const PASSLEN = 256;
 var key: TSHA256Digest;
     pass, salt: RawByteString;
 begin
-  pass := GetEntropy(PASSLEN+SALTLEN); // get all entropy in one call
-  salt := copy(pass,PASSLEN+1,SALTLEN);
-  SetLength(pass,PASSLEN);
-  EnterCriticalSection(fLock);
-  PBKDF2_HMAC_SHA256(pass,salt,fSeedPBKDF2Rounds,key);
-  fAES.EncryptInit(key,256);
-  FillcharFast(key,sizeof(key),0); // avoid the key appear in clear on stack
-  FillcharFast(pointer(pass)^,length(pass),0); // remove entropy from heap
-  assert(SALTLEN>=sizeof(fCTR));
-  MoveFast(pointer(salt)^,fCTR,sizeof(fCTR));
-  fCTR[0] := fCTR[0] xor fTotalBytes;
-  fAES.Encrypt(TAESBlock(fCTR),TAESBlock(fCTR));
-  fBytesSinceSeed := 0;
-  LeaveCriticalSection(fLock);
+  try
+    pass := GetEntropy(PASSLEN+SALTLEN); // get all entropy in one call
+    salt := copy(pass,PASSLEN+1,SALTLEN);
+    SetLength(pass,PASSLEN);
+    PBKDF2_HMAC_SHA256(pass,salt,fSeedPBKDF2Rounds+(ord(salt[1]) and 7),key);
+    EnterCriticalSection(fLock);
+    fAES.EncryptInit(key,256);
+    crc128c(pointer(salt),SALTLEN,THash128(fCTR));
+    fCTR[0] := fCTR[0] xor fTotalBytes;
+    fAES.Encrypt(TAESBlock(fCTR),TAESBlock(fCTR));
+    fBytesSinceSeed := 0;
+    LeaveCriticalSection(fLock);
+  finally
+    FillZero(key); // avoid the key appear in clear on stack
+    FillcharFast(pointer(pass)^,length(pass),0); // remove entropy from heap
+    FillcharFast(pointer(salt)^,length(salt),0);
+  end;
 end;
 
 procedure TAESPRNG.IncrementCTR;
@@ -7625,6 +7711,25 @@ function TAESPRNG.FillRandomBytes(Len: integer): TBytes;
 begin
   SetLength(result,Len);
   FillRandom(pointer(result),Len);
+end;
+
+function TAESPRNG.RandomPassword(Len: integer): RawUTF8;
+const CHARS: array[0..137] of AnsiChar =
+  'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'+
+  'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789;.:()?%!=+*/@#';
+var i,j: integer;
+    haspunct: boolean;
+begin
+  repeat
+    result := FillRandom(Len);
+    haspunct := false;
+    for i := 1 to Len do begin
+      j := ord(result[i]) mod sizeof(CHARS);
+      if j>=124 then
+        haspunct := true;
+      result[i] := CHARS[j];
+    end;
+  until haspunct and (LowerCase(result)<>result);
 end;
 
 var
@@ -7705,6 +7810,26 @@ begin
     inc(PByte(src),BufferBytes);
   end;
   XorBlockN(src,@Buffer,pointer(tmp),BufferBytes);
+end;
+
+class procedure TAESPRNG.Fill(Buffer: pointer; Len: integer);
+begin
+  Main.FillRandom(Buffer,Len);
+end;
+
+class procedure TAESPRNG.Fill(out Block: TAESBlock);
+begin
+  Main.FillRandom(Block);
+end;
+
+class function TAESPRNG.Fill(Len: integer): RawByteString;
+begin
+  result := Main.FillRandom(Len);
+end;
+
+class function TAESPRNG.Bytes(Len: integer): TBytes;
+begin
+  result := Main.FillRandomBytes(Len);
 end;
 
 
