@@ -2234,7 +2234,7 @@ type
   // - use the GDIComment*() functions to append the corresponding
   // EMR_GDICOMMENT message to a metafile content
   TPdfGDIComment =
-    (pgcOutline, pgcBookmark, pgcLink, pgcLinkNoBorder);
+      (pgcOutline, pgcBookmark, pgcLink, pgcLinkNoBorder, pgcPushXForm, pgcPOPXForm);
 
   /// a dictionary wrapper class for the PDF document information fields
   // - all values use the generic VCL string type, and will be encoded
@@ -2872,7 +2872,12 @@ procedure GDICommentOutline(MetaHandle: HDC; const aTitle: RawUTF8; aLevel: Inte
 /// append a EMR_GDICOMMENT message for creating a Link into a specified bookmark
 procedure GDICommentLink(MetaHandle: HDC; const aBookmarkName: RawUTF8; const aRect: TRect;
   NoBorder: boolean);
+  
+/// append a EMR_GDICOMMENT message for creating a Rotation  into  the Metafile
+procedure GDICommentPushXForm(MetaHandle: HDC; const aXForm: XFORM);
 
+/// append a EMR_GDICOMMENT message for reset a Rotation  into  the Metafile
+procedure GDICommentPopXForm(MetaHandle: HDC);
 
 {$ifdef USE_PDFSECURITY}
 const
@@ -3332,6 +3337,26 @@ begin // high(TPdfGDIComment)<$47 so it will never begin with GDICOMMENT_IDENTIF
   Windows.GdiComment(MetaHandle,L+(1+sizeof(TRect)),D);
 end;
 
+procedure GDICommentPushXForm(MetaHandle: HDC; const aXForm: XFORM);
+var
+   Data: RawByteString;
+   D: PAnsiChar;
+   L: integer;
+begin // high(TPdfGDIComment)<$47 so it will never begin with GDICOMMENT_IDENTIFIER
+  L := 1 + sizeof(XFORM);
+  SetLength(Data, L);
+  D := pointer(Data);
+  D^ := AnsiChar(pgcPushXForm);
+  PXForm(D + 1)^ := aXForm;
+  Windows.GdiComment(MetaHandle, L, D);
+end;
+procedure GDICommentPopXForm(MetaHandle: HDC);
+var d: array[0..1] of byte;
+begin
+  d[0] := ord(pgcPOPXForm);
+  d[1] := ord(pgcPOPXForm);
+  Windows.GdiComment(MetaHandle, 2, @D);
+end;
 {$ifndef DELPHI5OROLDER}
 // used by TPdfFontTrueType.PrepareForSaving()
 function GetTTCIndex(const FontName: RawUTF8; var ttcIndex: Word;
@@ -10170,6 +10195,9 @@ end;
 procedure TPdfEnum.HandleComment(Kind: TPdfGDIComment; P: PAnsiChar; Len: integer);
 var Text: RawUTF8;
     W: integer;
+   lXform: XFORM;
+    lOrgx : single;
+    lOrgY : single;
 begin
   try
     case Kind of
@@ -10190,6 +10218,22 @@ begin
           W := 1 else
           W := 0;
         Canvas.Doc.CreateLink(Canvas.RectI(PRect(P)^,true),Text,abSolid,W);
+      end;
+         pgcPushXForm: begin
+               if len >= sizeof(XFORM) then begin
+                  lXform := PXFORM(p)^;
+                  Canvas.GSave;
+             lOrgX := Canvas.I2X(0);
+             lOrgY := Canvas.I2Y(0);
+             lXform.eDx := Canvas.I2X(lXform.eDx);
+             lXform.eDy := Canvas.I2y(lXform.eDy);
+             Canvas.ConcatToCTM(1, 0, 0, 1, lXform.eDx, lXform.eDy);  // Translation to 0
+             Canvas.ConcatToCTM(lXform.eM11, lXform.eM12, lXform.eM21, lXform.eM22, 0, 0);  // Rotation
+             Canvas.ConcatToCTM(1, 0, 0, 1, -lOrgx, -lOrgY);  // Translation ORG
+           end;
+         end;
+         pgcPOPXForm: begin
+               Canvas.GRestore;
       end;
     end;
   except
@@ -10362,6 +10406,11 @@ begin
     FWorldFactorY := WorldTransform.eM22;
     FWorldOffsetX := WorldTransform.eDx;
     FWorldOffsetY := WorldTransform.eDy;
+// Fix for posible errors
+      if Canvas.FWorldFactorX = 0 then
+         Canvas.FWorldFactorX := 1;
+      if Canvas.FWorldFactorY = 0 then
+         Canvas.FWorldFactorY := -1;
   end;
 end;
 
