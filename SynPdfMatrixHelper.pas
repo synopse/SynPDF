@@ -1,3 +1,8 @@
+/// PDF file generation
+// - this unit is a part of the freeware Synopse framework,
+// licensed under a MPL/GPL/LGPL tri-license; version 1.18
+// Added on fork    https://github.com/ProHolz/SynPDF
+
 unit SynPdfMatrixHelper;
 
 interface
