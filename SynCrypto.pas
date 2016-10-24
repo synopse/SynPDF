@@ -291,6 +291,11 @@ uses
   SynLZ, // already included in SynCommons, and used by CompressShaAes()
   SynCommons;
 
+{$ifdef USEPADLOCK}
+var
+  /// if dll/so and VIA padlock compatible CPU are present
+  padlock_available: boolean = false;
+{$endif}
 
 const
   /// hide all AES Context complex code
@@ -313,6 +318,38 @@ type
 
   /// 256 bits memory block for maximum AES key storage
   TAESKey = THash256;
+
+  /// buffer matching a THash128, for fast comparison
+  // - as used e.g. in THash128History
+  THash128_ = packed record
+    case integer of
+    0: (A,B,C,D: cardinal);
+    1: (A64,B64: Int64);
+    2: (hash: THash128);
+  end;
+
+  PHash128_ = ^THash128_;
+
+  /// stores an array of THash128 to check for their unicity
+  // - used e.g. to implement TAESAbstract.IVHistoryDepth property
+  THash128History = {$ifndef UNICODE}object{$else}record{$endif}
+  private
+    Previous: array of THash128_;
+    Index: integer;
+  public
+    /// how many THash128 values can be stored
+    Depth: integer;
+    /// how many THash128 values are currently stored
+    Count: integer;
+    /// initialize the storage for a given history depth
+    procedure Init(size: integer);
+    /// O(n) fast search of a hash value in the stored entries
+    // - returns true if the hash was found, or false if it did not appear
+    function Exists(const hash: THash128): boolean;
+    /// add a hash value to the stored entries, checking for duplicates
+    // - returns true if the hash was added, or false if it did already appear
+    function Add(const hash: THash128): boolean;
+  end;
 
   PAES = ^TAES;
   /// handle AES cypher/uncypher
@@ -370,7 +407,38 @@ type
     function UsesAESNI: boolean; {$ifdef HASINLINE}inline;{$endif}
   end;
 
+  /// class-reference type (metaclass) of an AES cypher/uncypher
   TAESAbstractClass = class of TAESAbstract;
+
+  /// used internally by TAESAbstract to detect replay attacks
+  // - when EncryptPKCS7/DecryptPKCS7 are used with IVAtBeginning=true, and
+  // IVReplayAttackCheck property contains repCheckedIfAvailable or repMandatory
+  // - EncryptPKCS7 will encrypt this record (using the global shared
+  // AESIVCTR_KEY over AES-128) to create a random IV, as a secure
+  // cryptographic pseudorandom number generator (CSPRNG), nonce and ctr
+  // ensuring 96 bits of entropy
+  // - DecryptPKCS7 will decode and ensure that the IV has an increasing CTR
+  TAESIVCTR = packed record
+    /// 8 bytes of random value
+    nonce: Int64;
+    /// contains the crc32c hash of the block cipher mode (e.g. 'AESCFB')
+    // - when magic won't match (i.e. in case of mORMot revision < 3063), the
+    // check won't be applied in DecryptPKCS7: this security feature is
+    // backward compatible if IVReplayAttackCheck is repCheckedIfAvailable,
+    // but will fail for repMandatory
+    magic: cardinal;
+    /// an increasing counter, used to detect replay attacks
+    // - is set to a 32-bit random value at initialization
+    // - is increased by one for every EncryptPKCS7, so can be checked against
+    // replay attack in DecryptPKCS7, and implement a safe CSPRNG for stored IV
+    ctr: cardinal;
+  end;
+
+  /// how TAESAbstract.DecryptPKCS7 should detect replay attack
+  // - repNoCheck and repCheckedIfAvailable will be compatible with older
+  // versions of the protocol, but repMandatory will reject any encryption
+  // without the TAESIVCTR algorithm
+  TAESIVReplayAttackCheck = (repNoCheck, repCheckedIfAvailable, repMandatory);
 
   /// handle AES cypher/uncypher with chaining
   // - use any of the inherited implementation, corresponding to the chaining
@@ -382,7 +450,13 @@ type
     fKeySizeBytes: cardinal;
     fKey: TAESKey;
     fIV: TAESBlock;
-    procedure DecryptLen(var InputLen,ivsize: integer; Input: pointer; IVAtBeginning: boolean);
+    fIVCTR: TAESIVCTR;
+    fIVCTRState: (ctrUnknown, ctrUsed, ctrNotused);
+    fIVHistoryDec: THash128History;
+    fIVReplayAttackCheck: TAESIVReplayAttackCheck;
+    procedure SetIVHistory(aDepth: integer);
+    procedure DecryptLen(var InputLen,ivsize: integer; Input: pointer;
+      IVAtBeginning: boolean);
   public
     /// Initialize AES contexts for cypher
     // - first method to call before using this class
@@ -393,6 +467,12 @@ type
     constructor CreateFromSha256(const aKey: RawUTF8); virtual;
     /// compute a class instance similar to this one
     function Clone: TAESAbstract; virtual;
+    /// compute a class instance similar to this one, for performing the
+    // reverse encryption/decryption process
+    // - this default implementation calls Clone, but CFB/OFB/CTR chaining modes
+    // using only AES encryption will return self to avoid creating two instances
+    // - warning: to be used only with IVAtBeginning=false
+    function CloneEncryptDecrypt: TAESAbstract; virtual;
     /// release the used instance memory and resources
     // - also fill the secret fKey buffer with zeros, for safety
     destructor Destroy; override;
@@ -409,28 +489,36 @@ type
     // the input buffer; note this method uses the padding only, not the whole
     // PKCS#7 Cryptographic Message Syntax
     // - if IVAtBeginning is TRUE, a random Initialization Vector will be computed,
-    // and stored at the beginning of the output binary buffer
+    // and stored at the beginning of the output binary buffer - this IV may
+    // contain an internal encrypted CTR, to detect any replay attack attempt,
+    // if IVReplayAttackCheck is set to repCheckedIfAvailable or repMandatory
     function EncryptPKCS7(const Input: RawByteString; IVAtBeginning: boolean=false): RawByteString; overload;
     /// decrypt a memory buffer using a PKCS7 padding pattern
     // - PKCS7 padding is described in RFC 5652 - it will trim up to 16 bytes from
     // the input buffer; note this method uses the padding only, not the whole
     // PKCS#7 Cryptographic Message Syntax
     // - if IVAtBeginning is TRUE, the Initialization Vector will be taken
-    // from the beginning of the input binary buffer
+    // from the beginning of the input binary buffer - if IVReplayAttackCheck is
+    // set, this IV will be validated to contain an increasing encrypted CTR,
+    // and raise an ESynCrypto when a replay attack attempt is detected
     function DecryptPKCS7(const Input: RawByteString; IVAtBeginning: boolean=false): RawByteString; overload;
     /// encrypt a memory buffer using a PKCS7 padding pattern
     // - PKCS7 padding is described in RFC 5652 - it will add up to 16 bytes to
     // the input buffer; note this method uses the padding only, not the whole
     // PKCS#7 Cryptographic Message Syntax
     // - if IVAtBeginning is TRUE, a random Initialization Vector will be computed,
-    // and stored at the beginning of the output binary buffer
+    // and stored at the beginning of the output binary buffer - this IV may
+    // contain an internal encrypted CTR, to detect any replay attack attempt,
+    // if IVReplayAttackCheck is set to repCheckedIfAvailable or repMandatory
     function EncryptPKCS7(const Input: TBytes; IVAtBeginning: boolean=false): TBytes; overload;
     /// decrypt a memory buffer using a PKCS7 padding pattern
     // - PKCS7 padding is described in RFC 5652 - it will trim up to 16 bytes from
     // the input buffer; note this method uses the padding only, not the whole
     // PKCS#7 Cryptographic Message Syntax
     // - if IVAtBeginning is TRUE, the Initialization Vector will be taken
-    // from the beginning of the input binary buffer
+    // from the beginning of the input binary buffer - if IVReplayAttackCheck is
+    // set, this IV will be validated to contain an increasing encrypted CTR,
+    // and raise an ESynCrypto when a replay attack attempt is detected
     function DecryptPKCS7(const Input: TBytes; IVAtBeginning: boolean=false): TBytes; overload;
 
     /// compute how many bytes would be needed in the output buffer, when
@@ -447,7 +535,8 @@ type
     // PKCS#7 Cryptographic Message Syntax
     // - use EncryptPKCS7Length() function to compute the actual needed length
     // - if IVAtBeginning is TRUE, a random Initialization Vector will be computed,
-    // and stored at the beginning of the output binary buffer
+    // and stored at the beginning of the output binary buffer - this IV will in
+    // fact contain an internal encrypted CTR, to detect any replay attack attempt
     // - returns TRUE on success, FALSE if OutputLen is not correct - you should
     // use EncryptPKCS7Length() to compute the exact needed number of bytes
     function EncryptPKCS7Buffer(Input,Output: Pointer; InputLen,OutputLen: cardinal;
@@ -457,9 +546,26 @@ type
     // the input buffer; note this method uses the padding only, not the whole
     // PKCS#7 Cryptographic Message Syntax
     // - if IVAtBeginning is TRUE, the Initialization Vector will be taken
-    // from the beginning of the input binary buffer
+    // from the beginning of the input binary buffer  - this IV will in fact
+    // contain an internal encrypted CTR, to detect any replay attack attempt
     function DecryptPKCS7Buffer(Input: Pointer; InputLen: integer;
       IVAtBeginning: boolean): RawByteString;
+    /// initialize AEAD (authenticated-encryption with associated-data) nonce
+    // - i.e. setup 256-bit MAC computation during next Encrypt/Decrypt call
+    // - may be used e.g. for AES-GCM or our custom AES-CTR modes
+    // - default implementation, for a non AEAD protocol, returns false
+    function MACSetNonce(const aKey: THash256; aAssociated: pointer=nil;
+      aAssociatedLen: integer=0): boolean; virtual;
+    /// returns AEAD (authenticated-encryption with associated-data) MAC
+    /// - i.e. optional 256-bit MAC computation during last Encrypt/Decrypt call
+    // - may be used e.g. for AES-GCM or our custom AES-CTR modes
+    // - default implementation, for a non AEAD protocol, returns false
+    function MACGetLast(out aCRC: THash256): boolean; virtual;
+    /// validate if an encrypted buffer matches the stored MAC
+    // - expects the 256-bit MAC, as returned by MACGetLast, to be stored after
+    // the encrypted data
+    // - default implementation, for a non AEAD protocol, returns false
+    function MACCheckError(aEncrypted: pointer; Count: cardinal): boolean; virtual;
 
     /// simple wrapper able to cypher/decypher any content
     // - here all data variable could be text or binary
@@ -477,9 +583,28 @@ type
     /// associated Key Size, in bits (i.e. 128,192,256)
     property KeySize: cardinal read fKeySize;
     /// associated Initialization Vector
-    // - you should better use PKCS7 encoding with IVAtBeginning option than
-    // a fixed Initialization Vector, especially in ECB mode
+    // - all modes (except ECB) do expect an IV to be supplied for chaining,
+    // before any encryption or decryption is performed
+    // - you could also use PKCS7 encoding with IVAtBeginning=true option
     property IV: TAESBlock read fIV write fIV;
+    /// let IV detect replay attack for EncryptPKCS7 and DecryptPKCS7
+    // - if IVAtBeginning=true and this property is set, EncryptPKCS7 will
+    // store a random IV from an internal CTR, and DecryptPKCS7 will check this
+    // incoming IV CTR consistency, and raise an ESynCrypto exception on failure
+    // - leave it to its default repNoCheck if the very same TAESAbstract
+    // instance is expected to be used with several sources, by which the IV CTR
+    // will be unsynchronized
+    // - security warning: by design, this is NOT cautious with CBC chaining:
+    // you should use it only with CFB, OFB or CTR mode, since the IV sequence
+    // will be predictable if you know the fixed AES private key of this unit,
+    // but the IV sequence features uniqueness as it is generated by a good PRNG -
+    // see http://crypto.stackexchange.com/q/3515
+    property IVReplayAttackCheck: TAESIVReplayAttackCheck
+      read fIVReplayAttackCheck write fIVReplayAttackCheck;
+    /// maintains an history of previous IV, to avoid re-play attacks
+    // - only useful when EncryptPKCS7/DecryptPKCS7 are used with
+    // IVAtBeginning=true, and IVReplayAttackCheck is left to repNoCheck
+    property IVHistoryDepth: integer read fIVHistoryDec.Depth write SetIVHistory;
   end;
 
   /// handle AES cypher/uncypher with chaining
@@ -495,10 +620,10 @@ type
     fCV: TAESBlock;
     AES: TAES;
     fCount: Cardinal;
+    fAESInit: (initNone, initEncrypt, initDecrypt); 
     procedure EncryptInit;
     procedure DecryptInit;
-    procedure EncryptTrailer;
-    procedure DecryptTrailer;
+    procedure TrailerBytes; 
   public
     /// release the used instance memory and resources
     // - also fill the TAES instance with zeros, for safety
@@ -533,6 +658,7 @@ type
   /// handle AES cypher/uncypher with Cipher-block chaining (CBC)
   // - this class will use AES-NI hardware instructions, if available, e.g.
   // ! CBC192: 24.91ms in x86 optimized code, 9.75ms with AES-NI
+  // - expect IV to be set before process, or IVAtBeginning=true
   TAESCBC = class(TAESAbstractSyn)
   public
     /// perform the AES cypher in the CBC mode
@@ -541,10 +667,21 @@ type
     procedure Decrypt(BufIn, BufOut: pointer; Count: cardinal); override;
   end;
 
+  /// abstract parent class for chaining modes using only AES encryption 
+  TAESAbstractEncryptOnly = class(TAESAbstractSyn)
+  public
+    /// returns this class instance, for performing the reverse process
+    // - return self for inherited classes of chaining modes using only Encrypt
+    // - warning: to be used only with IVAtBeginning=false, otherwise replay
+    // atacks attempts algorithm will fail the decryption
+    function CloneEncryptDecrypt: TAESAbstract; override;
+  end;
+
   /// handle AES cypher/uncypher with Cipher feedback (CFB)
   // - this class will use AES-NI hardware instructions, if available, e.g.
   // ! CFB128: 22.25ms in x86 optimized code, 9.29ms with AES-NI
-  TAESCFB = class(TAESAbstractSyn)
+  // - expect IV to be set before process, or IVAtBeginning=true
+  TAESCFB = class(TAESAbstractEncryptOnly)
   public
     /// perform the AES cypher in the CFB mode
     procedure Encrypt(BufIn, BufOut: pointer; Count: cardinal); override;
@@ -555,7 +692,8 @@ type
   /// handle AES cypher/uncypher with Output feedback (OFB)
   // - this class will use AES-NI hardware instructions, if available, e.g.
   // ! OFB256: 27.69ms in x86 optimized code, 9.94ms with AES-NI
-  TAESOFB = class(TAESAbstractSyn)
+  // - expect IV to be set before process, or IVAtBeginning=true
+  TAESOFB = class(TAESAbstractEncryptOnly)
   public
     /// perform the AES cypher in the OFB mode
     procedure Encrypt(BufIn, BufOut: pointer; Count: cardinal); override;
@@ -566,11 +704,75 @@ type
   /// handle AES cypher/uncypher with Counter mode (CTR)
   // - this class will use AES-NI hardware instructions, e.g.
   // ! CTR256: 28.13ms in x86 optimized code, 10.63ms with AES-NI
-  TAESCTR = class(TAESAbstractSyn)
+  // - expect IV to be set before process, or IVAtBeginning=true
+  TAESCTR = class(TAESAbstractEncryptOnly)
   public
     /// perform the AES cypher in the CTR mode
     procedure Encrypt(BufIn, BufOut: pointer; Count: cardinal); override;
     /// perform the AES un-cypher in the CTR mode
+    procedure Decrypt(BufIn, BufOut: pointer; Count: cardinal); override;
+  end;
+
+  TAESMAC256 = record
+    plain: THash128;
+    encrypted: THash128;
+  end;
+  
+  /// AEAD (authenticated-encryption with associated-data) abstract class
+  // - perform AES encryption and on-the-fly MAC computation, i.e. computes
+  // a proprietary 256-bit MAC during AES cyphering, as 128-bit CRC of the
+  // encrypted data and 128-bit CRC of the plain data, seeded from a Key
+  // - the 128-bit CRC of the plain text is then encrypted using the current AES
+  // engine, so returned 256-bit MAC value has cryptographic level, and ensure
+  // data integrity, authenticity, and check against transmission errors
+  TAESAbstractAEAD = class(TAESAbstractEncryptOnly)
+  protected
+    fMAC, fMACKey: TAESMAC256;
+  public
+    /// initialize 256-bit MAC computation for next Encrypt/Decrypt call
+    // - initialize the internal fMACKey property, and returns true
+    // - only the plain text crc is seeded from aKey - encrypted message crc
+    // will use -1 as fixed seed, to avoid aKey compromission
+    // - should be set with a new MAC key value before each message, to avoid
+    // replay attacks (as called from TECDHEProtocol.SetKey)
+    function MACSetNonce(const aKey: THash256; aAssociated: pointer=nil;
+      aAssociatedLen: integer=0): boolean; override;
+    /// returns 256-bit MAC computed during last Encrypt/Decrypt call
+    // - encrypt the internal fMAC property value using the current AES cypher
+    // on the plain content and returns true; only the plain content CRC-128 is
+    // AES encrypted, to avoid reverse attacks against the known encrypted data
+    function MACGetLast(out aCRC: THash256): boolean; override;
+    /// validate if an encrypted buffer matches the stored MAC
+    // - expects the 256-bit MAC, as returned by MACGetLast, to be stored after
+    // the encrypted data
+    // - returns true if the 128-bit CRC of the encrypted text matches the
+    // supplied buffer, ignoring the 128-bit CRC of the plain data
+    // - since it is easy to forge such 128-bit CRC, it will only indicate
+    // that no transmission error occured, but won't be an integrity or
+    // authentication proof (which will need full Decrypt + MACGetLast)
+    // - may use any MACSetNonce() aAssociated value
+    function MACCheckError(aEncrypted: pointer; Count: cardinal): boolean; override;
+  end;
+
+  /// AEAD combination of AES with Cipher feedback (CFB) and 256-bit MAC
+  // - this class will use AES-NI and CRC32C hardware instructions, if available
+  // - expect IV to be set before process, or IVAtBeginning=true
+  TAESCFBCRC = class(TAESAbstractAEAD)
+  public
+    /// perform the AES cypher in the CFB mode, and compute a 256-bit MAC
+    procedure Encrypt(BufIn, BufOut: pointer; Count: cardinal); override;
+    /// perform the AES un-cypher in the CFB mode, and compute 256-bit MAC
+    procedure Decrypt(BufIn, BufOut: pointer; Count: cardinal); override;
+  end;
+
+  /// AEAD combination of AES with Output feedback (OFB) and 256-bit MAC
+  // - this class will use AES-NI and CRC32C hardware instructions, if available
+  // - expect IV to be set before process, or IVAtBeginning=true
+  TAESOFBCRC = class(TAESAbstractAEAD)
+  public
+    /// perform the AES cypher in the OFB mode, and compute a 256-bit MAC
+    procedure Encrypt(BufIn, BufOut: pointer; Count: cardinal); override;
+    /// perform the AES un-cypher in the OFB mode, and compute a 256-bit MAC
     procedure Decrypt(BufIn, BufOut: pointer; Count: cardinal); override;
   end;
 
@@ -666,8 +868,32 @@ type
 
 {$endif USE_PROV_RSA_AES}
 
+var
+  /// 128-bit random AES-128 entropy key for TAESAbstract.IVReplayAttackCheck
+  // - as used internally by AESIVCtrEncryptDecrypt() function
+  // - you may customize this secret for your own project, but be aware that
+  // it will affect all TAESAbstract instances, so should match on all ends
+  AESIVCTR_KEY: array[0..3] of cardinal = (
+    $ce5d5e3e, $26506c65, $568e0092, $12cce480);
+
+/// global shared function which may encrypt or decrypt any 128-bit block
+// using AES-128 and the global AESIVCTR_KEY
+procedure AESIVCtrEncryptDecrypt(const BI; var BO; DoEncrypt: boolean);
+
 type
-  /// cryptographic pseudorandom number generators (CSPRNG) based on AES-256
+  /// thread-safe class containing a TAES encryption/decryption engine
+  TAESLocked = class(TSynPersistent)
+  protected
+    fAES: TAES;
+    fLock: TRTLCriticalSection;
+  public
+    /// initialize the internal lock, but not the TAES instance
+    constructor Create; override;
+    /// finalize all used memory and resources
+    destructor Destroy; override;
+  end;
+
+  /// cryptographic pseudorandom number generator (CSPRNG) based on AES-256
   // - use as a shared instance via TAESPRNG.Fill() overloaded class methods
   // - this class is able to generate some random output by encrypting successive
   // values of a counter with AES-256 and a secret key
@@ -675,16 +901,14 @@ type
   // entropy using HMAC over SHA-256
   // - by design, such a PRNG is as good as the cypher used - for reference, see
   // https://en.wikipedia.org/wiki/Cryptographically_secure_pseudorandom_number_generator
-  // - it would use fast hardware AES-NI or Padlock opcodes, if available 
-  TAESPRNG = class(TSynPersistent)
+  // - it would use fast hardware AES-NI or Padlock opcodes, if available
+  TAESPRNG = class(TAESLocked)
   protected
     fCTR: array[0..3] of cardinal; // we use a litle-endian CTR
     fBytesSinceSeed: integer;
     fSeedAfterBytes: integer;
-    fAES: TAES;
     fSeedPBKDF2Rounds: integer;
     fTotalBytes: Int64;
-    fLock: TRTLCriticalSection;
     procedure IncrementCTR; {$ifdef HASINLINE}inline;{$endif}
   public
     /// initialize the internal secret key, using Operating System entropy
@@ -695,12 +919,13 @@ type
     // bytes (1MB by default) are generated, using GetEntropy()
     constructor Create(PBKDF2Rounds: integer = 256;
       ReseedAfterBytes: integer = 1024*1024); reintroduce; virtual;
-    /// finalize all used memory and resources
-    destructor Destroy; override;
     /// fill a TAESBlock with some pseudorandom data
     // - could be used e.g. to compute an AES Initialization Vector (IV)
     // - this method is thread-safe
     procedure FillRandom(out Block: TAESBlock); overload;
+    /// fill a 256-bit buffer with some pseudorandom data
+    // - this method is thread-safe
+    procedure FillRandom(out Buffer: THash256); overload;
     /// fill a binary buffer with some pseudorandom data
     // - this method is thread-safe
     procedure FillRandom(Buffer: pointer; Len: integer); overload;
@@ -711,7 +936,8 @@ type
     // - this method is thread-safe
     function FillRandomBytes(Len: integer): TBytes;
     /// computes a random ASCII password
-    // - will contain uppercase/lower letters, digits and punctuations
+    // - will contain uppercase/lower letters, digits and $.:()?%!-+*/@#
+    // excluding ;,= to allow direct use in CSV content
     function RandomPassword(Len: integer): RawUTF8;
     /// would force the internal generator to re-seed its private key
     // - avoid potential attacks on backward or forward security
@@ -765,7 +991,14 @@ type
     /// retrieve a key from its anti-forensic representation
     // - is the reverse function of AFSplit() method
     // - returns TRUE if the input buffer matches BufferBytes value
-    class function AFUnsplit(const Split: RawByteString; out Buffer; BufferBytes: integer): boolean;
+    class function AFUnsplit(const Split: RawByteString;
+      out Buffer; BufferBytes: integer): boolean; overload;
+    /// retrieve a key from its anti-forensic representation
+    // - is the reverse function of AFSplit() method
+    // - returns the un-splitted binary content
+    // - returns '' if StripesCount is incorrect 
+    class function AFUnsplit(const Split: RawByteString;
+      StripesCount: integer): RawByteString; overload;
     /// after how many generated bytes Seed method would be called
     // - default is 1 MB
     property SeedAfterBytes: integer read fSeedAfterBytes;
@@ -1049,7 +1282,11 @@ type
     /// prepare the HMAC authentication with the supplied key
     procedure Init(key: pointer; keylen: integer);
     /// call this method for each continuous message block
-    procedure Update(msg: pointer; msglen: integer);
+    procedure Update(msg: pointer; msglen: integer); overload;
+    /// call this method for each continuous message block
+    procedure Update(const msg: THash128); overload;
+    /// call this method for each continuous message block
+    procedure Update(const msg: THash256); overload;
     /// computes the HMAC of all supplied message according to the key
     procedure Done(out result: TSHA256Digest);
   end;
@@ -1070,7 +1307,6 @@ procedure HMAC_SHA256(key,msg: pointer; keylen,msglen: integer; out result: TSHA
 // - this function expect the resulting key length to match SHA256 digest size
 procedure PBKDF2_HMAC_SHA256(const password,salt: RawByteString; count: Integer;
   out result: TSHA256Digest; const saltdefault: RawByteString='');
-
 
 /// compute the HMAC message authentication code using crc256c as hash function
 // - HMAC over a non cryptographic hash function like crc256c is known to be
@@ -1297,6 +1533,11 @@ procedure XorOffset(p: pByte; Index,Count: integer);
 // compression rate will not change a lot
 procedure XorConst(p: PIntegerArray; Count: integer);
 
+/// fast compute of some 32-bit random value
+// - will use RDRAND Intel x86/x64 opcode if available, or fast gsl_rng_taus2
+// generator by P. L'Ecuyer (period=2^88, i.e. about 10^26)
+function Random32: cardinal;
+
 var
   /// the encryption key used by CompressShaAes() global function
   // - the key is global to the whole process
@@ -1326,15 +1567,109 @@ procedure CompressShaAesSetKey(const Key: RawByteString; AesClass: TAESAbstractC
 // data is corrupted during transmission, will instantly return ''
 function CompressShaAes(var DataRawByteString; Compress: boolean): AnsiString;
 
+type
+  /// possible return codes by IProtocol classes
+  TProtocolResult = (sprSuccess,
+    sprBadRequest, sprUnsupported, sprUnexpectedAlgorithm,
+    sprInvalidCertificate, sprInvalidSignature,
+    sprInvalidEphemeralKey, sprInvalidPublicKey, sprInvalidPrivateKey,
+    sprInvalidMAC);
 
-{$ifdef USEPADLOCK}
-var
-  /// if dll/so and VIA padlock compatible CPU are present
-  padlock_available: boolean = false;
-{$endif}
+  /// perform safe communication after unilateral or mutual authentication
+  // - see e.g. TProtocolNone or SynEcc's TECDHEProtocolClient and
+  // TECDHEProtocolServer implementation classes
+  IProtocol = interface
+    ['{91E3CA39-3AE2-44F4-9B8C-673AC37C1D1D}']
+    /// initialize the communication by exchanging some client/server information
+    // - expects the handshaking messages to be supplied as UTF-8 text, may be as
+    // base64-encoded binary - see e.g. TWebSocketProtocolBinary.ProcessHandshake
+    // - should return sprUnsupported if the implemented protocol does not
+    // expect any handshaking mechanism
+    // - returns sprSuccess and set something into OutData, depending on the
+    // current step of the handshake
+    // - returns an error code otherwise
+    function ProcessHandshake(const MsgIn: RawUTF8; out MsgOut: RawUTF8): TProtocolResult;
+    /// encrypt a message on one side, ready to be transmitted to the other side
+    // - this method should be thread-safe in the implementation class
+    procedure Encrypt(const aPlain: RawByteString; out aEncrypted: RawByteString);
+    /// decrypt a message on one side, as transmitted from the other side
+    // - should return sprSuccess if the
+    // - should return sprInvalidMAC in case of wrong aEncrypted input (e.g.
+    // packet corruption, MiM or Replay attacks attempts)
+    // - this method should be thread-safe in the implementation class
+    function Decrypt(const aEncrypted: RawByteString; out aPlain: RawByteString): TProtocolResult;
+    /// will create another instance of this communication protocol
+    function Clone: IProtocol;
+  end;
+  /// stores a list of IProtocol instances
+  IProtocolDynArray = array of IProtocol;
+
+  /// implements a fake no-encryption protocol
+  // - may be used for debugging purposes, or when encryption is not needed
+  TProtocolNone = class(TInterfacedObject, IProtocol)
+  public
+    /// initialize the communication by exchanging some client/server information
+    // - this method will return sprUnsupported
+    function ProcessHandshake(const MsgIn: RawUTF8; out MsgOut: RawUTF8): TProtocolResult;
+    /// encrypt a message on one side, ready to be transmitted to the other side
+    // - this method will return the plain text with no actual encryption
+    procedure Encrypt(const aPlain: RawByteString; out aEncrypted: RawByteString);
+    /// decrypt a message on one side, as transmitted from the other side
+    // - this method will return the encrypted text with no actual decryption
+    function Decrypt(const aEncrypted: RawByteString; out aPlain: RawByteString): TProtocolResult;
+    /// will create another instance of this communication protocol
+    function Clone: IProtocol;
+  end;
+
+  /// implements a secure protocol using AES encryption
+  // - as used e.g. by 'synopsebinary' WebSockets protocol
+  // - this class will maintain two TAESAbstract instances, one for encryption
+  // and another one for decryption, with PKCS7 padding and no MAC validation
+  TProtocolAES = class(TInterfacedObjectLocked, IProtocol)
+  protected
+    fAES: array[boolean] of TAESAbstract;
+  public
+    /// initialize this encryption protocol with the given AES settings
+    constructor Create(aClass: TAESAbstractClass; const aKey; aKeySize: cardinal;
+      aIVReplayAttackCheck: TAESIVReplayAttackCheck=repCheckedIfAvailable); reintroduce; virtual;
+    /// will create another instance of this communication protocol
+    constructor CreateFrom(aAnother: TProtocolAES); reintroduce; virtual;
+    /// finalize the encryption
+    destructor Destroy; override;
+    /// initialize the communication by exchanging some client/server information
+    // - this method will return sprUnsupported
+    function ProcessHandshake(const MsgIn: RawUTF8; out MsgOut: RawUTF8): TProtocolResult;
+    /// encrypt a message on one side, ready to be transmitted to the other side
+    // - this method uses AES encryption and PKCS7 padding
+    procedure Encrypt(const aPlain: RawByteString; out aEncrypted: RawByteString);
+    /// decrypt a message on one side, as transmitted from the other side
+    // - this method uses AES decryption and PKCS7 padding
+    function Decrypt(const aEncrypted: RawByteString; out aPlain: RawByteString): TProtocolResult;
+    /// will create another instance of this communication protocol
+    function Clone: IProtocol;
+  end;
+
+  /// class-reference type (metaclass) of an AES secure protocol
+  TProtocolAESClass = class of TProtocolAES;
+
+
+function ToText(chk: TAESIVReplayAttackCheck): PShortString; overload;
+function ToText(res: TProtocolResult): PShortString; overload;
 
 
 implementation
+
+function ToText(res: TProtocolResult): PShortString;
+begin
+  result := GetEnumName(TypeInfo(TProtocolResult),ord(res));
+end;
+
+function ToText(chk: TAESIVReplayAttackCheck): PShortString;
+begin
+  result := GetEnumName(TypeInfo(TAESIVReplayAttackCheck),ord(chk));
+end;
+
+
 
 {$ifdef USEPADLOCK}
 
@@ -1863,6 +2198,16 @@ begin
   sha.Update(msg,msglen);
 end;
 
+procedure THMAC_SHA256.Update(const msg: THash128);
+begin
+  sha.Update(@msg,sizeof(msg));
+end;
+
+procedure THMAC_SHA256.Update(const msg: THash256);
+begin
+  sha.Update(@msg,sizeof(msg));
+end;
+
 procedure THMAC_SHA256.Done(out result: TSHA256Digest);
 begin
   sha.Final(result);
@@ -1945,7 +2290,7 @@ begin
 end;
 
 
-{ HMAC_CRC256C() functions - THMAC_CRC256C not possible due to h1/h2 coupling }
+{ HMAC_CRC256C }
 
 procedure crc256cmix(h1,h2: cardinal; h: PCardinalArray);
 begin // see http://www.eecs.harvard.edu/~kirsch/pubs/bbbf/esa06.pdf
@@ -1964,7 +2309,7 @@ var i: integer;
     h1,h2: cardinal;
     k0,k0xorIpad,step7data: THash64;
 begin
-  FillZero(k0);
+  FillCharFast(k0,sizeof(k0),0);
   if keylen>64 then
     crc256c(key,keylen,PHash256(@k0)^) else
     MoveFast(key^,k0,keylen);
@@ -1978,9 +2323,9 @@ begin
   h1 := crc32c(crc32c(0,@step7data,64),@result,sizeof(result));
   h2 := crc32c(crc32c(h1,@step7data,64),@result,sizeof(result));
   crc256cmix(h1,h2,@result);
-  FillZero(k0);
-  FillZero(k0xorIpad);
-  FillZero(step7data);
+  FillCharFast(k0,sizeof(k0),0);
+  FillCharFast(k0xorIpad,sizeof(k0),0);
+  FillCharFast(step7data,sizeof(k0),0);
 end;
 
 procedure HMAC_CRC256C(const key: THash256; const msg: RawByteString; out result: THash256);
@@ -2000,7 +2345,7 @@ procedure THMAC_CRC32C.Init(key: pointer; keylen: integer);
 var i: integer;
     k0,k0xorIpad: THash64;
 begin
-  FillZero(k0);
+  FillCharFast(k0,sizeof(k0),0);
   if keylen>64 then
     crc256c(key,keylen,PHash256(@k0)^) else
     MoveFast(key^,k0,keylen);
@@ -2009,8 +2354,8 @@ begin
   for i := 0 to 15 do
     step7data[i] := k0[i] xor $5c5c5c5c;
   seed := crc32c(0,@k0xorIpad,64);
-  FillZero(k0);
-  FillZero(k0xorIpad);
+  FillCharFast(k0,sizeof(k0),0);
+  FillCharFast(k0xorIpad,sizeof(k0xorIpad),0);
 end;
 
 procedure THMAC_CRC32C.Update(msg: pointer; msglen: integer);
@@ -2027,7 +2372,7 @@ end;
 function HMAC_CRC32C(key,msg: pointer; keylen,msglen: integer): cardinal;
 var mac: THMAC_CRC32C;
 begin
-  mac.Init(@key,sizeof(key));
+  mac.Init(key,sizeof(key));
   mac.Update(msg,msglen);
   result := mac.Done;
 end;
@@ -7052,7 +7397,29 @@ end;
 const
   sAESException = 'AES engine initialization failure';
 
+var
+  aesivctr: array[boolean] of TAESLocked;
+
+procedure AESIVCtrEncryptDecrypt(const BI; var BO; DoEncrypt: boolean);
+begin
+  if aesivctr[DoEncrypt]=nil then begin
+    GarbageCollectorFreeAndNil(aesivctr[DoEncrypt],TAESLocked.Create);
+    with aesivctr[DoEncrypt].fAES do
+      if DoEncrypt then
+        EncryptInit(AESIVCTR_KEY,128) else
+        DecryptInit(AESIVCTR_KEY,128);
+  end;
+  with aesivctr[DoEncrypt] do begin
+    EnterCriticalSection(fLock);
+    if DoEncrypt then
+      fAES.Encrypt(TAESBlock(BI),TAESBlock(BO)) else
+      fAES.Decrypt(TAESBlock(BI),TAESBlock(BO));
+    LeaveCriticalSection(fLock);
+  end;
+end;
+
 constructor TAESAbstract.Create(const aKey; aKeySize: cardinal);
+var blockmode: PShortString;
 begin
    if (aKeySize<>128) and (aKeySize<>192) and (aKeySize<>256) then
     raise ESynCrypto.CreateUTF8(
@@ -7060,6 +7427,9 @@ begin
   fKeySize := aKeySize;
   fKeySizeBytes := fKeySize shr 3;
   MoveFast(aKey,fKey,fKeySizeBytes);
+  TAESPRNG.Main.FillRandom(TAESBLock(fIVCTR)); // set nonce + ctr
+  blockmode := PPointer(PPtrInt(self)^+vmtClassName)^;
+  fIVCtr.magic := crc32c($aba5aba5,@blockmode^[2],6); // TAESECB_API -> 'AESECB'
 end;
 
 constructor TAESAbstract.CreateFromSha256(const aKey: RawUTF8);
@@ -7073,6 +7443,11 @@ destructor TAESAbstract.Destroy;
 begin
   inherited Destroy;
   FillZero(fKey);
+end;
+
+procedure TAESAbstract.SetIVHistory(aDepth: integer);
+begin
+  fIVHistoryDec.Init(aDepth);
 end;
 
 function TAESAbstract.EncryptPKCS7(const Input: RawByteString;
@@ -7112,7 +7487,11 @@ begin
     exit;
   end;
   if IVAtBeginning then begin
-    TAESPRNG.Main.FillRandom(fIV);
+    if fIVReplayAttackCheck<>repNoCheck then begin
+      AESIVCtrEncryptDecrypt(fIVCTR,fIV,true); // PRNG from fixed secret
+      inc(fIVCTR.ctr); // replay attack protection
+    end else
+      TAESPRNG.Main.FillRandom(fIV); // PRNG from real entropy
     PAESBlock(Output)^ := fIV;
   end;
   MoveFast(Input^,PByteArray(Output)^[ivsize],InputLen);
@@ -7124,11 +7503,35 @@ end;
 
 procedure TAESAbstract.DecryptLen(var InputLen,ivsize: Integer;
   Input: pointer; IVAtBeginning: boolean);
+var ctr: TAESIVCTR;
 begin
   if (InputLen<AESBlockSize) or (InputLen and (AESBlockSize-1)<>0) then
     raise ESynCrypto.CreateUTF8('%.DecryptPKCS7: Invalid InputLen=%',[self,InputLen]);
   if IVAtBeginning then begin
+    if (fIVReplayAttackCheck<>repNoCheck) and (fIVCTRState<>ctrNotUsed) then begin
+      AESIVCtrEncryptDecrypt(Input^,ctr,false);
+      if fIVCTRState=ctrUnknown then
+        if ctr.magic=fIVCTR.magic then begin
+          fIVCTR := ctr;
+          fIVCTRState := ctrUsed;
+          inc(fIVCTR.ctr);
+        end else
+        if fIVReplayAttackCheck=repMandatory then
+          raise ESynCrypto.CreateUTF8('%.DecryptPKCS7: IVCTR is not handled '+
+             'on encryption',[self]) else begin
+          fIVCTRState := ctrNotused;
+          if fIVHistoryDec.Depth=0 then
+            SetIVHistory(64); // naive but efficient fallback
+        end else
+        if IsEqual(TAESBlock(ctr),TAESBlock(fIVCTR)) then
+          inc(fIVCTR.ctr) else
+          raise ESynCrypto.CreateUTF8('%.DecryptPKCS7: wrong IVCTR %/% %/% -> '+
+           'potential replay attack',[self,ctr.magic,fIVCTR.magic,ctr.ctr,fIVCTR.ctr]);
+    end;
     fIV := PAESBlock(Input)^;
+    if (fIVHistoryDec.Depth>0) and not fIVHistoryDec.Add(fIV) then
+      raise ESynCrypto.CreateUTF8('%.DecryptPKCS7: duplicated IV=% -> '+
+        'potential replay attack',[self,AESBlockToShortString(fIV)]);
     dec(InputLen,AESBlockSize);
     ivsize := AESBlockSize;
   end else
@@ -7138,14 +7541,22 @@ end;
 function TAESAbstract.DecryptPKCS7Buffer(Input: Pointer; InputLen: integer;
   IVAtBeginning: boolean): RawByteString;
 var ivsize,padding: integer;
+    tmp: array[0..1023] of AnsiChar;
+    P: PAnsiChar;
 begin
   DecryptLen(InputLen,ivsize,Input,IVAtBeginning);
-  SetString(result,nil,InputLen);
-  Decrypt(@PByteArray(Input)^[ivsize],pointer(result),InputLen);
-  padding := ord(result[InputLen]); // result[1..len]
+  if InputLen<sizeof(tmp) then
+    P := @tmp else begin
+    SetString(result,nil,InputLen);
+    P := pointer(result);
+  end;
+  Decrypt(@PByteArray(Input)^[ivsize],P,InputLen);
+  padding := ord(P[InputLen-1]); // result[1..len]
   if padding>AESBlockSize then
     result := '' else
-    SetLength(result,InputLen-padding);
+    if P=@tmp then
+      SetString(result,P,InputLen-padding) else
+      SetLength(result,InputLen-padding); // fast in-place resize
 end;
 
 function TAESAbstract.DecryptPKCS7(const Input: RawByteString;
@@ -7165,7 +7576,23 @@ begin
   padding := result[len-1]; // result[0..len-1]
   if padding>AESBlockSize then
     result := nil else
-    SetLength(result,len-padding);
+    SetLength(result,len-padding); // fast in-place resize
+end;
+
+function TAESAbstract.MACSetNonce(const aKey: THash256; aAssociated: pointer;
+  aAssociatedLen: integer): boolean;
+begin
+  result := false;
+end;
+
+function TAESAbstract.MACGetLast(out aCRC: THash256): boolean;
+begin
+  result := false;
+end;
+
+function TAESAbstract.MACCheckError(aEncrypted: pointer; Count: cardinal): boolean;
+begin
+  result := false;
 end;
 
 class function TAESAbstract.SimpleEncrypt(const Input,Key: RawByteString;
@@ -7199,6 +7626,13 @@ end;
 function TAESAbstract.Clone: TAESAbstract;
 begin
   result := TAESAbstractClass(ClassType).Create(fKey,fKeySize);
+  result.IVHistoryDepth := IVHistoryDepth;
+  result.IVReplayAttackCheck := IVReplayAttackCheck;
+end;
+
+function TAESAbstract.CloneEncryptDecrypt: TAESAbstract;
+begin
+  result := Clone;
 end;
 
 
@@ -7220,7 +7654,8 @@ end;
 
 procedure TAESAbstractSyn.DecryptInit;
 begin
-  if not AES.DecryptInit(fKey,fKeySize) then
+  if AES.DecryptInit(fKey,fKeySize) then
+    fAESInit := initDecrypt else
     raise ESynCrypto.Create(sAESException);
 end;
 
@@ -7234,36 +7669,23 @@ end;
 
 procedure TAESAbstractSyn.EncryptInit;
 begin
-  if not AES.EncryptInit(fKey,fKeySize) then
+  if AES.EncryptInit(fKey,fKeySize) then
+    fAESInit := initEncrypt else
     raise ESynCrypto.Create(sAESException);
 end;
 
-procedure TAESAbstractSyn.EncryptTrailer;
-var len: Cardinal;
+procedure TAESAbstractSyn.TrailerBytes;
 begin
-  len := fCount and (AESBlockSize-1);
-  if len<>0 then begin
+  fCount := fCount and (AESBlockSize-1);
+  if fCount<>0 then begin
+    if fAESInit<>initEncrypt then
+      EncryptInit;
     {$ifdef USEAESNI64}
     if TAESContext(AES.Context).AesNi then
       AesNiEncrypt(AES.Context,fCV,fCV) else
     {$endif USEAESNI64}
       AES.Encrypt(fCV,fCV);
-    XorBlockN(pointer(fIn),pointer(fOut),@fCV,len);
-  end;
-end;
-
-procedure TAESAbstractSyn.DecryptTrailer;
-var len: Cardinal;
-begin
-  len := fCount and (AESBlockSize-1);
-  if len<>0 then begin
-    EncryptInit;
-    {$ifdef USEAESNI64}
-    if TAESContext(AES.Context).AesNi then
-      AesNiEncrypt(AES.Context,fCV,fCV) else
-    {$endif USEAESNI64}
-      AES.Encrypt(fCV,fCV);
-    XorBlockN(pointer(fIn),pointer(fOut),@fCV,len);
+    XorBlockN(pointer(fIn),pointer(fOut),@fCV,fCount);
   end;
 end;
 
@@ -7274,20 +7696,22 @@ procedure TAESECB.Decrypt(BufIn, BufOut: pointer; Count: cardinal);
 var i: integer;
 begin
   inherited; // CV := IV + set fIn,fOut,fCount
-  DecryptInit;
+  if fAESInit<>initDecrypt then
+    DecryptInit;
   for i := 1 to Count shr 4 do begin
     AES.Decrypt(fIn^,fOut^);
     inc(fIn);
     inc(fOut);
   end;
-  DecryptTrailer;
+  TrailerBytes;
 end;
 
 procedure TAESECB.Encrypt(BufIn, BufOut: pointer; Count: cardinal);
 var i: integer;
 begin
   inherited; // CV := IV + set fIn,fOut,fCount
-  EncryptInit;
+  if fAESInit<>initEncrypt then
+    EncryptInit;
   for i := 1 to Count shr 4 do begin
     {$ifdef USEAESNI64}
     if TAESContext(AES.Context).AesNi then
@@ -7297,7 +7721,7 @@ begin
     inc(fIn);
     inc(fOut);
   end;
-  EncryptTrailer;
+  TrailerBytes;
 end;
 
 
@@ -7309,7 +7733,8 @@ var i: integer;
 begin
   inherited; // CV := IV + set fIn,fOut,fCount
   if Count>=AESBlockSize then begin
-    DecryptInit;
+    if fAESInit<>initDecrypt then
+      DecryptInit;
     for i := 1 to Count shr 4 do begin
       tmp := fIn^;
       AES.Decrypt(fIn^,fOut^);
@@ -7319,14 +7744,15 @@ begin
       inc(fOut);
     end;
   end;
-  DecryptTrailer;
+  TrailerBytes;
 end;
 
 procedure TAESCBC.Encrypt(BufIn, BufOut: pointer; Count: cardinal);
 var i: integer;
 begin
   inherited; // CV := IV + set fIn,fOut,fCount
-  EncryptInit;
+  if fAESInit<>initEncrypt then
+    EncryptInit;
   for i := 1 to Count shr 4 do begin
     XorBlock16(pointer(fIn),pointer(fOut),pointer(@fCV));
     {$ifdef USEAESNI64}
@@ -7338,7 +7764,15 @@ begin
     inc(fIn);
     inc(fOut);
   end;
-  EncryptTrailer;
+  TrailerBytes;
+end;
+
+
+{ TAESAbstractEncryptOnly }
+
+function TAESAbstractEncryptOnly.CloneEncryptDecrypt: TAESAbstract;
+begin
+  result := self;
 end;
 
 
@@ -7347,8 +7781,6 @@ end;
 {$ifdef USEAESNI32}
 procedure AesNiTrailer; // = TAESAbstractSyn.EncryptTrailer from AES-NI asm
 asm // eax=TAESContext ecx=len xmm7=CV esi=BufIn edi=BufOut
-    and    ecx,15
-    jz     @0
     call   AesNiEncryptXmm7 // = AES.Encrypt(fCV,fCV)
     lea    edx,[eax].TAESContext.buf
     movdqu [edx],xmm7
@@ -7358,8 +7790,6 @@ asm // eax=TAESContext ecx=len xmm7=CV esi=BufIn edi=BufOut
     inc    edx
     stosb
     loop   @s
-    ret
-@0: db $f3
 end;
 {$endif}
 
@@ -7367,8 +7797,8 @@ procedure TAESCFB.Decrypt(BufIn, BufOut: pointer; Count: cardinal);
 var i: integer;
     tmp: TAESBlock;
 begin
-  if not AES.Initialized then
-    EncryptInit; // CFB mode = only Encrypt -> allow prepare the key once
+  if fAESInit<>initEncrypt then
+    EncryptInit;
   {$ifdef USEAESNI32}
   if TAESContext(AES.Context).AesNi then
   asm
@@ -7383,18 +7813,21 @@ begin
     push   ecx
     shr    ecx,4
     jz     @z
-@s: call   AesNiEncryptXmm7
+@s: call   AesNiEncryptXmm7       // AES.Encrypt(fCV,fCV)
     movdqu xmm0,dqword ptr [esi]
+    movdqa xmm1,xmm0
     pxor   xmm0,xmm7
-    movdqu xmm7,dqword ptr [esi]
-    movdqu dqword ptr [edi],xmm0
+    movdqa xmm7,xmm1              // fCV := fIn
+    movdqu dqword ptr [edi],xmm0  // fOut := fIn xor fCV
     dec    ecx
     lea    esi,[esi+16]
     lea    edi,[edi+16]
     jnz    @s
 @z: pop    ecx
+    and    ecx,15
+    jz     @0
     call   AesNiTrailer
-    pop    edi
+@0: pop    edi
     pop    esi
   end else
   {$endif} begin
@@ -7411,15 +7844,15 @@ begin
       inc(fIn);
       inc(fOut);
     end;
-    EncryptTrailer;
+    TrailerBytes;
   end;
 end;
 
 procedure TAESCFB.Encrypt(BufIn, BufOut: pointer; Count: cardinal);
 var i: integer;
 begin
-  if not AES.Initialized then
-    EncryptInit; // CFB mode = only Encrypt -> allow prepare the key once
+  if fAESInit<>initEncrypt then
+    EncryptInit; 
   {$ifdef USEAESNI32}
   if TAESContext(AES.Context).AesNi then
   asm
@@ -7434,17 +7867,19 @@ begin
     push   ecx
     shr    ecx,4
     jz     @z
-@s: call   AesNiEncryptXmm7
+@s: call   AesNiEncryptXmm7       // AES.Encrypt(fCV,fCV)
     movdqu xmm0,dqword ptr [esi]
     pxor   xmm7,xmm0
-    movdqu dqword ptr [edi],xmm7
+    movdqu dqword ptr [edi],xmm7  // fOut := fIn xor fCV
     dec    ecx
     lea    esi,[esi+16]
     lea    edi,[edi+16]
     jnz    @s
 @z: pop    ecx
+    and    ecx,15
+    jz     @0
     call   AesNiTrailer
-    pop    edi
+@0: pop    edi
     pop    esi
   end else
   {$endif} begin
@@ -7460,7 +7895,284 @@ begin
       inc(fIn);
       inc(fOut);
     end;
-    EncryptTrailer;
+    TrailerBytes;
+  end;
+end;
+
+
+{ TAESAbstractAEAD }
+
+function TAESAbstractAEAD.MACSetNonce(const aKey: THash256; aAssociated: pointer;
+  aAssociatedLen: integer): boolean;
+begin
+  // safe seed for plain text crc, before AES encryption
+  // from TECDHEProtocol.SetKey, aKey is a CTR to avoid replay attacks
+  fMACKey.plain := THash128Rec(aKey).Lo;
+  XorBlock16(@fMACKey.plain,@THash128Rec(aKey).Hi);
+  // neutral seed for encrypted crc, to check for errors, with no compromission
+  if (aAssociated<>nil) and (aAssociatedLen>0) then
+    crc128c(aAssociated,aAssociatedLen,fMACKey.encrypted) else
+    FillcharFast(fMACKey.encrypted,sizeof(THash128),255);
+  result := true;
+end;
+
+function TAESAbstractAEAD.MACGetLast(out aCRC: THash256): boolean;
+begin
+  // encrypt the plain text crc, to perform message authentication and integrity
+  AES.Encrypt(fMAC.plain,THash128Rec(aCRC).Lo);
+  // store the encrypted text crc, to check for errors, with no compromission
+  THash128Rec(aCRC).Hi := fMAC.encrypted;
+  result := true;
+end;
+
+function TAESAbstractAEAD.MACCheckError(aEncrypted: pointer; Count: cardinal): boolean;
+var crc: THash128;
+begin
+  result := false;
+  if (Count<32) or (Count and 15<>0) then
+    exit;
+  crc := fMACKey.encrypted;
+  crcblocks(@crc,aEncrypted,Count shr 4-2);
+  result := IsEqual(crc,PHash128(@PByteArray(aEncrypted)[Count-sizeof(crc)])^);
+end;
+
+
+{ TAESCFBCRC }
+
+procedure TAESCFBCRC.Decrypt(BufIn, BufOut: pointer; Count: cardinal);
+var i: integer;
+    tmp: TAESBlock;
+begin
+  if Count=0 then
+    exit;
+  fMAC := fMACKey; // reuse the same key until next MACSetNonce()
+  if fAESInit<>initEncrypt then
+    EncryptInit;
+  {$ifdef USEAESNI32}
+  if TAESContext(AES.Context).AesNi and (Count and (AESBlockSize-1)=0) then
+  asm
+    push   ebx
+    push   esi
+    push   edi
+    mov    ebx,self
+    mov    esi,BufIn
+    mov    edi,BufOut
+    movdqu xmm7,dqword ptr [ebx].TAESCFBCRC.fIV
+@s: lea    eax,[ebx].TAESCFBCRC.fMAC.encrypted
+    mov    edx,esi
+    call   crcblock // using SSE4.2 or fast tables
+    lea    eax,[ebx].TAESCFBCRC.AES
+    call   AesNiEncryptXmm7       // AES.Encrypt(fCV,fCV)
+    movdqu xmm0,dqword ptr [esi]
+    movdqa xmm1,xmm0
+    pxor   xmm0,xmm7
+    movdqa xmm7,xmm1              // fCV := fIn
+    movdqu dqword ptr [edi],xmm0  // fOut := fIn xor fCV
+    lea    eax,[ebx].TAESCFBCRC.fMAC.plain
+    mov    edx,edi
+    call   crcblock
+    sub    dword ptr [Count],16
+    lea    esi,[esi+16]
+    lea    edi,[edi+16]
+    ja     @s
+@z: pop    edi
+    pop    esi
+    pop    ebx
+  end else
+  {$endif} begin
+    inherited; // CV := IV + set fIn,fOut,fCount
+    for i := 1 to Count shr 4 do begin
+      tmp := fIn^;
+      crcblock(@fMAC.encrypted,pointer(fIn)); // fIn may be = fOut
+      {$ifdef USEAESNI64}
+      if TAESContext(AES.Context).AesNi then
+        AesNiEncrypt(AES.Context,fCV,fCV) else
+      {$endif USEAESNI64}
+        AES.Encrypt(fCV,fCV);
+      XorBlock16(pointer(fIn),pointer(fOut),pointer(@fCV));
+      fCV := tmp;
+      crcblock(@fMAC.plain,pointer(fOut));
+      inc(fIn);
+      inc(fOut);
+    end;
+    TrailerBytes;
+    with fMAC do // includes trailing bytes to the plain crc
+      PCardinal(@plain)^ := crc32c(PCardinal(@plain)^,pointer(fOut),fCount);
+  end;
+end;
+
+procedure TAESCFBCRC.Encrypt(BufIn, BufOut: pointer; Count: cardinal);
+var i: integer;
+begin
+  if Count=0 then
+    exit;
+  fMAC := fMACKey; // reuse the same key until next MACSetNonce()
+  if fAESInit<>initEncrypt then
+    EncryptInit;
+  {$ifdef USEAESNI32}
+  if TAESContext(AES.Context).AesNi and (Count and (AESBlockSize-1)=0) then
+  asm
+    push   ebx
+    push   esi
+    push   edi
+    mov    ebx,self
+    mov    esi,BufIn
+    mov    edi,BufOut
+    movdqu xmm7,dqword ptr [ebx].TAESCFBCRC.fIV
+@s: lea    eax,[ebx].TAESCFBCRC.fMAC.plain
+    mov    edx,esi
+    call   crcblock
+    lea    eax,[ebx].TAESCFBCRC.AES
+    call   AesNiEncryptXmm7       // AES.Encrypt(fCV,fCV)
+    movdqu xmm0,dqword ptr [esi]
+    pxor   xmm7,xmm0
+    movdqu dqword ptr [edi],xmm7  // fOut := fIn xor fCV
+    lea    eax,[ebx].TAESCFBCRC.fMAC.encrypted
+    mov    edx,edi
+    call   crcblock
+    sub    dword ptr [Count],16
+    lea    esi,[esi+16]
+    lea    edi,[edi+16]
+    ja     @s
+    pop    edi
+    pop    esi
+    pop    ebx
+  end else
+  {$endif} begin
+    inherited; // CV := IV + set fIn,fOut,fCount
+    for i := 1 to Count shr 4 do begin
+      {$ifdef USEAESNI64}
+      if TAESContext(AES.Context).AesNi then
+        AesNiEncrypt(AES.Context,fCV,fCV) else
+      {$endif USEAESNI64}
+        AES.Encrypt(fCV,fCV);
+      crcblock(@fMAC.plain,pointer(fIn)); // fOut may be = fIn
+      XorBlock16(pointer(fIn),pointer(fOut),pointer(@fCV));
+      fCV := fOut^;
+      crcblock(@fMAC.encrypted,pointer(fOut));
+      inc(fIn);
+      inc(fOut);
+    end;
+    TrailerBytes;
+    with fMAC do // includes trailing bytes to the plain crc
+      PCardinal(@plain)^ := crc32c(PCardinal(@plain)^,pointer(fIn),fCount);
+  end;
+end;
+
+
+{ TAESOFBCRC }
+
+procedure TAESOFBCRC.Decrypt(BufIn, BufOut: pointer; Count: cardinal);
+var i: integer;
+begin
+  if Count=0 then
+    exit;
+  fMAC := fMACKey; // reuse the same key until next MACSetNonce()
+  if fAESInit<>initEncrypt then
+    EncryptInit;
+  {$ifdef USEAESNI32}
+  if TAESContext(AES.Context).AesNi and (Count and (AESBlockSize-1)=0) then
+  asm
+    push   ebx
+    push   esi
+    push   edi
+    mov    ebx,self
+    mov    esi,BufIn
+    mov    edi,BufOut
+    movdqu xmm7,dqword ptr [ebx].TAESOFBCRC.fIV
+@s: lea    eax,[ebx].TAESOFBCRC.fMAC.encrypted
+    mov    edx,esi
+    call   crcblock
+    lea    eax,[ebx].TAESOFBCRC.AES
+    call   AesNiEncryptXmm7       // AES.Encrypt(fCV,fCV)
+    movdqu xmm0,dqword ptr [esi]
+    pxor   xmm7,xmm0
+    movdqu dqword ptr [edi],xmm0  // fOut := fIn xor fCV
+    lea    eax,[ebx].TAESOFBCRC.fMAC.plain
+    mov    edx,edi
+    call   crcblock
+    sub    dword ptr [Count],16
+    lea    esi,[esi+16]
+    lea    edi,[edi+16]
+    ja     @s
+    pop    edi
+    pop    esi
+    pop    ebx
+  end else
+  {$endif} begin
+    inherited Encrypt(BufIn,BufOut,Count); // CV := IV + set fIn,fOut,fCount
+    for i := 1 to Count shr 4 do begin
+      {$ifdef USEAESNI64}
+      if TAESContext(AES.Context).AesNi then
+        AesNiEncrypt(AES.Context,fCV,fCV) else
+      {$endif USEAESNI64}
+        AES.Encrypt(fCV,fCV);
+      crcblock(@fMAC.encrypted,pointer(fIn)); // fOut may be = fIn
+      XorBlock16(pointer(fIn),pointer(fOut),pointer(@fCV));
+      crcblock(@fMAC.plain,pointer(fOut));
+      inc(fIn);
+      inc(fOut);
+    end;
+    TrailerBytes;
+    with fMAC do // includes trailing bytes to the plain crc
+      PCardinal(@plain)^ := crc32c(PCardinal(@plain)^,pointer(fOut),fCount);
+  end;
+end;
+
+procedure TAESOFBCRC.Encrypt(BufIn, BufOut: pointer; Count: cardinal);
+var i: integer;
+begin
+  if Count=0 then
+    exit;
+  fMAC := fMACKey; // reuse the same key until next MACSetNonce()
+  if fAESInit<>initEncrypt then
+    EncryptInit;
+  {$ifdef USEAESNI32}
+  if TAESContext(AES.Context).AesNi and (Count and (AESBlockSize-1)=0) then
+  asm
+    push   ebx
+    push   esi
+    push   edi
+    mov    ebx,self
+    mov    esi,BufIn
+    mov    edi,BufOut
+    movdqu xmm7,dqword ptr [ebx].TAESOFBCRC.fIV
+@s: lea    eax,[ebx].TAESOFBCRC.fMAC.plain
+    mov    edx,esi
+    call   crcblock
+    lea    eax,[ebx].TAESOFBCRC.AES
+    call   AesNiEncryptXmm7       // AES.Encrypt(fCV,fCV)
+    movdqu xmm0,dqword ptr [esi]
+    pxor   xmm7,xmm0
+    movdqu dqword ptr [edi],xmm0  // fOut := fIn xor fCV
+    lea    eax,[ebx].TAESOFBCRC.fMAC.encrypted
+    mov    edx,edi
+    call   crcblock
+    sub    dword ptr [Count],16
+    lea    esi,[esi+16]
+    lea    edi,[edi+16]
+    ja     @s
+    pop    edi
+    pop    esi
+    pop    ebx
+  end else
+  {$endif} begin
+    inherited Encrypt(BufIn,BufOut,Count); // CV := IV + set fIn,fOut,fCount
+    for i := 1 to Count shr 4 do begin
+      {$ifdef USEAESNI64}
+      if TAESContext(AES.Context).AesNi then
+        AesNiEncrypt(AES.Context,fCV,fCV) else
+      {$endif USEAESNI64}
+        AES.Encrypt(fCV,fCV);
+      crcblock(@fMAC.plain,pointer(fIn)); // fOut may be = fIn
+      XorBlock16(pointer(fIn),pointer(fOut),pointer(@fCV));
+      crcblock(@fMAC.encrypted,pointer(fOut));
+      inc(fIn);
+      inc(fOut);
+    end;
+    TrailerBytes;
+    with fMAC do // includes trailing bytes to the plain crc
+      PCardinal(@plain)^ := crc32c(PCardinal(@plain)^,pointer(fIn),fCount);
   end;
 end;
 
@@ -7475,8 +8187,8 @@ end;
 procedure TAESOFB.Encrypt(BufIn, BufOut: pointer; Count: cardinal);
 var i: integer;
 begin
-  if not AES.Initialized then
-    EncryptInit; // OFB mode = only Encrypt -> allow prepare the key once
+  if fAESInit<>initEncrypt then
+    EncryptInit; 
   {$ifdef USEAESNI32}
   if TAESContext(AES.Context).AesNi then
   asm
@@ -7491,17 +8203,19 @@ begin
     push   ecx
     shr    ecx,4
     jz     @z
-@s: call   AesNiEncryptXmm7
+@s: call   AesNiEncryptXmm7       // AES.Encrypt(fCV,fCV)
     movdqu xmm0,dqword ptr [esi]
     pxor   xmm0,xmm7
-    movdqu dqword ptr [edi],xmm0
+    movdqu dqword ptr [edi],xmm0  // fOut := fIn xor fCV
     dec    ecx
     lea    esi,[esi+16]
     lea    edi,[edi+16]
     jnz    @s
 @z: pop    ecx
+    and    ecx,15
+    jz     @0
     call   AesNiTrailer
-    pop    edi
+@0: pop    edi
     pop    esi
   end else
   {$endif} begin
@@ -7516,7 +8230,7 @@ begin
       inc(fIn);
       inc(fOut);
     end;
-    EncryptTrailer;
+    TrailerBytes;
   end;
 end;
 
@@ -7532,8 +8246,8 @@ procedure TAESCTR.Encrypt(BufIn, BufOut: pointer; Count: cardinal);
 var i,j: integer;
     tmp: TAESBlock;
 begin
-  if not AES.Initialized then
-    EncryptInit; // CTR mode = only Encrypt -> allow prepare the key once
+  if fAESInit<>initEncrypt then
+    EncryptInit;
   inherited; // CV := IV + set fIn,fOut,fCount
   for i := 1 to Count shr 4 do begin
     {$ifdef USEAESNI64}
@@ -7772,22 +8486,30 @@ end;
 {$endif MSWINDOWS}
 
 
+{ TAESLocked }
+
+constructor TAESLocked.Create;
+begin
+  inherited Create;
+  InitializeCriticalSection(fLock);
+end;
+
+destructor TAESLocked.Destroy;
+begin
+  inherited Destroy;
+  fAES.Done; // mandatory for Padlock - also fill AES buffer with 0 for safety
+  DeleteCriticalSection(fLock);
+end;
+
+
 { TAESPRNG }
 
 constructor TAESPRNG.Create(PBKDF2Rounds, ReseedAfterBytes: integer);
 begin
   inherited Create;
-  InitializeCriticalSection(fLock);
   fSeedPBKDF2Rounds := PBKDF2Rounds;
   fSeedAfterBytes := ReseedAfterBytes;
   Seed;
-end;
-
-destructor TAESPRNG.Destroy;
-begin
-  inherited Destroy;
-  fAES.Done; // mandatory for Padlock - also fill AES buffer with 0 for safety
-  DeleteCriticalSection(fLock);
 end;
 
 {$ifdef DELPHI5OROLDER} // not defined in SysUtils.pas
@@ -7815,6 +8537,28 @@ asm
 end;
 // https://software.intel.com/en-us/articles/intel-digital-random-number-generator-drng-software-implementation-guide
 {$endif}
+
+var
+  rs1: cardinal = 2654435761;
+  rs2: cardinal = 668265263;
+  rs3: cardinal = 3266489917;
+
+function Random32: cardinal;
+begin
+  {$ifdef CPUINTEL}
+  if cfRAND in CpuFeatures then begin
+    result := RdRand32;
+    exit;
+  end;
+  {$endif}
+  result := rs1;
+  rs1 := ((result and -2)shl 12) xor (((result shl 13)xor result)shr 19);
+  result := rs2;
+  rs2 := ((result and -8)shl 4) xor (((result shl 2)xor result)shr 25);
+  result := rs3;
+  rs3 := ((result and -16)shl 17) xor (((result shl 3)xor result)shr 11);
+  result := rs1 xor rs2 xor result;
+end;
 
 class function TAESPRNG.GetEntropy(Len: integer): RawByteString;
 var time: Int64;
@@ -7931,6 +8675,17 @@ begin
     paranoid := PByteArray(@entropy)^[i and (sizeof(entropy)-1)];
     p^[i] := p^[i] xor Xor32Byte[(cardinal(p^[i]) shl 5) xor paranoid] xor paranoid;
   end;
+  {$ifdef CPUINTEL}
+  if not (cfRAND in CpuFeatures) then
+  {$endif}
+    repeat // seed Random32 function above
+      QueryPerformanceCounter(time);
+      rs1 := rs1 xor time;
+      rs2 := rs2 xor time;
+      rs3 := rs3 xor time;
+    until (rs1>1) and (rs2>7) and (rs3>15);
+  for i := 1 to time and 15 do
+    Random32; // warm up
 end;
 
 procedure TAESPRNG.Seed;
@@ -7946,8 +8701,7 @@ begin
     PBKDF2_HMAC_SHA256(pass,salt,fSeedPBKDF2Rounds+(ord(salt[1]) and 7),key);
     EnterCriticalSection(fLock);
     fAES.EncryptInit(key,256);
-    crc128c(pointer(salt),SALTLEN,THash128(fCTR));
-    fCTR[0] := fCTR[0] xor fTotalBytes;
+    crcblock(@fCTR,pointer(salt));
     fAES.Encrypt(TAESBlock(fCTR),TAESBlock(fCTR));
     fBytesSinceSeed := 0;
     LeaveCriticalSection(fLock);
@@ -7985,6 +8739,11 @@ begin
   inc(fBytesSinceSeed,SizeOf(Block));
   inc(fTotalBytes,SizeOf(Block));
   LeaveCriticalSection(fLock);
+end;
+
+procedure TAESPRNG.FillRandom(out Buffer: THash256);
+begin
+  FillRandom(@Buffer,sizeof(Buffer));
 end;
 
 procedure TAESPRNG.FillRandom(Buffer: pointer; Len: integer);
@@ -8032,7 +8791,7 @@ end;
 function TAESPRNG.RandomPassword(Len: integer): RawUTF8;
 const CHARS: array[0..137] of AnsiChar =
   'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'+
-  'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789;.:()?%!=+*/@#';
+  'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789$.:()?%!-+*/@#';
 var i,j: integer;
     haspunct: boolean;
 begin
@@ -8126,6 +8885,20 @@ begin
     inc(PByte(src),BufferBytes);
   end;
   XorBlockN(src,@Buffer,pointer(tmp),BufferBytes);
+end;
+
+class function TAESPRNG.AFUnsplit(const Split: RawByteString;
+  StripesCount: integer): RawByteString;
+var len: cardinal;
+begin
+  result := '';
+  len := length(Split);
+  if (len=0) or (len mod cardinal(StripesCount+1)<>0) then
+    exit;
+  len := len div cardinal(StripesCount);
+  SetLength(result,len);
+  if not AFUnsplit(Split,pointer(result)^,len) then
+    result := '';
 end;
 
 class procedure TAESPRNG.Fill(Buffer: pointer; Len: integer);
@@ -8274,6 +9047,147 @@ begin
 end;
 
 
+{ THash128History }
+
+procedure THash128History.Init(size: integer);
+begin
+  Depth := size;
+  SetLength(Previous,size);
+  Count := 0;
+  Index := 0;
+end;
+
+function HashFound(P: PHash128_; Count: integer; const h: THash128_): boolean;
+var first: PtrUInt;
+    i: integer;
+begin // fast O(n) brute force search
+  if P<>nil then begin
+    result := true;
+    first := h.A64;
+    for i := 1 to Count do
+      {$ifdef CPU64}
+      if (P^.A64=first) and (P^.B64=h.B64) then
+      {$else}
+      if (P^.A=first) and (P^.B=h.B) and (P^.C=h.C) and (P^.D=h.D) then
+      {$endif}
+        exit else
+        inc(P);
+  end;
+  result := false;
+end;
+
+function THash128History.Exists(const hash: THash128): boolean;
+begin
+  result := HashFound(pointer(Previous),Count,THash128_(hash));
+end;
+
+function THash128History.Add(const hash: THash128): boolean;
+begin
+  result := not HashFound(pointer(Previous),Count,THash128_(hash));
+  if not result then
+    exit;
+  Previous[Index].hash := hash;
+  inc(Index);
+  if Index>=Depth then
+    Index := 0;
+  if Count<Depth then
+    inc(Count);
+end;
+
+
+{ TProtocolNone }
+
+function TProtocolNone.ProcessHandshake(
+  const MsgIn: RawUTF8; out MsgOut: RawUTF8): TProtocolResult;
+begin
+  result := sprUnsupported;
+end;
+
+function TProtocolNone.Decrypt(const aEncrypted: RawByteString;
+  out aPlain: RawByteString): TProtocolResult;
+begin
+  aPlain := aEncrypted;
+  result := sprSuccess;
+end;
+
+procedure TProtocolNone.Encrypt(const aPlain: RawByteString;
+  out aEncrypted: RawByteString);
+begin
+  aEncrypted := aPlain;
+end;
+
+function TProtocolNone.Clone: IProtocol;
+begin
+  result := TProtocolNone.Create;
+end;
+
+
+{ TProtocolAES }
+
+constructor TProtocolAES.Create(aClass: TAESAbstractClass; const aKey;
+  aKeySize: cardinal; aIVReplayAttackCheck: TAESIVReplayAttackCheck);
+begin
+  inherited Create;
+  fAES[false] := aClass.Create(aKey,aKeySize);
+  fAES[false].IVReplayAttackCheck := aIVReplayAttackCheck;
+  fAES[true] := fAES[false].Clone;
+end;
+
+constructor TProtocolAES.CreateFrom(aAnother: TProtocolAES);
+begin
+  inherited Create;
+  fAES[false] := aAnother.fAES[false].Clone;
+  fAES[true] := fAES[false].Clone;
+end;
+
+destructor TProtocolAES.Destroy;
+begin
+  fAES[false].Free;
+  fAES[true].Free;
+  inherited Destroy;
+end;
+
+function TProtocolAES.ProcessHandshake(
+  const MsgIn: RawUTF8; out MsgOut: RawUTF8): TProtocolResult;
+begin
+  result := sprUnsupported;
+end;
+
+function TProtocolAES.Decrypt(const aEncrypted: RawByteString;
+  out aPlain: RawByteString): TProtocolResult;
+begin
+  fSafe.Lock;
+  try
+    try
+      aPlain := fAES[false].DecryptPKCS7(aEncrypted,true);
+      if aPlain='' then
+        result := sprBadRequest else
+        result := sprSuccess;
+    except
+      result := sprInvalidMAC;
+    end;
+  finally
+    fSafe.UnLock;
+  end;
+end;
+
+procedure TProtocolAES.Encrypt(const aPlain: RawByteString;
+  out aEncrypted: RawByteString);
+begin
+  fSafe.Lock;
+  try
+    aEncrypted := fAES[true].EncryptPKCS7(aPlain,true);
+  finally
+    fSafe.UnLock;
+  end;
+end;
+
+function TProtocolAES.Clone: IProtocol;
+begin
+ result := TProtocolAESClass(ClassType).CreateFrom(self);
+end;
+
+
 initialization
   ComputeAesStaticTables;
 {$ifdef USEPADLOCK}
@@ -8283,6 +9197,7 @@ initialization
   assert(sizeof(TAESContext)=AESContextSize);
   assert(sizeof(TSHAContext)=SHAContextSize);
   assert(sizeof(TAESFullHeader)=AESBlockSize);
+  assert(sizeof(THash128_)=sizeof(THash128));
 
 finalization
 {$ifdef USEPADLOCKDLL}
