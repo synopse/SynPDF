@@ -9411,7 +9411,7 @@ begin
     E.NeedPen;
      if not E.Canvas.FNewPath and not Moved then
       E.Canvas.MoveToI(Position.X,Position.Y);
-    with PEMRARC(R)^ do  begin
+    with PEMRARCTO(R)^ do  begin
    // E.Canvas.LineTo(ptlStart.x, ptlStart.y);
     E.Canvas.ARCI(rclBox.CenterPoint.x, rclBox.CenterPoint.y,
       rclBox.Width, rclBox.Height,
