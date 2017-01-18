@@ -8,7 +8,7 @@ unit SynCrypto;
 (*
     This file is part of Synopse framework.
 
-    Synopse framework. Copyright (C) 2016 Arnaud Bouchez
+    Synopse framework. Copyright (C) 2017 Arnaud Bouchez
       Synopse Informatique - http://synopse.info
 
   *** BEGIN LICENSE BLOCK *****
@@ -27,7 +27,7 @@ unit SynCrypto;
 
   The Initial Developer of the Original Code is Arnaud Bouchez.
 
-  Portions created by the Initial Developer are Copyright (C) 2016
+  Portions created by the Initial Developer are Copyright (C) 2017
   the Initial Developer. All Rights Reserved.
 
   Contributor(s):
@@ -279,7 +279,7 @@ uses
 {$endif}
 {$ifdef FPC}
   SynFPCLinux,
-{$endif}
+{$endif FPC}
 {$endif}
   SysUtils,
 {$ifndef LVCL}
@@ -302,8 +302,11 @@ const
   AESContextSize = 276 {$ifdef USEPADLOCK}+sizeof(pointer){$endif};
   /// hide all SHA Context complex code
   SHAContextSize = 108;
-  /// standard AES block size (in bytes) during cypher/uncypher
-  AESBlockSize = 16;
+  /// power of two for a standard AES block size during cypher/uncypher
+  // - to be used as 1 shl AESBlockShift or 1 shr AESBlockShift for fast div/mod
+  AESBlockShift = 4;
+  /// bit mask for fast modulo of AES block size
+  AESBlockMod = 15;
   /// maximum AES key size (in bytes)
   AESKeySize = 256 div 8;
 
@@ -319,22 +322,11 @@ type
   /// 256 bits memory block for maximum AES key storage
   TAESKey = THash256;
 
-  /// buffer matching a THash128, for fast comparison
-  // - as used e.g. in THash128History
-  THash128_ = packed record
-    case integer of
-    0: (A,B,C,D: cardinal);
-    1: (A64,B64: Int64);
-    2: (hash: THash128);
-  end;
-
-  PHash128_ = ^THash128_;
-
   /// stores an array of THash128 to check for their unicity
   // - used e.g. to implement TAESAbstract.IVHistoryDepth property
   THash128History = {$ifndef UNICODE}object{$else}record{$endif}
   private
-    Previous: array of THash128_;
+    Previous: array of THash128Rec;
     Index: integer;
   public
     /// how many THash128 values can be stored
@@ -418,6 +410,7 @@ type
   // cryptographic pseudorandom number generator (CSPRNG), nonce and ctr
   // ensuring 96 bits of entropy
   // - DecryptPKCS7 will decode and ensure that the IV has an increasing CTR
+  // - memory size matches an TAESBlock on purpose, for direct encryption
   TAESIVCTR = packed record
     /// 8 bytes of random value
     nonce: Int64;
@@ -873,7 +866,7 @@ var
   // - as used internally by AESIVCtrEncryptDecrypt() function
   // - you may customize this secret for your own project, but be aware that
   // it will affect all TAESAbstract instances, so should match on all ends
-  AESIVCTR_KEY: array[0..3] of cardinal = (
+  AESIVCTR_KEY: TBlock128 = (
     $ce5d5e3e, $26506c65, $568e0092, $12cce480);
 
 /// global shared function which may encrypt or decrypt any 128-bit block
@@ -904,7 +897,7 @@ type
   // - it would use fast hardware AES-NI or Padlock opcodes, if available
   TAESPRNG = class(TAESLocked)
   protected
-    fCTR: array[0..3] of cardinal; // we use a litle-endian CTR
+    fCTR: THash128Rec; // we use a litle-endian CTR
     fBytesSinceSeed: integer;
     fSeedAfterBytes: integer;
     fSeedPBKDF2Rounds: integer;
@@ -1096,7 +1089,8 @@ type
     procedure Full(Buffer: pointer; Len: integer; out Digest: TSHA256Digest);
   end;
 
-  THash64 = array[0..15] of cardinal;
+  /// 64 bytes buffer, used internally during HMAC process
+  TByte64 = array[0..15] of cardinal;
   
   TMD5In = array[0..15] of cardinal;
   PMD5In = ^TMD5In;
@@ -1104,7 +1098,7 @@ type
   TMD5Digest = THash128;
   PMD5Digest = ^TMD5Digest;
   PMD5 = ^TMD5;
-  TMD5Buf = array[0..3] of cardinal;
+  TMD5Buf = TBlock128;
 
   /// handle MD5 hashing
   TMD5 = {$ifndef UNICODE}object{$else}record{$endif}
@@ -1157,6 +1151,7 @@ type
 
 {$A-} { packed memory structure }
   /// internal header for storing our AES data with salt and CRC
+  // - memory size matches an TAESBlock on purpose, for direct encryption
   TAESFullHeader = {$ifndef UNICODE}object{$else}record{$endif}
   public
     /// Len before compression (if any)
@@ -1233,7 +1228,7 @@ type
 /// overwrite a 64-byte buffer with zeros
 // - may be used to cleanup stack-allocated content
 // ! ... finally FillZero(temp); end;
-procedure FillZero(var hash: THash64); overload;
+procedure FillZero(var hash: TByte64); overload;
 
 /// overwrite a SHA-1 digest buffer with zeros
 // - may be used to cleanup stack-allocated content
@@ -1256,12 +1251,16 @@ type
   // - you may use HMAC_SHA1() overloaded functions for one-step process
   THMAC_SHA1 = {$ifndef UNICODE}object{$else}record{$endif}
   private
-    step7data: THash64;
+    step7data: TByte64;
     sha: TSHA1;
   public
     /// prepare the HMAC authentication with the supplied key
+    // - content of this record is stateless, so you can prepare a HMAC for a
+    // key using Init, then copy this THMAC_SHA1 instance to a local variable,
+    // and use this local thread-safe copy for actual HMAC computing
     procedure Init(key: pointer; keylen: integer);
     /// call this method for each continuous message block
+    // - iterate over all message blocks, then call Done to retrieve the HMAC
     procedure Update(msg: pointer; msglen: integer);
     /// computes the HMAC of all supplied message according to the key
     procedure Done(out result: TSHA1Digest; NoInit: boolean=false);
@@ -1312,17 +1311,26 @@ type
   // - you may use HMAC_SHA256() overloaded functions for one-step process
   THMAC_SHA256 = {$ifndef UNICODE}object{$else}record{$endif}
   private
-    step7data: THash64;
+    step7data: TByte64;
     sha: TSha256;
   public
     /// prepare the HMAC authentication with the supplied key
+    // - content of this record is stateless, so you can prepare a HMAC for a
+    // key using Init, then copy this THMAC_SHA256 instance to a local variable,
+    // and use this local thread-safe copy for actual HMAC computing
     procedure Init(key: pointer; keylen: integer);
     /// call this method for each continuous message block
+    // - iterate over all message blocks, then call Done to retrieve the HMAC
     procedure Update(msg: pointer; msglen: integer); overload;
     /// call this method for each continuous message block
+    // - iterate over all message blocks, then call Done to retrieve the HMAC
     procedure Update(const msg: THash128); overload;
     /// call this method for each continuous message block
+    // - iterate over all message blocks, then call Done to retrieve the HMAC
     procedure Update(const msg: THash256); overload;
+    /// call this method for each continuous message block
+    // - iterate over all message blocks, then call Done to retrieve the HMAC
+    procedure Update(const msg: RawByteString); overload;
     /// computes the HMAC of all supplied message according to the key
     procedure Done(out result: TSHA256Digest; NoInit: boolean=false);
   end;
@@ -1371,14 +1379,20 @@ type
   THMAC_CRC32C = {$ifndef UNICODE}object{$else}record{$endif}
   private
     seed: cardinal;
-    step7data: THash64;
+    step7data: TByte64;
   public
     /// prepare the HMAC authentication with the supplied key
+    // - consider using Compute to re-use a prepared HMAC instance 
     procedure Init(key: pointer; keylen: integer);
     /// call this method for each continuous message block
+    // - iterate over all message blocks, then call Done to retrieve the HMAC
     procedure Update(msg: pointer; msglen: integer);
     /// computes the HMAC of all supplied message according to the key
     function Done: cardinal;
+    /// computes the HMAC of the supplied message according to the key
+    // - similar to a single Update(msg,msglen) followed by Done, but re-usable
+    // - this method is thread-safe
+    function Compute(msg: pointer; msglen: integer): cardinal;
   end;
 
   /// points to HMAC message authentication code using crc32c as hash function
@@ -1562,7 +1576,7 @@ procedure XorBlock(p: PIntegerArray; Count, Cod: integer);
 // compress (e.g. as outStream for TAESWriteStream)
 // - Stream compatible (with updated Index)
 // - used in AES() and TAESWriteStream
-procedure XorOffset(p: pByte; Index,Count: integer);
+procedure XorOffset(P: PByteArray; Index,Count: integer);
 
 /// fast XOR Cypher changing by Count value
 // - Compression compatible, since the XOR value is always the same, the
@@ -1688,6 +1702,255 @@ type
   /// class-reference type (metaclass) of an AES secure protocol
   TProtocolAESClass = class of TProtocolAES;
 
+{$ifndef NOVARIANTS}
+type
+  /// JWT Registered Claims, as defined in RFC 7519
+  // - known registered claims have a specific name and behavior, and will be
+  // handled automatically by TJWTAbstract
+  // - corresponding field names are iss,sub,aud,exp,nbf,iat,jti - as defined
+  // in JWT_CLAIMS_TEXT constant
+  // - jrcIssuer identifies the server which originated the token, e.g.
+  // "iss":"https://example.auth0.com/" when the token comes from Auth0 servers
+  // - jrcSubject is the application-specific extent which is protected by this
+  // JWT, e.g. an User or Resource ID, e.g. "sub":"auth0|57fe9f1bad961aa242870e"
+  // - jrcAudience claims that the token is valid only for one or several
+  // resource servers (may be a JSON string or a JSON array of strings), e.g.
+  // "aud":["https://myshineyfileserver.sometld"] - TJWTAbstract will check
+  // that the supplied "aud" field does match an expected list of identifiers
+  // - jrcExpirationTime contains the Unix timestamp in seconds after which
+  // the token must not be granted access, e.g. "exp":1477474667
+  // - jrcNotBefore contains the Unix timestamp in seconds before which the
+  // token must not be granted access, e.g. "nbf":147745438
+  // - jrcIssuedAt contains the Unix timestamp in seconds when the token was
+  // generated, e.g. "iat":1477438667
+  // - jrcJwtID provides a unique identifier for the JWT, to prevent any replay;
+  // TJWTAbstract.Compute will set an obfuscated TSynUniqueIdentifierGenerator
+  // hexadecimal value  
+  TJWTClaim = (
+    jrcIssuer, jrcSubject, jrcAudience, jrcExpirationTime, jrcNotBefore,
+    jrcIssuedAt, jrcJwtID);
+  /// set of JWT Registered Claims, as in TJWTAbstract.Claims
+  TJWTClaims = set of TJWTClaim;
+
+  /// Exception raised when running JSON Web Tokens
+  EJWTException = class(ESynException);
+
+  /// TJWTContent.result codes after TJWTAbstract.Verify method call
+  TJWTResult = (jwtValid,
+    jwtNoToken, jwtWrongFormat, jwtInvalidAlgorithm, jwtInvalidPayload,
+    jwtUnexpectedClaim, jwtMissingClaim, jwtUnknownAudience,
+    jwtExpired, jwtNotBeforeFailed, jwtInvalidIssuedAt, jwtInvalidID,
+    jwtInvalidSignature);
+  //// set of TJWTContent.result codes
+  TJWTResults = set of TJWTResult;
+
+  /// JWT decoded content, as processed by TJWTAbstract
+  // - optionally cached in memory
+  TJWTContent = record
+    /// store latest Verify() result
+    result: TJWTResult;
+    /// set of registered claims, as stored in the JWT payload
+    claims: TJWTClaims;
+    /// match TJWTAbstract.Audience[] indexes for reg[jrcAudience]
+    audience: set of 0..15;
+    /// registered claims UTF-8 values, as stored in the JWT payload
+    // - e.g. reg[jrcSubject]='1234567890' and reg[jrcIssuer]='' for
+    // $ {"sub": "1234567890","name": "John Doe","admin": true}
+    reg: array[TJWTClaim] of RawUTF8;
+    /// unregistered public/private claim values, as stored in the JWT payload
+    // - registered claims will be available from reg[], not in this field
+    // - e.g. data.U['name']='John Doe' and data.B['admin']=true for
+    // $ {"sub": "1234567890","name": "John Doe","admin": true}
+    data: TDocVariantData;
+  end;
+  /// pointer to a JWT decoded content, as processed by TJWTAbstract
+  PJWTContent = ^TJWTContent;
+  /// used to store a list of JWT decoded content
+  // - as used e.g. by TJWTAbstract cache
+  TJWTContentDynArray = array of TJWTContent;
+
+  /// available options for TJWTAbstract process
+  TJWTOption = (joHeaderParse, joAllowUnexpectedClaims, joAllowUnexpectedAudience,
+    joNoJwtIDGenerate, joNoJwtIDCheck, joDoubleInData);
+  /// store options for TJWTAbstract process
+  TJWTOptions = set of TJWTOption;
+
+  /// abstract parent class for implementing JSON Web Tokens
+  // - to represent claims securely between two parties, as defined in industry
+  // standard @http://tools.ietf.org/html/rfc7519
+  // - you should never use this abstract class directly, but e.g. TJWTHS256
+  // or TJWTES256 (as defined in SynEcc.pas) inherited classes
+  // - for security reasons, one inherited class is implementing a single
+  // algorithm, as is very likely to be the case on production: you pickup one
+  // "alg", then you stick to it; if your server needs more than one algorithm
+  // for compatibility reasons, use a separate key and URI - this design will
+  // reduce attack surface, and fully avoid weaknesses as described in
+  // @https://auth0.com/blog/critical-vulnerabilities-in-json-web-token-libraries
+  // and @http://tools.ietf.org/html/rfc7518#section-8.5
+  TJWTAbstract = class(TSynPersistent)
+  protected
+    fAlgorithm: RawUTF8;
+    fHeader: RawUTF8;
+    fHeaderB64: RawUTF8;
+    fClaims: TJWTClaims;
+    fOptions: TJWTOptions;
+    fAudience: TRawUTF8DynArray;
+    fExpirationSeconds: integer;
+    fIDGen: TSynUniqueIdentifierGenerator;
+    fCacheTimeoutSeconds: integer;
+    fCacheResults: TJWTResults;
+    fCache: TSynDictionary;
+    procedure SetCacheTimeoutSeconds(value: integer); virtual;
+    function PayloadToJSON(const DataNameValue: array of const;
+      const Issuer, Subject, Audience: RawUTF8; NotBefore: TDateTime;
+      ExpirationMinutes: cardinal): RawUTF8; virtual;
+    procedure Parse(const Token: RawUTF8; var JWT: TJWTContent;
+      out payload64: RawUTF8; out signature: RawByteString); virtual;
+    function CheckAgainstActualTimestamp(var JWT: TJWTContent): boolean;
+    // abstract methods which should be overriden by inherited classes
+    function ComputeSignature(const payload64: RawUTF8): RawUTF8; virtual; abstract;
+    procedure CheckSignature(var JWT: TJWTContent; const payload64: RawUTF8;
+      const signature: RawByteString); virtual; abstract;
+  public
+    /// initialize the JWT processing instance
+    // - the supplied set of claims are expected to be defined in the JWT payload
+    // - aAudience are the allowed values for the jrcAudience claim
+    // - aExpirationMinutes is the deprecation time for the jrcExpirationTime claim
+    // - aIDIdentifier and aIDObfuscationKey are passed to a
+    // TSynUniqueIdentifierGenerator instance used for jrcJwtID claim
+    constructor Create(const aAlgorithm: RawUTF8; aClaims: TJWTClaims;
+      const aAudience: array of RawUTF8; aExpirationMinutes: integer;
+      aIDIdentifier: TSynUniqueIdentifierProcess; aIDObfuscationKey: RawUTF8); reintroduce;
+    /// finalize the instance
+    destructor Destroy; override;
+    /// compute a new JWT for a given payload
+    // - here the data payload is supplied as Name,Value pairs - by convention,
+    // some registered Names (see TJWTClaim) should not be used here, and private
+    // claims names are expected to be short (typically 3 chars), or an URI
+    // - depending on the instance Claims, you should also specify associated
+    // Issuer, Subject, Audience and NotBefore values; expected 'exp', 'nbf',
+    // 'iat', 'jti' claims will also be generated and included, if needed
+    // - you can override the aExpirationMinutes value as defined in Create()
+    // - Audience is usually a single text, serialized as a JSON string, but
+    // if the value supplied starts with '[', it is expected to be an array
+    // of text values, already serialized as a JSON array of strings
+    // - this method is thread-safe
+    function Compute(const DataNameValue: array of const; const Issuer: RawUTF8='';
+      const Subject: RawUTF8=''; const Audience: RawUTF8=''; NotBefore: TDateTime=0;
+      ExpirationMinutes: integer=0): RawUTF8;
+    /// compute a HTTP Authorization header containing a JWT for a given payload
+    // - just a wrapper around Compute(), returned the HTTP header value:
+    // $ Authorization: <HttpAuthorizationHeader>
+    // - this method is thread-safe
+    function ComputeAuthorizationHeader(const DataNameValue: array of const;
+      const Issuer: RawUTF8=''; const Subject: RawUTF8=''; const Audience: RawUTF8='';
+      NotBefore: TDateTime=0; ExpirationMinutes: integer=0): RawUTF8;
+    /// check a JWT value, and its signature
+    // - will validate all expected Claims, and the associated signature
+    // - verification state is returned in JWT.result (jwtValid for a valid JWT),
+    // together with all parsed payload information
+    // - supplied JWT is transmitted e.g. in HTTP header:
+    // $ Authorization: Bearer <Token>
+    // - this method is thread-safe
+    procedure Verify(const Token: RawUTF8; out JWT: TJWTContent);
+    /// check a HTTP Authorization header value as JWT, and its signature
+    // - will validate all expected Claims, and the associated signature
+    // - verification state is returned in JWT.result (jwtValid for a valid JWT),
+    // together with all parsed payload information
+    // - expect supplied HttpAuthorizationHeader as transmitted in HTTP header:
+    // $ Authorization: <HttpAuthorizationHeader>
+    // - this method is thread-safe
+    function VerifyAuthorizationHeader(const HttpAuthorizationHeader: RawUTF8;
+      out JWT: TJWTContent): boolean; overload;
+  published
+    /// the name of the algorithm used by this instance (e.g. 'HS256')
+    property Algorithm: RawUTF8 read fAlgorithm;
+    /// allow to tune the Verify and Compute method process
+    property Options: TJWTOptions read fOptions write fOptions;
+    /// the JWT Registered Claims, as implemented by this instance
+    // - Verify() method will ensure all claims are defined in the payload,
+    // then fill TJWTContent.reg[] with all corresponding values
+    property Claims: TJWTClaims read fClaims;
+    /// the period, in seconds, for the "exp" claim 
+    property ExpirationSeconds: integer read fExpirationSeconds;
+    /// the audience string values associated with this instance
+    // - will be checked by Verify() method, and set in TJWTContent.audience
+    property Audience: TRawUTF8DynArray read fAudience;
+    /// delay of optional in-memory cache of Verify() TJWTContent
+    // - equals 0 by default, i.e. cache is disabled
+    // - may be useful if the signature process is very resource consumming
+    // (e.g. for TJWTES256 or even HMAC-SHA256) - see also CacheResults
+    // - each time this property is assigned, internal cache content is flushed
+    property CacheTimeoutSeconds: integer read fCacheTimeoutSeconds
+      write SetCacheTimeoutSeconds;
+    /// which TJWTContent.result should be stored in in-memory cache
+    // - default is [jwtValid] but you may also include jwtInvalidSignature
+    // if signature checking uses a lot of resources
+    // - only used if CacheTimeoutSeconds>0
+    property CacheResults: TJWTResults read fCacheResults write fCacheResults;
+  end;
+
+  /// class-reference type (metaclass) of a JWT algorithm process
+  TJWTAbstractClass = class of TJWTAbstract;
+
+  /// implements JSON Web Tokens using 'none' algorithm
+  // - as defined in @http://tools.ietf.org/html/rfc7518 paragraph 3.6
+  // - you should never use this weak algorithm in production, unless your
+  // communication is already secured by other means, and use JWT as cookies
+  TJWTNone = class(TJWTAbstract)
+  protected
+    function ComputeSignature(const payload64: RawUTF8): RawUTF8; override;
+    procedure CheckSignature(var JWT: TJWTContent; const payload64: RawUTF8;
+      const signature: RawByteString); override;
+  public
+    /// initialize the JWT processing using the 'none' algorithm
+    // - the supplied set of claims are expected to be defined in the JWT payload
+    // - aAudience are the allowed values for the jrcAudience claim
+    // - aExpirationMinutes is the deprecation time for the jrcExpirationTime claim
+    // - aIDIdentifier and aIDObfuscationKey are passed to a
+    // TSynUniqueIdentifierGenerator instance used for jrcJwtID claim
+    constructor Create(aClaims: TJWTClaims; const aAudience: array of RawUTF8;
+      aExpirationMinutes: integer=0; aIDIdentifier: TSynUniqueIdentifierProcess=0;
+      aIDObfuscationKey: RawUTF8=''); reintroduce;
+  end;
+
+  /// implements JSON Web Tokens using 'HS256' (HMAC SHA-256) algorithm
+  // - as defined in @http://tools.ietf.org/html/rfc7518 paragraph 3.2
+  // - our HMAC SHA-256 implementation used is thread safe, and very fast
+  // (x86: 3us, x64: 2.5us) so cache is not needed
+  TJWTHS256 = class(TJWTAbstract)
+  protected
+    fHmacPrepared: THMAC_SHA256;
+    function ComputeSignature(const payload64: RawUTF8): RawUTF8; override;
+    procedure CheckSignature(var JWT: TJWTContent; const payload64: RawUTF8;
+      const signature: RawByteString); override;
+  public
+    /// initialize the JWT processing using 'HS256' (HMAC SHA-256) algorithm
+    // - the supplied set of claims are expected to be defined in the JWT payload
+    // - the supplied secret text will be used to compute HMAC authentication,
+    // directly if aSecretPBKDF2Rounds=0, or via PBKDF2_HMAC_SHA256 if some
+    // number of rounds are specified
+    // - aAudience are the allowed values for the jrcAudience claim
+    // - aExpirationMinutes is the deprecation time for the jrcExpirationTime claim
+    // - aIDIdentifier and aIDObfuscationKey are passed to a
+    // TSynUniqueIdentifierGenerator instance used for jrcJwtID claim
+    constructor Create(const aSecret: RawUTF8; aSecretPBKDF2Rounds: integer;
+      aClaims: TJWTClaims; const aAudience: array of RawUTF8; aExpirationMinutes: integer=0;
+      aIDIdentifier: TSynUniqueIdentifierProcess=0; aIDObfuscationKey: RawUTF8=''); reintroduce;
+    /// finalize the instance
+    destructor Destroy; override;
+  end;
+
+const
+  /// the text field names of the registerd claims, as defined by RFC 7519
+  // - see TJWTClaim enumeration and TJWTClaims set
+  // - RFC standard expects those to be case-sensitive
+  JWT_CLAIMS_TEXT: array[TJWTClaim] of RawUTF8 = (
+    'iss','sub','aud','exp','nbf','iat','jti');
+
+function ToText(res: TJWTResult): PShortString; overload;
+
+{$endif NOVARIANTS}
 
 function ToText(chk: TAESIVReplayAttackCheck): PShortString; overload;
 function ToText(res: TProtocolResult): PShortString; overload;
@@ -1704,7 +1967,6 @@ function ToText(chk: TAESIVReplayAttackCheck): PShortString;
 begin
   result := GetEnumName(TypeInfo(TAESIVReplayAttackCheck),ord(chk));
 end;
-
 
 
 {$ifdef USEPADLOCK}
@@ -1878,13 +2140,13 @@ type
 
 // helper types for better code generation
 type
-  TWA4  = packed array[0..3] of cardinal;     // AES block as array of cardinal
+  TWA4  = TBlock128;     // AES block as array of cardinal
   TAWk  = packed array[0..4*(AESMaxRounds+1)-1] of cardinal; // Key as array of cardinal
   PWA4  = ^TWA4;
   PAWk  = ^TAWk;
 
 const
-  RCon: array[0..9] of cardinal= ($01,$02,$04,$08,$10,$20,$40,$80,$1b,$36);
+  RCon: array[0..9] of cardinal = ($01,$02,$04,$08,$10,$20,$40,$80,$1b,$36);
 
 // AES computed tables
 var
@@ -1892,11 +2154,11 @@ var
   Td0, Td1, Td2, Td3, Te0, Te1, Te2, Te3: array[byte] of cardinal;
   Xor32Byte: TByteArray absolute Td0;  // 2^13=$2000=8192 bytes of XOR tables ;)
 
-procedure ComputeAesStaticTables; // will compute 4.5 KB of constant tables
+procedure ComputeAesStaticTables;
 var i, x,y: byte;
     pow,log: array[byte] of byte;
     c: cardinal;
-begin
+begin // 835 bytes of code to compute 4.5 KB of tables
   x := 1;
   for i := 0 to 255 do begin
     pow[i] := x;
@@ -1994,10 +2256,10 @@ asm // rcx=s, rdx=d
   mov rcx,rdi
   {$endif win64}
   mov eax,[rcx]; mov r8d,[rcx+4]; mov r9d,[rcx+8]; mov r10d,[rcx+12]
-  bswap eax;     bswap r8d;       bswap r9d;       bswap r10d
+  bswap eax; bswap r8d; bswap r9d; bswap r10d
   mov [rdx],eax; mov [rdx+4],r8d; mov [rdx+8],r9d; mov [rdx+12],r10d
   mov eax,[rcx+16]; mov r8d,[rcx+20]; mov r9d,[rcx+24]; mov r10d,[rcx+28]
-  bswap eax;        bswap r8d;        bswap r9d;        bswap r10d
+  bswap eax; bswap r8d; bswap r9d; bswap r10d
   mov [rdx+16],eax; mov [rdx+20],r8d; mov [rdx+24],r9d; mov [rdx+28],r10d
 end;
 
@@ -2024,6 +2286,16 @@ end;
 
 procedure bswap256(s,d: PIntegerArray);
 begin
+  {$ifdef FPC} // use fast platform-specific function
+  d[0] := SwapEndian(s[0]);
+  d[1] := SwapEndian(s[1]);
+  d[2] := SwapEndian(s[2]);
+  d[3] := SwapEndian(s[3]);
+  d[4] := SwapEndian(s[4]);
+  d[5] := SwapEndian(s[5]);
+  d[6] := SwapEndian(s[6]);
+  d[7] := SwapEndian(s[7]);
+  {$else}
   d[0] := bswap32(s[0]);
   d[1] := bswap32(s[1]);
   d[2] := bswap32(s[2]);
@@ -2032,15 +2304,24 @@ begin
   d[5] := bswap32(s[5]);
   d[6] := bswap32(s[6]);
   d[7] := bswap32(s[7]);
+  {$endif FPC}
 end;
 
 procedure bswap160(s,d: PIntegerArray);
 begin
+  {$ifdef FPC} // use fast platform-specific function
+  d[0] := SwapEndian(s[0]);
+  d[1] := SwapEndian(s[1]);
+  d[2] := SwapEndian(s[2]);
+  d[3] := SwapEndian(s[3]);
+  d[4] := SwapEndian(s[4]);
+  {$else}
   d[0] := bswap32(s[0]);
   d[1] := bswap32(s[1]);
   d[2] := bswap32(s[2]);
   d[3] := bswap32(s[3]);
   d[4] := bswap32(s[4]);
+  {$endif FPC}
 end;
 
 {$endif CPUINTEL}
@@ -2125,17 +2406,17 @@ begin
   FillCharFast(hash,sizeof(hash),0);
 end;
 
-procedure FillZero(var hash: THash64);
+procedure FillZero(var hash: TByte64);
 begin
   FillCharFast(hash,sizeof(hash),0);
 end;
 
 procedure THMAC_SHA1.Init(key: pointer; keylen: integer);
 var i: integer;
-    k0,k0xorIpad: THash64;
+    k0,k0xorIpad: TByte64;
 begin
   FillZero(k0);
-  if keylen>64 then
+  if keylen>sizeof(k0) then
     sha.Full(key,keylen,PSHA1Digest(@k0)^) else
     MoveFast(key^,k0,keylen);
   for i := 0 to 15 do
@@ -2143,7 +2424,7 @@ begin
   for i := 0 to 15 do
     step7data[i] := k0[i] xor $5c5c5c5c;
   sha.Init;
-  sha.Update(@k0xorIpad,64);
+  sha.Update(@k0xorIpad,sizeof(k0xorIpad));
   FillZero(k0);
   FillZero(k0xorIpad);
 end;
@@ -2156,7 +2437,7 @@ end;
 procedure THMAC_SHA1.Done(out result: TSHA1Digest; NoInit: boolean);
 begin
   sha.Final(result);
-  sha.Update(@step7data,64);
+  sha.Update(@step7data,sizeof(step7data));
   sha.Update(@result,sizeof(result));
   sha.Final(result,NoInit);
   FillZero(step7data);
@@ -2204,6 +2485,7 @@ begin
     mac.Done(tmp,true);
     XorMemory(@result,@tmp,sizeof(result));
   end;
+  FillcharFast(mac,sizeof(mac),0);
   FillcharFast(first,sizeof(first),0);
   FillZero(tmp);
 end;
@@ -2213,10 +2495,10 @@ end;
 
 procedure THMAC_SHA256.Init(key: pointer; keylen: integer);
 var i: integer;
-    k0,k0xorIpad: THash64;
+    k0,k0xorIpad: TByte64;
 begin
   FillZero(k0);
-  if keylen>64 then
+  if keylen>sizeof(k0) then
     sha.Full(key,keylen,PSHA256Digest(@k0)^) else
     MoveFast(key^,k0,keylen);
   for i := 0 to 15 do
@@ -2224,7 +2506,7 @@ begin
   for i := 0 to 15 do
     step7data[i] := k0[i] xor $5c5c5c5c;
   sha.Init;
-  sha.Update(@k0xorIpad,64);
+  sha.Update(@k0xorIpad,sizeof(k0xorIpad));
   FillZero(k0);
   FillZero(k0xorIpad);
 end;
@@ -2244,10 +2526,15 @@ begin
   sha.Update(@msg,sizeof(msg));
 end;
 
+procedure THMAC_SHA256.Update(const msg: RawByteString);
+begin
+  sha.Update(pointer(msg),length(msg));
+end;
+
 procedure THMAC_SHA256.Done(out result: TSHA256Digest; NoInit: boolean);
 begin
   sha.Final(result);
-  sha.Update(@step7data,64);
+  sha.Update(@step7data,sizeof(step7data));
   sha.Update(@result,sizeof(result));
   sha.Final(result,NoInit);
   if not NoInit then
@@ -2345,21 +2632,21 @@ end;
 procedure HMAC_CRC256C(key,msg: pointer; keylen,msglen: integer; out result: THash256);
 var i: integer;
     h1,h2: cardinal;
-    k0,k0xorIpad,step7data: THash64;
+    k0,k0xorIpad,step7data: TByte64;
 begin
   FillCharFast(k0,sizeof(k0),0);
-  if keylen>64 then
+  if keylen>sizeof(k0) then
     crc256c(key,keylen,PHash256(@k0)^) else
     MoveFast(key^,k0,keylen);
   for i := 0 to 15 do
     k0xorIpad[i] := k0[i] xor $36363636;
   for i := 0 to 15 do
     step7data[i] := k0[i] xor $5c5c5c5c;
-  h1 := crc32c(crc32c(0,@k0xorIpad,64),msg,msglen);
-  h2 := crc32c(crc32c(h1,@k0xorIpad,64),msg,msglen);
+  h1 := crc32c(crc32c(0,@k0xorIpad,sizeof(k0xorIpad)),msg,msglen);
+  h2 := crc32c(crc32c(h1,@k0xorIpad,sizeof(k0xorIpad)),msg,msglen);
   crc256cmix(h1,h2,@result);
-  h1 := crc32c(crc32c(0,@step7data,64),@result,sizeof(result));
-  h2 := crc32c(crc32c(h1,@step7data,64),@result,sizeof(result));
+  h1 := crc32c(crc32c(0,@step7data,sizeof(step7data)),@result,sizeof(result));
+  h2 := crc32c(crc32c(h1,@step7data,sizeof(step7data)),@result,sizeof(result));
   crc256cmix(h1,h2,@result);
   FillCharFast(k0,sizeof(k0),0);
   FillCharFast(k0xorIpad,sizeof(k0),0);
@@ -2381,17 +2668,17 @@ end;
 
 procedure THMAC_CRC32C.Init(key: pointer; keylen: integer);
 var i: integer;
-    k0,k0xorIpad: THash64;
+    k0,k0xorIpad: TByte64;
 begin
   FillCharFast(k0,sizeof(k0),0);
-  if keylen>64 then
+  if keylen>sizeof(k0) then
     crc256c(key,keylen,PHash256(@k0)^) else
     MoveFast(key^,k0,keylen);
   for i := 0 to 15 do
     k0xorIpad[i] := k0[i] xor $36363636;
   for i := 0 to 15 do
     step7data[i] := k0[i] xor $5c5c5c5c;
-  seed := crc32c(0,@k0xorIpad,64);
+  seed := crc32c(0,@k0xorIpad,sizeof(k0xorIpad));
   FillCharFast(k0,sizeof(k0),0);
   FillCharFast(k0xorIpad,sizeof(k0xorIpad),0);
 end;
@@ -2403,8 +2690,13 @@ end;
 
 function THMAC_CRC32C.Done: cardinal;
 begin
-  result := crc32c(seed,@step7data,64);
-  FillZero(step7data);
+  result := crc32c(seed,@step7data,sizeof(step7data));
+  FillcharFast(self,sizeof(self),0);
+end;
+
+function THMAC_CRC32C.Compute(msg: pointer; msglen: integer): cardinal;
+begin
+  result := crc32c(crc32c(seed,msg,msglen),@step7data,sizeof(step7data));
 end;
 
 function HMAC_CRC32C(key,msg: pointer; keylen,msglen: integer): cardinal;
@@ -4222,7 +4514,7 @@ begin
 //  assert(PtrUInt(pIn) and $F=0); // must be 16 bytes aligned
   if ctx.ViaCtx<>nil then begin
     if Count<>0 then begin
-      Count := Count*AESBlockSize;
+      Count := Count shl AESBlockShift;
       if doEncrypt then
         padlock_aes_encrypt(ctx.ViaCtx,pIn,pOut,Count) else
         padlock_aes_decrypt(ctx.ViaCtx,pIn,pOut,Count);
@@ -4320,7 +4612,7 @@ begin
   if {$ifdef USEPADLOCK} padlock_available or {$endif}
      {$ifdef USEAESNI} (cfAESNI in CpuFeatures) or {$endif}
     (SystemInfo.dwNumberOfProcessors<=1) or // (DebugHook<>0) or
-    (Count<((512*1024) div AESBlockSize)) then begin // not needed below 512 KB
+    (Count<((512*1024) shr AESBlockShift)) then begin // not needed below 512 KB
     DoBlocks(bIn,bOut,bIn,bOut,Count,doEncrypt);
     exit;
   end;
@@ -4347,8 +4639,8 @@ begin
     DoBlocks(pIn,pOut,pIn,pOut,Count,doEncrypt); // remaining blocks
   {$ifopt C+}
   inc(Count,nOne*nThread);
-  assert(PtrUInt(pIn)-PtrUInt(bIn)=cardinal(Count)*AESBlockSize);
-  assert(PtrUInt(pOut)-PtrUInt(bOut)=cardinal(Count)*AESBlockSize);
+  assert(PtrUInt(pIn)-PtrUInt(bIn)=cardinal(Count)shl AESBlockShift);
+  assert(PtrUInt(pOut)-PtrUInt(bOut)=cardinal(Count)shl AESBlockShift);
   {$endif}
   bIn := pIn;
   bOut := pOut;
@@ -4369,8 +4661,9 @@ procedure Sha256ExpandMessageBlocks(W, Buf: PIntegerArray);
 {$ifdef AES_PASCAL}
 var i: integer;
 begin
-  for i := 0 to 15 do
-    W[i]:= bswap32(Buf[i]);
+  // bswap256() instead of "for i := 0 to 15 do W[i]:= bswap32(Buf[i]);"
+  bswap256(@Buf[0],@W[0]);
+  bswap256(@Buf[8],@W[8]);
   for i := 16 to 63 do
     W[i] := (((W[i-2]shr 17)or(W[i-2]shl 15))xor((W[i-2]shr 19)or(W[i-2]shl 13))
       xor (W[i-2]shr 10))+W[i-7]+(((W[i-15]shr 7)or(W[i-15]shl 25))
@@ -5696,7 +5989,7 @@ var n: integer;
 begin
   if (bIn=nil) or (bOut=nil) then exit;
   // 1. Init
-  n := Len div AESBlockSize;
+  n := Len shr AESBlockShift;
   if n<0 then exit else
   if n>0 then
     if (KeySize>4) and not Crypt.DoInit(Key,KeySize,Encrypt) then
@@ -5720,7 +6013,7 @@ begin
 {$endif}
   // 3. Last block, just XORed from Key
 //  assert(KeySize div 8>=AESBlockSize);
-  n := cardinal(Len) mod AESBlockSize;
+  n := cardinal(Len) and AESBlockMod;
   MoveFast(pIn^,pOut^,n); // pIn=pOut is tested in move()
   XorOffset(pointer(pOut),Len-n,n);
   Crypt.Done;
@@ -5728,7 +6021,7 @@ end;
 
 const TmpSize = 65536;
   // Tmp buffer for AESFull -> Xor Crypt is TmpSize-dependent / use XorBlock()
-      TmpSizeBlock = TmpSize div AESBlockSize;
+      TmpSizeBlock = TmpSize shr AESBlockShift;
 type
   TTmp = array[0..TmpSizeBlock-1] of TAESBlock;
 
@@ -5755,20 +6048,20 @@ begin
   end;
   getmem(buf,TmpSize);
   try
-    Last := Len mod AESBlockSize;
+    Last := Len and AESBlockMod;
     n := Len-Last;
     i := 0;
     while n>0 do begin // crypt/uncrypt all AESBlocks
       if n>TmpSize then
         b := TmpSize else
         b := n;
-      assert(b mod AESBlockSize=0);
+      assert(b and AESBlockMod=0);
       if KeySize=4 then begin
         MoveFast(buffer^,buf^,b);
         XorOffset(pointer(buf),i,b);
         inc(i,b);
       end else
-        Crypt.DoBlocks(buffer,buf,b div AESBlockSize,Encrypt);
+        Crypt.DoBlocks(buffer,buf,b shr AESBlockShift,Encrypt);
       Stream.Write(buf^,b);
       inc(PtrUInt(buffer),b);
       dec(n,b);
@@ -5861,9 +6154,9 @@ procedure DoBlock(BlockCount: integer);
 begin
   if BlockCount=0 then
     exit;
-  Read(Tmp,BlockCount*AESBlockSize);
+  Read(Tmp,BlockCount shl AESBlockShift);
   Crypt.DoBlocks(PAESBLock(Tmp),PAESBLock(Tmp),BlockCount,Encrypt);
-  Write(Tmp,BlockCount*AESBlockSize);
+  Write(Tmp,BlockCount shl AESBlockShift);
 end;
 var n, LastLen: cardinal;
     i: integer;
@@ -5873,7 +6166,7 @@ begin
   Tmp := nil;
   outStreamCreated := nil;
   Head.SourceLen := InLen;
-  nBlock := Head.SourceLen div AESBlockSize;
+  nBlock := Head.SourceLen shr AESBlockShift;
   if Encrypt and (OriginalLen<>0) then
     Head.OriginalLen := OriginalLen else
     Head.OriginalLen := InLen;
@@ -5922,10 +6215,10 @@ begin
           result := 0;
           exit;
         end;
-        LastLen := inLen mod AESBlockSize;
+        LastLen := inLen and AESBlockMod;
         if LastLen=0 then
-          SetOutLen(inLen+AESBlockSize) else
-          SetOutLen((nBlock+2)*AESBlockSize);
+          SetOutLen(inLen+sizeof(TAESBlock)) else
+          SetOutLen((nBlock+2)shl AESBlockShift);
         Head.SomeSalt := random(MaxInt);
         Head.HeaderCheck := Head.Calc(Key,KeySize);
         Crypt.Encrypt(TAESBlock(Head));
@@ -5941,7 +6234,7 @@ begin
             exit; // wrong key
           end;
           SetOutLen(SourceLen);
-          LastLen := SourceLen mod AESBlockSize;
+          LastLen := SourceLen and AESBlockMod;
         end;
         if LastLen<>0 then
           dec(nBlock); // the very last block is for the very last bytes
@@ -5961,12 +6254,12 @@ begin
       // 3. Last block
       if LastLen<>0 then
       if Encrypt then begin
-        FillcharFast(Last,AESBlockSize,0);
+        FillcharFast(Last,sizeof(TAESBlock),0);
         Read(@Last,LastLen);
         Crypt.Encrypt(Last);
-        Write(@Last,AESBlockSize);
+        Write(@Last,sizeof(TAESBlock));
       end else begin
-        Read(@Last,AESBlockSize);
+        Read(@Last,sizeof(TAESBlock));
         Crypt.Decrypt(Last);
         Write(@Last,LastLen);
       end;
@@ -6211,7 +6504,7 @@ end;
 procedure TAESWriteStream.Finish;
 begin
   if BufCount=0 then exit;
-  assert((BufCount<AESBlockSize) and AES.Initialized and not NoCrypt);
+  assert((BufCount<sizeof(TAESBlock)) and AES.Initialized and not NoCrypt);
   XorOffset(@Buf,DestSize,BufCount);
   Dest.Write(Buf,BufCount);
   BufCount := 0;
@@ -6239,21 +6532,21 @@ begin
   if not AES.Initialized then // if error in KeySize -> default fast XorOffset()
     XorOffset(@B,DestSize,Count) else begin
     if BufCount>0 then begin
-      Len := AESBlockSize-BufCount;
+      Len := sizeof(TAESBlock)-BufCount;
       if Len>Count then
         Len := Count;
       MoveFast(Buffer,Buf[BufCount],Len);
       inc(BufCount,Len);
-      if BufCount<AESBlockSize then
+      if BufCount<sizeof(TAESBlock) then
         exit;
       AES.Encrypt(Buf);
-      Dest.Write(Buf,AESBlockSize);
-      inc(DestSize,AESBlockSize);
+      Dest.Write(Buf,sizeof(TAESBlock));
+      inc(DestSize,sizeof(TAESBlock));
       Dec(Count,Len);
-      AES.DoBlocks(@B[Len],@B[Len],cardinal(Count) div AESBlockSize,true);
+      AES.DoBlocks(@B[Len],@B[Len],cardinal(Count) shr AESBlockShift,true);
     end else
-      AES.DoBlocks(@B,@B,cardinal(Count) div AESBlockSize,true);
-    BufCount := cardinal(Count) mod AESBlockSize;
+      AES.DoBlocks(@B,@B,cardinal(Count) shr AESBlockShift,true);
+    BufCount := cardinal(Count) and AESBlockMod;
     if BufCount<>0 then begin
       dec(Count,BufCount);
       MoveFast(B[Count],Buf[0],BufCount);
@@ -6287,32 +6580,10 @@ begin
   end;
 end;
 
-{$ifndef PUREPASCAL} // should be put outside XorOffset() for FPC :(
-procedure Xor64(PI: PIntegerArray; P: pByte; Count: integer);
-asm // eax=PI edx=P ecx=Count64
-  push ebx
-  push esi
-  shr ecx,3
-  jz @z
-@1:
-  mov ebx,[eax]
-  mov esi,[eax+4]
-  xor [edx],ebx
-  xor [edx+4],esi
-  dec ecx
-  lea eax,[eax+8]
-  lea edx,[edx+8]
-  jnz @1
-@z:
-  pop esi
-  pop ebx
-end;
-{$endif PUREPASCAL}
-
-procedure XorOffset(p: pByte; Index,Count: integer);
+procedure XorOffset(P: PByteArray; Index,Count: integer);
 // XorOffset: fast and simple Cypher using Index (=Position in Dest Stream):
 // Compression not OK -> apply after compress (e.g. TBZCompressor.withXor=true)
-var i, Len: integer;
+var Len: integer;
 begin
   if Count>0 then
   repeat
@@ -6320,26 +6591,15 @@ begin
     Len := $2000-Index;
     if Len>Count then
       Len := Count;
-    {$ifdef PUREPASCAL}
-    for i := 1 to Len do begin
-      p^ := p^ xor Xor32Byte[Index];
-      inc(p); inc(Index);
-    end;
-    {$else}
-    Xor64(@Xor32Byte[Index],p,Len);
-    inc(p,Len and -8); // -8=$FFFFFFF8
-    inc(Index,Len and -8);
-    for i := 1 to Len and 7 do begin
-      p^ := p^ xor Xor32Byte[Index];
-      inc(p); inc(Index);
-    end;
-    {$endif}
+    XorMemory(P,@Xor32Byte[Index],Len);
+    inc(P,Len);
+    inc(Index,Len);
     Dec(Count,Len);
   until Count=0;
 end;
 
 
-procedure XorConst(p: PIntegerArray; Count: integer);
+procedure XorConst(P: PIntegerArray; Count: integer);
 // XorConst: fast Cypher changing by Count value
 // (compression OK):
 var i: integer;
@@ -6347,14 +6607,14 @@ var i: integer;
 begin // 1 to 3 bytes may stay unencrypted: not relevant
   Code := integer(Td0[Count and $3FF]);
   for i := 1 to (Count shr 4) do begin
-     p^[0] := p^[0] xor Code;
-     p^[1] := p^[1] xor Code;
-     p^[2] := p^[2] xor Code;
-     p^[3] := p^[3] xor Code;
-     inc(PtrUInt(p),16);
+     P^[0] := P^[0] xor Code;
+     P^[1] := P^[1] xor Code;
+     P^[2] := P^[2] xor Code;
+     P^[3] := P^[3] xor Code;
+     inc(PtrUInt(P),16);
   end;
   for i := 0 to ((Count and 15)shr 2)-1 do // last 4 bytes blocs
-    p^[i] := p^[i] xor Code;
+    P^[i] := P^[i] xor Code;
 end;
 
 
@@ -7078,7 +7338,7 @@ begin
   t := bytes[0];
   Inc(bytes[0],len);
   if bytes[0]<t then
-    Inc(bytes[1]);  // 64 bit carry from low to high
+    Inc(bytes[1]);     // 64 bit carry from low to high
   t := 64-(t and 63);  // space available in in_ (at least 1)
   if t>len then begin
     MoveFast(p^,Pointer(PtrUInt(@in_)+64-t)^,len);
@@ -7509,18 +7769,18 @@ end;
 function TAESAbstract.EncryptPKCS7Length(InputLen: cardinal;
   IVAtBeginning: boolean): cardinal;
 begin
-  result := InputLen+AESBlockSize-(InputLen and (AESBlockSize-1));
+  result := InputLen+sizeof(TAESBlock)-(InputLen and AESBlockMod);
   if IVAtBeginning then
-    inc(Result,AESBlockSize);
+    inc(Result,sizeof(TAESBlock));
 end;
 
 function TAESAbstract.EncryptPKCS7Buffer(Input,Output: Pointer; InputLen,OutputLen: cardinal;
   IVAtBeginning: boolean): boolean;
 var padding, ivsize: cardinal;
 begin
-  padding := AESBlockSize-(InputLen and (AESBlockSize-1));
+  padding := sizeof(TAESBlock)-(InputLen and AESBlockMod);
   if IVAtBeginning then
-    ivsize := AESBlockSize else
+    ivsize := sizeof(TAESBlock) else
     ivsize := 0;
   if OutputLen<>ivsize+InputLen+padding then begin
     result := false;
@@ -7545,7 +7805,7 @@ procedure TAESAbstract.DecryptLen(var InputLen,ivsize: Integer;
   Input: pointer; IVAtBeginning: boolean);
 var ctr: TAESIVCTR;
 begin
-  if (InputLen<AESBlockSize) or (InputLen and (AESBlockSize-1)<>0) then
+  if (InputLen<sizeof(TAESBlock)) or (InputLen and AESBlockMod<>0) then
     raise ESynCrypto.CreateUTF8('%.DecryptPKCS7: Invalid InputLen=%',[self,InputLen]);
   if IVAtBeginning then begin
     if (fIVReplayAttackCheck<>repNoCheck) and (fIVCTRState<>ctrNotUsed) then begin
@@ -7572,8 +7832,8 @@ begin
     if (fIVHistoryDec.Depth>0) and not fIVHistoryDec.Add(fIV) then
       raise ESynCrypto.CreateUTF8('%.DecryptPKCS7: duplicated IV=% -> '+
         'potential replay attack',[self,AESBlockToShortString(fIV)]);
-    dec(InputLen,AESBlockSize);
-    ivsize := AESBlockSize;
+    dec(InputLen,sizeof(TAESBlock));
+    ivsize := sizeof(TAESBlock);
   end else
     ivsize := 0;
 end;
@@ -7592,7 +7852,7 @@ begin
   end;
   Decrypt(@PByteArray(Input)^[ivsize],P,InputLen);
   padding := ord(P[InputLen-1]); // result[1..len]
-  if padding>AESBlockSize then
+  if padding>sizeof(TAESBlock) then
     result := '' else
     if P=@tmp then
       SetString(result,P,InputLen-padding) else
@@ -7614,7 +7874,7 @@ begin
   SetLength(result,len);
   Decrypt(@PByteArray(Input)^[ivsize],pointer(result),len);
   padding := result[len-1]; // result[0..len-1]
-  if padding>AESBlockSize then
+  if padding>sizeof(TAESBlock) then
     result := nil else
     SetLength(result,len-padding); // fast in-place resize
 end;
@@ -7716,7 +7976,7 @@ end;
 
 procedure TAESAbstractSyn.TrailerBytes;
 begin
-  fCount := fCount and (AESBlockSize-1);
+  fCount := fCount and AESBlockMod;
   if fCount<>0 then begin
     if fAESInit<>initEncrypt then
       EncryptInit;
@@ -7772,7 +8032,7 @@ var i: integer;
     tmp: TAESBlock;
 begin
   inherited; // CV := IV + set fIn,fOut,fCount
-  if Count>=AESBlockSize then begin
+  if Count>=sizeof(TAESBlock) then begin
     if fAESInit<>initDecrypt then
       DecryptInit;
     for i := 1 to Count shr 4 do begin
@@ -7947,8 +8207,8 @@ function TAESAbstractAEAD.MACSetNonce(const aKey: THash256; aAssociated: pointer
 begin
   // safe seed for plain text crc, before AES encryption
   // from TECDHEProtocol.SetKey, aKey is a CTR to avoid replay attacks
-  fMACKey.plain := THash128Rec(aKey).Lo;
-  XorBlock16(@fMACKey.plain,@THash128Rec(aKey).Hi);
+  fMACKey.plain := THash256Rec(aKey).Lo;
+  XorBlock16(@fMACKey.plain,@THash256Rec(aKey).Hi);
   // neutral seed for encrypted crc, to check for errors, with no compromission
   if (aAssociated<>nil) and (aAssociatedLen>0) then
     crc128c(aAssociated,aAssociatedLen,fMACKey.encrypted) else
@@ -7959,9 +8219,9 @@ end;
 function TAESAbstractAEAD.MACGetLast(out aCRC: THash256): boolean;
 begin
   // encrypt the plain text crc, to perform message authentication and integrity
-  AES.Encrypt(fMAC.plain,THash128Rec(aCRC).Lo);
+  AES.Encrypt(fMAC.plain,THash256Rec(aCRC).Lo);
   // store the encrypted text crc, to check for errors, with no compromission
-  THash128Rec(aCRC).Hi := fMAC.encrypted;
+  THash256Rec(aCRC).Hi := fMAC.encrypted;
   result := true;
 end;
 
@@ -7969,7 +8229,7 @@ function TAESAbstractAEAD.MACCheckError(aEncrypted: pointer; Count: cardinal): b
 var crc: THash128;
 begin
   result := false;
-  if (Count<32) or (Count and 15<>0) then
+  if (Count<32) or (Count and AESBlockMod<>0) then
     exit;
   crc := fMACKey.encrypted;
   crcblocks(@crc,aEncrypted,Count shr 4-2);
@@ -7989,7 +8249,7 @@ begin
   if fAESInit<>initEncrypt then
     EncryptInit;
   {$ifdef USEAESNI32}
-  if TAESContext(AES.Context).AesNi and (Count and (AESBlockSize-1)=0) then
+  if TAESContext(AES.Context).AesNi and (Count and AESBlockMod=0) then
   asm
     push   ebx
     push   esi
@@ -8050,7 +8310,7 @@ begin
   if fAESInit<>initEncrypt then
     EncryptInit;
   {$ifdef USEAESNI32}
-  if TAESContext(AES.Context).AesNi and (Count and (AESBlockSize-1)=0) then
+  if TAESContext(AES.Context).AesNi and (Count and AESBlockMod=0) then
   asm
     push   ebx
     push   esi
@@ -8111,7 +8371,7 @@ begin
   if fAESInit<>initEncrypt then
     EncryptInit;
   {$ifdef USEAESNI32}
-  if TAESContext(AES.Context).AesNi and (Count and (AESBlockSize-1)=0) then
+  if TAESContext(AES.Context).AesNi and (Count and AESBlockMod=0) then
   asm
     push   ebx
     push   esi
@@ -8168,7 +8428,7 @@ begin
   if fAESInit<>initEncrypt then
     EncryptInit;
   {$ifdef USEAESNI32}
-  if TAESContext(AES.Context).AesNi and (Count and (AESBlockSize-1)=0) then
+  if TAESContext(AES.Context).AesNi and (Count and AESBlockMod=0) then
   asm
     push   ebx
     push   esi
@@ -8309,7 +8569,7 @@ begin
     inc(fIn);
     inc(fOut);
   end;
-  Count := Count and (AESBlockSize-1);
+  Count := Count and AESBlockMod;
   if Count<>0 then begin
     {$ifdef USEAESNI64}
     if TAESContext(AES.Context).AesNi then
@@ -8418,7 +8678,7 @@ begin
       if not CryptoAPI.AcquireContextA(CryptoAPIAESProvider,nil,nil,PROV_RSA_AES,0) then
         if (HRESULT(GetLastError)<>NTE_BAD_KEYSET) or not CryptoAPI.AcquireContextA(
            CryptoAPIAESProvider,nil,nil,PROV_RSA_AES,CRYPT_NEWKEYSET) then
-          RaiseLastOSError;
+          raise ESynCrypto.CreateLastOSError('in AcquireContext',[]);
     end;
   end;
 end;
@@ -8462,20 +8722,20 @@ begin
   end;
   if not CryptoAPI.ImportKey(CryptoAPIAESProvider,
      @fKeyHeader,sizeof(fKeyHeader)+fKeySizeBytes,nil,0,fKeyCryptoAPI) then
-    raise ESynCrypto.CreateFmt('Error $%x in CryptImportKey',[GetLastError]);
+    raise ESynCrypto.CreateLastOSError('in CryptImportKey for %',[self]);
   if not CryptoAPI.SetKeyParam(fKeyCryptoAPI,KP_IV,@fIV,0) then
-    raise ESynCrypto.CreateFmt('Error $%x in CryptSetKeyParam(KP_IV)',[GetLastError]);
+    raise ESynCrypto.CreateLastOSError('in CryptSetKeyParam(KP_IV) for %',[self]);
   if not CryptoAPI.SetKeyParam(fKeyCryptoAPI,KP_MODE,@fInternalMode,0) then
-    raise ESynCrypto.CreateFmt('Error $%x in CryptSetKeyParam(KP_MODE,%d)',[GetLastError,fInternalMode]);
+    raise ESynCrypto.CreateLastOSError('in CryptSetKeyParam(KP_MODE,%) for %',[fInternalMode,self]);
   if BufOut<>BufIn then
     MoveFast(BufIn^,BufOut^,Count);
-  n := Count and not (AESBlockSize-1);
+  n := Count and not AESBlockMod;
   if DoEncrypt then begin
     if not CryptoAPI.Encrypt(fKeyCryptoAPI,nil,false,0,BufOut,n,Count) then
-      raise ESynCrypto.CreateFmt('Error $%x in CryptEncrypt() for %s',[GetLastError,ClassName]);
+      raise ESynCrypto.CreateLastOSError('in Encrypt() for %',[self]);
   end else
     if not CryptoAPI.Decrypt(fKeyCryptoAPI,nil,false,0,BufOut,n) then
-      raise ESynCrypto.CreateFmt('Error $%x in CryptDecrypt() for %s',[GetLastError,ClassName]);
+      raise ESynCrypto.CreateLastOSError('in Decrypt() for %',[self]);
   dec(Count,n);
   if Count>0 then // remaining bytes will be XORed with the supplied IV
     XorBlockN(@PByteArray(BufIn)[n],@PByteArray(BufOut)[n],@fIV,Count);
@@ -8666,7 +8926,7 @@ var time: Int64;
   procedure hmacInit;
   var timenow: Int64;
       g: TGUID;
-      i, val: cardinal;
+      i {$ifdef CPUINTEL}, val{$endif}: cardinal;
   begin
     hmac.Init(@entropy,sizeof(entropy)); // bytes on CPU stack
     hmac.Update(@time,sizeof(time));
@@ -8746,7 +9006,7 @@ begin
     EnterCriticalSection(fLock);
     fAES.EncryptInit(key,256);
     crcblock(@fCTR,pointer(salt));
-    fAES.Encrypt(TAESBlock(fCTR),TAESBlock(fCTR));
+    fAES.Encrypt(fCTR.b,fCTR.b);
     fBytesSinceSeed := 0;
     LeaveCriticalSection(fLock);
   finally
@@ -8758,13 +9018,13 @@ end;
 
 procedure TAESPRNG.IncrementCTR;
 begin
-  inc(fCTR[0]);
-  if fCTR[0]=0 then begin
-    inc(fCTR[1]);
-    if fCTR[1]=0 then begin
-      inc(fCTR[2]);
-      if fCTR[2]=0 then
-        inc(fCTR[3]);
+  inc(fCTR.i0);
+  if fCTR.i0=0 then begin
+    inc(fCTR.i1);
+    if fCTR.i1=0 then begin
+      inc(fCTR.i2);
+      if fCTR.i2=0 then
+        inc(fCTR.i3);
     end;
   end;
 end;
@@ -8776,9 +9036,9 @@ begin
   EnterCriticalSection(fLock);
   {$ifdef USEAESNI64}
   if TAESContext(fAES.Context).AesNi then
-    AesNiEncrypt(fAES.Context,TAESBlock(fCTR),Block) else
+    AesNiEncrypt(fAES.Context,fCTR.b,Block) else
   {$endif USEAESNI64}
-    fAES.Encrypt(TAESBlock(fCTR),Block);
+    fAES.Encrypt(fCTR.b,Block);
   IncrementCTR;
   inc(fBytesSinceSeed,SizeOf(Block));
   inc(fTotalBytes,SizeOf(Block));
@@ -8803,17 +9063,17 @@ begin
   for i := 1 to Len shr 4 do begin
     {$ifdef USEAESNI64}
     if TAESContext(fAES.Context).AesNi then
-      AesNiEncrypt(fAES.Context,TAESBlock(fCTR),buf^) else
+      AesNiEncrypt(fAES.Context,fCTR.b,buf^) else
     {$endif USEAESNI64}
-      fAES.Encrypt(TAESBlock(fCTR),buf^);
+      fAES.Encrypt(fCTR.b,buf^);
     IncrementCTR;
     inc(buf);
   end;
   inc(fBytesSinceSeed,Len);
   inc(fTotalBytes,Len);
-  Len := Len and 15;
+  Len := Len and AESBlockMod;
   if Len>0 then begin
-    fAES.Encrypt(TAESBlock(fCTR),rnd);
+    fAES.Encrypt(fCTR.b,rnd);
     IncrementCTR;
     MoveFast(rnd,buf^,Len);
   end;
@@ -8848,7 +9108,7 @@ begin
         haspunct := true;
       result[i] := CHARS[j];
     end;
-  until haspunct and (LowerCase(result)<>result);
+  until (Len<=2) or (haspunct and (LowerCase(result)<>result));
 end;
 
 class function TAESPRNG.Main: TAESPRNG;
@@ -8992,7 +9252,7 @@ var i,k: integer;
     j,tmp: byte;
 begin
   if aKeyLen<=0 then
-    raise ESynCrypto.CreateFmt('TRC4.Init(invalid aKeyLen=%d)',[aKeyLen]);
+    raise ESynCrypto.CreateUTF8('TRC4.Init(invalid aKeyLen=%)',[aKeyLen]);
   dec(aKeyLen);
   for i := 0 to high(key) do
     key[i] := i;
@@ -9120,18 +9380,18 @@ begin
   Index := 0;
 end;
 
-function HashFound(P: PHash128_; Count: integer; const h: THash128_): boolean;
-var first: PtrUInt;
+function HashFound(P: PHash128Rec; Count: integer; const h: THash128Rec): boolean;
+var first: PtrInt;
     i: integer;
 begin // fast O(n) brute force search
   if P<>nil then begin
     result := true;
-    first := h.A64;
+    first := h.Lo;
     for i := 1 to Count do
       {$ifdef CPU64}
-      if (P^.A64=first) and (P^.B64=h.B64) then
+      if (P^.Lo=first) and (P^.Hi=h.Hi) then
       {$else}
-      if (P^.A=first) and (P^.B=h.B) and (P^.C=h.C) and (P^.D=h.D) then
+      if (P^.i0=first) and (P^.i1=h.i1) and (P^.i2=h.i2) and (P^.i3=h.i3) then
       {$endif}
         exit else
         inc(P);
@@ -9141,15 +9401,15 @@ end;
 
 function THash128History.Exists(const hash: THash128): boolean;
 begin
-  result := HashFound(pointer(Previous),Count,THash128_(hash));
+  result := HashFound(pointer(Previous),Count,THash128Rec(hash));
 end;
 
 function THash128History.Add(const hash: THash128): boolean;
 begin
-  result := not HashFound(pointer(Previous),Count,THash128_(hash));
+  result := not HashFound(pointer(Previous),Count,THash128Rec(hash));
   if not result then
     exit;
-  Previous[Index].hash := hash;
+  Previous[Index].b := hash;
   inc(Index);
   if Index>=Depth then
     Index := 0;
@@ -9251,6 +9511,393 @@ begin
 end;
 
 
+{$ifndef NOVARIANTS}
+
+{ TJWTAbstract }
+
+constructor TJWTAbstract.Create(const aAlgorithm: RawUTF8;
+  aClaims: TJWTClaims; const aAudience: array of RawUTF8; aExpirationMinutes: integer;
+  aIDIdentifier: TSynUniqueIdentifierProcess; aIDObfuscationKey: RawUTF8);
+begin
+  if aAlgorithm='' then
+    raise EJWTException.CreateUTF8('%.Create(algo?)',[self]);
+  inherited Create;
+  if high(aAudience)>=0 then begin
+    fAudience := TRawUTF8DynArrayFrom(aAudience);
+    include(aClaims,jrcAudience);
+  end;
+  if aExpirationMinutes>0 then begin
+    include(aClaims,jrcExpirationTime);
+    fExpirationSeconds := aExpirationMinutes*60;
+  end else
+    exclude(aClaims,jrcExpirationTime);
+  fAlgorithm := aAlgorithm;
+  fClaims := aClaims;
+  if jrcJwtID in aClaims then
+    fIDGen := TSynUniqueIdentifierGenerator.Create(aIDIdentifier,aIDObfuscationKey);
+  if fHeader='' then
+    FormatUTF8('{"alg":"%","typ":"JWT"}',[aAlgorithm],fHeader);
+  fHeaderB64 := BinToBase64URI(fHeader)+'.';
+  fCacheResults := [jwtValid];
+end;
+
+destructor TJWTAbstract.Destroy;
+begin
+  fIDGen.Free;
+  fCache.Free;
+  inherited;
+end;
+
+const
+  JWT_MAXSIZE = 4096; // coherent with HTTP headers limitations
+
+function TJWTAbstract.Compute(const DataNameValue: array of const;
+  const Issuer, Subject, Audience: RawUTF8; NotBefore: TDateTime;
+  ExpirationMinutes: integer): RawUTF8;
+var payload: RawUTF8;
+begin
+  if self=nil then begin
+    result := '';
+    exit;
+  end;
+  payload := PayloadToJSON(DataNameValue,Issuer,Subject,Audience,NotBefore,ExpirationMinutes);
+  payload := BinToBase64URI(payload);
+  result := fHeaderB64+payload+'.'+ComputeSignature(payload);
+  if length(result)>JWT_MAXSIZE then
+    raise EJWTException.CreateUTF8('%.Compute oversize: len=%',[self,length(result)]);
+end;
+
+function TJWTAbstract.ComputeAuthorizationHeader(const DataNameValue: array of const;
+  const Issuer, Subject, Audience: RawUTF8; NotBefore: TDateTime;
+  ExpirationMinutes: integer): RawUTF8;
+begin
+  if self=nil then
+    result := '' else
+    result := 'Bearer '+
+      Compute(DataNameValue,Issuer,Subject,Audience,NotBefore,ExpirationMinutes);
+end;
+
+function TJWTAbstract.PayloadToJSON(const DataNameValue: array of const;
+  const Issuer, Subject, Audience: RawUTF8; NotBefore: TDateTime;
+  ExpirationMinutes: cardinal): RawUTF8;
+var payload: TDocVariantData;
+begin
+  result := '';
+  payload.InitObject(DataNameValue,JSON_OPTIONS_FAST);
+  if jrcIssuer in fClaims then
+    if Issuer='' then
+      exit else
+      payload.AddValueFromText(JWT_CLAIMS_TEXT[jrcIssuer],Issuer,true);
+  if jrcSubject in fClaims then
+    if Subject='' then
+      exit else
+      payload.AddValueFromText(JWT_CLAIMS_TEXT[jrcSubject],Subject,true);
+  if jrcAudience in fClaims then
+    if Audience='' then
+      exit else
+      if Audience[1]='[' then
+        payload.AddOrUpdateValue(JWT_CLAIMS_TEXT[jrcAudience],_JsonFast(Audience)) else
+        payload.AddValueFromText(JWT_CLAIMS_TEXT[jrcAudience],Audience,true);
+  if jrcNotBefore in fClaims then
+    if NotBefore<=0 then
+      exit else
+      payload.AddOrUpdateValue(JWT_CLAIMS_TEXT[jrcNotBefore],DateTimeToUnixTime(NotBefore));
+  if jrcIssuedAt in fClaims then
+    payload.AddOrUpdateValue(JWT_CLAIMS_TEXT[jrcIssuedAt],UnixTimeUTC);
+  if jrcExpirationTime in fClaims then begin
+    if ExpirationMinutes=0 then
+      ExpirationMinutes := fExpirationSeconds else
+      ExpirationMinutes := ExpirationMinutes*60;
+    payload.AddOrUpdateValue(JWT_CLAIMS_TEXT[jrcExpirationTime],UnixTimeUTC+ExpirationMinutes);
+  end;
+  if jrcJwtID in fClaims then
+    if joNoJwtIDGenerate in fOptions then begin
+      if payload.GetValueIndex(JWT_CLAIMS_TEXT[jrcJwtID])<0 then
+        exit; // not generated, but should be supplied
+    end else
+      payload.AddValueFromText(JWT_CLAIMS_TEXT[jrcJwtID],fIDGen.ToObfuscated(fIDGen.ComputeNew));
+  result := payload.ToJSON;
+end;
+
+procedure TJWTAbstract.SetCacheTimeoutSeconds(value: integer);
+begin
+  fCacheTimeoutSeconds := value;
+  FreeAndNil(fCache);
+  if (value>0) and (fCacheResults<>[]) then
+    fCache := TSynDictionary.Create(TypeInfo(TRawUTF8DynArray),
+      TypeInfo(TJWTContentDynArray),false,value);
+end;
+
+procedure TJWTAbstract.Verify(const Token: RawUTF8; out JWT: TJWTContent);
+var payload64: RawUTF8;
+    signature: RawByteString;
+    fromcache: boolean;
+begin
+  if (self=nil) or (fCache=nil) then
+    fromcache := false else begin
+    fromcache := fCache.FindAndCopy(Token,JWT);
+    fCache.DeleteDeprecated;
+  end;
+  if not fromcache then
+    Parse(Token,JWT,payload64,signature);
+  if JWT.result in [jwtValid,jwtNotBeforeFailed] then
+    if CheckAgainstActualTimestamp(JWT) and not fromcache then
+      CheckSignature(JWT,payload64,signature); // depending on the algorithm used
+  if not fromcache and (self<>nil) and (fCache<>nil) and (JWT.result in fCacheResults) then
+    fCache.Add(Token,JWT);
+end;
+
+function TJWTAbstract.CheckAgainstActualTimestamp(var JWT: TJWTContent): boolean;
+var nowunix, unix: cardinal;
+begin
+  if [jrcExpirationTime,jrcNotBefore,jrcIssuedAt]*JWT.claims<>[] then begin
+    result := false;
+    nowunix := UnixTimeUTC; // validate against actual timestamp
+    if jrcExpirationTime in JWT.claims then
+      if not ToCardinal(JWT.reg[jrcExpirationTime],unix) or (nowunix>unix) then begin
+        JWT.result := jwtExpired;
+        exit;
+      end;
+    if jrcNotBefore in JWT.claims then
+      if not ToCardinal(JWT.reg[jrcNotBefore],unix) or (nowunix<unix) then begin
+        JWT.result := jwtNotBeforeFailed;
+        exit;
+      end;
+    if jrcIssuedAt in JWT.claims then // allow 1 minute time lap between nodes
+      if not ToCardinal(JWT.reg[jrcIssuedAt],unix) or (unix>nowunix+60) then begin
+        JWT.result := jwtInvalidIssuedAt;
+        exit;
+      end;
+  end;
+  result := true;
+  JWT.result := jwtValid;
+end;
+
+procedure TJWTAbstract.Parse(const Token: RawUTF8; var JWT: TJWTContent;
+  out payload64: RawUTF8; out signature: RawByteString);
+var i,j,c,len,a: integer;
+    P: PUTF8Char;
+    N,V: PUTF8Char;
+    wasString: boolean;
+    EndOfObject: AnsiChar;
+    claim: TJWTClaim;
+    id: TSynUniqueIdentifierBits;
+    value: variant;
+    payload, signature64: RawUTF8;
+    head,aud: TDocVariantData;
+begin
+  JWT.data.InitFast(0,dvObject);
+  byte(JWT.claims) := 0;
+  word(JWT.audience) := 0;
+  c := length(Token);
+  if (c=0) or (self=nil) then begin
+    JWT.result := jwtNoToken;
+    exit;
+  end;
+  JWT.result := jwtInvalidAlgorithm;
+  if joHeaderParse in fOptions then begin
+    len := PosEx('.',Token);
+    if (len=0) or (len>512) then
+      exit;
+    signature64 := copy(Token,1,len-1);
+    Base64FromURI(signature64);
+    signature := Base64ToBin(signature64);
+    if (head.InitJSONInPlace(pointer(signature),JSON_OPTIONS_FAST)=nil) or
+       (head.U['alg']<>fAlgorithm) or
+       (head.GetAsRawUTF8('typ',payload) and (payload<>'JWT')) then
+      exit;
+  end else begin
+    len := length(fHeaderB64); // fast direct compare of fHeaderB64 (including "alg")
+    if (c<=len) or not CompareMem(pointer(fHeaderB64),pointer(Token),len) then
+      exit;
+  end;
+  JWT.result := jwtWrongFormat;
+  if c>JWT_MAXSIZE Then
+    exit;
+  i := PosEx('.',Token,len+1);
+  if (i=0) or (i-len>2700) then
+    exit;
+  payload64 := copy(Token,len+1,i-len-1);
+  signature64 := copy(Token,i+1,maxInt);
+  Base64FromURI(signature64);
+  signature := Base64ToBin(signature64);
+  if (signature='') and (signature64<>'') then
+    exit;
+  JWT.result := jwtInvalidPayload;
+  payload := payload64;
+  Base64FromURI(payload);
+  payload := Base64ToBin(payload);
+  if payload='' then
+    exit;
+  P := GotoNextNotSpace(pointer(payload));
+  if P^<>'{' then
+    exit;
+  P := GotoNextNotSpace(P+1);
+  c := JSONObjectPropCount(P);
+  if c<=0 then
+    exit;
+  JWT.data.Capacity := c;
+  repeat
+    N := GetJSONPropName(P);
+    if N=nil then
+      exit;
+    V := GetJSONFieldOrObjectOrArray(P,@wasstring,@EndOfObject,true);
+    if V=nil then
+      exit;
+    len := StrLen(N);
+    if len=3 then begin
+      c := PInteger(N)^;
+      for claim := low(claim) to high(claim) do
+        if PInteger(JWT_CLAIMS_TEXT[claim])^=c then begin
+          if V^=#0 then
+            exit;
+          include(JWT.claims,claim);
+          if not(claim in fClaims) and not(joAllowUnexpectedClaims in fOptions) then begin
+            JWT.result := jwtUnexpectedClaim;
+            exit;
+          end;
+          SetString(JWT.reg[claim],V,StrLen(V));
+          if claim in fClaims then
+          case claim of
+          jrcJwtID:
+            if not(joNoJwtIDCheck in fOptions) then
+              if not fIDGen.FromObfuscated(JWT.reg[jrcJwtID],id.Value) or
+                 (id.CreateTimeUnix<UNIXTIME_MINIMAL) then begin
+                JWT.result := jwtInvalidID;
+                exit;
+              end;
+          jrcAudience:
+            if JWT.reg[jrcAudience][1]='[' then begin
+              aud.InitJSON(JWT.reg[jrcAudience],JSON_OPTIONS_FAST);
+              if aud.Count=0 then
+                exit else
+                for j := 0 to aud.Count-1 do begin
+                  a := FindRawUTF8(fAudience,VariantToUTF8(aud.Values[j]));
+                  if a<0 then begin
+                    JWT.result := jwtUnknownAudience;
+                    if not (joAllowUnexpectedAudience in fOptions) then
+                      exit;
+                  end else
+                    include(JWT.audience,a);
+                end;
+            end else begin
+              a := FindRawUTF8(fAudience,JWT.reg[jrcAudience]);
+              if a<0 then begin
+                JWT.result := jwtUnknownAudience;
+                if not (joAllowUnexpectedAudience in fOptions) then
+                  exit;
+              end else
+                include(JWT.audience,a);
+            end;
+          end;
+          len := 0; // don't add to JWT.data
+          break;
+        end;
+      if len=0 then
+        continue;
+    end;
+    GetVariantFromJSON(V,wasString,value,@JSON_OPTIONS[true],joDoubleInData in fOptions);
+    JWT.data.AddValue(N,len,value)
+  until EndOfObject='}';
+  JWT.data.Capacity := JWT.data.Count;
+  if fClaims-JWT.claims<>[] then
+    JWT.result := jwtMissingClaim else
+    JWT.result := jwtValid;
+end;
+
+function TJWTAbstract.VerifyAuthorizationHeader(const HttpAuthorizationHeader: RawUTF8;
+  out JWT: TJWTContent): boolean;
+begin
+  if (cardinal(length(HttpAuthorizationHeader)-10)<4096) and
+     not IdemPChar(pointer(HttpAuthorizationHeader), 'BEARER ') then
+    JWT.result := jwtWrongFormat else
+    Verify(copy(HttpAuthorizationHeader,8,maxInt),JWT);
+  result := JWT.result=jwtValid;
+end;
+
+
+{ TJWTNone }
+
+constructor TJWTNone.Create(aClaims: TJWTClaims;
+  const aAudience: array of RawUTF8; aExpirationMinutes: integer;
+  aIDIdentifier: TSynUniqueIdentifierProcess; aIDObfuscationKey: RawUTF8);
+begin
+  fHeader := '{"alg":"none"}'; // "typ":"JWT" is optional, so we save a few bytes
+  inherited Create('none',aClaims,aAudience,aExpirationMinutes,
+    aIDIdentifier,aIDObfuscationKey);
+end;
+
+procedure TJWTNone.CheckSignature(var JWT: TJWTContent; const payload64: RawUTF8;
+  const signature: RawByteString);
+begin
+  if signature='' then // JWA defined empty string for "none" JWS
+    JWT.result := jwtValid else
+    JWT.result := jwtInvalidSignature;
+end;
+
+function TJWTNone.ComputeSignature(const payload64: RawUTF8): RawUTF8;
+begin
+  result := '';
+end;
+
+
+{ TJWTHS256 }
+
+constructor TJWTHS256.Create(const aSecret: RawUTF8; aSecretPBKDF2Rounds: integer;
+  aClaims: TJWTClaims; const aAudience: array of RawUTF8;
+  aExpirationMinutes: integer; aIDIdentifier: TSynUniqueIdentifierProcess;
+  aIDObfuscationKey: RawUTF8);
+var secret: THash256;
+begin
+  inherited Create('HS256',aClaims,aAudience,aExpirationMinutes,aIDIdentifier,aIDObfuscationKey);
+  if aSecretPBKDF2Rounds>0 then begin
+    PBKDF2_HMAC_SHA256(aSecret,fHeaderB64,aSecretPBKDF2Rounds,secret);
+    fHmacPrepared.Init(@secret,sizeof(secret));
+    FillZero(secret);
+  end else
+    fHmacPrepared.Init(pointer(aSecret),length(aSecret));
+  fHmacPrepared.Update(pointer(fHeaderB64),length(fHeaderB64));    
+end;
+
+function TJWTHS256.ComputeSignature(const payload64: RawUTF8): RawUTF8;
+var hmac: THMAC_SHA256;
+    res: TSHA256Digest;
+begin
+  hmac := fHmacPrepared; // thread-safe re-use of prepared HMAC(header+'.')
+  hmac.Update(pointer(payload64),length(payload64));
+  hmac.Done(res);
+  result := BinToBase64URI(@res,sizeof(res));
+end;
+
+procedure TJWTHS256.CheckSignature(var JWT: TJWTContent; const payload64: RawUTF8;
+  const signature: RawByteString);
+var hmac: THMAC_SHA256;
+    res: TSHA256Digest;
+begin
+  JWT.result := jwtInvalidSignature;
+  if length(signature)<>sizeof(res) then
+    exit;
+  hmac := fHmacPrepared; // thread-safe re-use of prepared HMAC(header+'.')
+  hmac.Update(pointer(payload64),length(payload64));
+  hmac.Done(res);
+  if CompareMem(@res,pointer(signature),sizeof(res)) then
+    JWT.result := jwtValid;
+end;
+
+destructor TJWTHS256.Destroy;
+begin
+  inherited Destroy;
+  FillcharFast(fHmacPrepared,sizeof(fHmacPrepared),0); // erase secret on heap
+end;
+
+function ToText(res: TJWTResult): PShortString;
+begin
+  result := GetEnumName(TypeInfo(TJWTResult),ord(res));
+end;
+
+{$endif NOVARIANTS}
+
+
 initialization
   ComputeAesStaticTables;
 {$ifdef USEPADLOCK}
@@ -9259,8 +9906,9 @@ initialization
   assert(sizeof(TMD5Buf)=sizeof(TMD5Digest));
   assert(sizeof(TAESContext)=AESContextSize);
   assert(sizeof(TSHAContext)=SHAContextSize);
-  assert(sizeof(TAESFullHeader)=AESBlockSize);
-  assert(sizeof(THash128_)=sizeof(THash128));
+  assert(1 shl AESBlockShift=sizeof(TAESBlock));
+  assert(sizeof(TAESFullHeader)=sizeof(TAESBlock));
+  assert(sizeof(TAESIVCTR)=sizeof(TAESBlock));
 
 finalization
 {$ifdef USEPADLOCKDLL}

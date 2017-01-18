@@ -20,7 +20,7 @@
 
   The Initial Developer of the Original Code is Arnaud Bouchez.
 
-  Portions created by the Initial Developer are Copyright (C) 2016
+  Portions created by the Initial Developer are Copyright (C) 2017
   the Initial Developer. All Rights Reserved.
 
   Contributor(s):
@@ -134,6 +134,11 @@
 {.$define OLDTEXTWRITERFORMAT}
 // force TTextWriter.Add(Format) to handle the alternate $ % tags
 
+{.$define OPT4AMD}
+// you may define this to optimize for AMD CPUs - e.g. to use "set of byte"
+// which will use BT[mem] opcodes, which are slow on Intel, but fast on AMD
+// (with the Delphi x86 compiler, may not be the case for LLVM or FPC) 
+
 {$ifdef LVCL}
    // NormToUpper[] exists only in our enhanced RTL
   {$define OWNNORMTOUPPER}
@@ -151,7 +156,6 @@
     http://blog.synopse.info/post/2011/01/29/record-and-object-issue-in-Delphi-2010 }
   {$define UNDIRECTDYNARRAY}
 {$endif}
-
 
 {$define INCLUDE_FTS3}
 // define this if you want to include the FTS3/FTS4 feature into the library
@@ -319,8 +323,8 @@
 
 {$else FPC}
 
-  {$ifndef PUREPASCAL} // if PUREPASCAL is forced, ignore any x86/x64 asm
-    {$define CPUINTEL} // no NextGen support yet
+  {$ifndef PUREPASCAL}
+    {$define CPUINTEL} // Delphi only for Intel by now
   {$endif}
   {$ifdef CPUX64}
     {$define CPU64} // Delphi compiler for 64 bit CPU

@@ -5,7 +5,7 @@ unit SynLZ;
 {
     This file is part of Synopse SynLZ Compression.
 
-    Synopse SynLZ Compression. Copyright (C) 2016 Arnaud Bouchez
+    Synopse SynLZ Compression. Copyright (C) 2017 Arnaud Bouchez
       Synopse Informatique - http://synopse.info
 
   *** BEGIN LICENSE BLOCK *****
@@ -24,7 +24,7 @@ unit SynLZ;
 
   The Initial Developer of the Original Code is Arnaud Bouchez.
 
-  Portions created by the Initial Developer are Copyright (C) 2016
+  Portions created by the Initial Developer are Copyright (C) 2017
   the Initial Developer. All Rights Reserved.
 
   Contributor(s):
@@ -1122,8 +1122,10 @@ begin
   dst_beg := dst;
   {$endif}
   src_end := src+size;
+  {$ifndef ISDELPHI102}
   {$ifndef CPU64}
   t := 0; // make compiler happy
+  {$endif}
   {$endif}
   // 1. retrieve out_len
   result := PWord(src)^;
