@@ -7,7 +7,7 @@ unit SynPdf;
     This file is part of Synopse framework.
 
     Synopse framework. Copyright (C) 2017 Arnaud Bouchez
-      Synopse Informatique - http://synopse.info
+      Synopse Informatique - https://synopse.info
 
   *** BEGIN LICENSE BLOCK *****
   Version: MPL 1.1/GPL 2.0/LGPL 2.1
@@ -43,6 +43,7 @@ unit SynPdf;
    Marsh
    MChaos
    Mehrdad Momeni (nosa)
+   mogulza
    Nzsolt
    Ondrej (reddwarf)
    Pierre le Riche
@@ -63,7 +64,7 @@ unit SynPdf;
 
   ***** END LICENSE BLOCK *****
 
-  Sponsors:               http://synopse.info/fossil/wiki?name=HelpDonate
+  Sponsors:               https://synopse.info/fossil/wiki?name=HelpDonate
   Ongoing development and maintenance of the SynPDF library was sponsored
   in part by:
    http://www.helpndoc.com
@@ -129,7 +130,7 @@ unit SynPdf;
     was needed in case of TMetaFile rendering to fix some encoding problems
 
   Version 1.8.7
-  - bitmap embedding fix - see http://synopse.info/forum/viewtopic.php?pid=237
+  - bitmap embedding fix - see https://synopse.info/forum/viewtopic.php?pid=237
   - now initializes the Gdi+ library if necessary
 
   Version 1.8.8
@@ -578,7 +579,7 @@ type
 
   /// available known paper size (psA4 is the default on TPdfDocument creation)
   TPDFPaperSize = (
-    psA4, psA5, psA3, psLetter, psLegal, psUserDefined);
+    psA4, psA5, psA3, psA2, psA1, psA0, psLetter, psLegal, psUserDefined);
 
   /// define if streams must be compressed
   TPdfCompressionMethod = (
@@ -6393,8 +6394,9 @@ end;
 
 procedure TPdfDocument.SetDefaultPaperSize(const Value: TPDFPaperSize);
 const PAPERSIZE: array[TPDFPaperSize] of array[0..1] of integer =
-  ( (595,842), (419,595), (842,1190), (612,792), (612,1008), (0,0) );
-begin // psA4, psA5, psA3, psLetter, psLegal, psUserDefined
+  ( (595,842), (419,595), (842,1190), (1190,1683), (1683,2382), (2382,3369),
+    (612,792), (612,1008), (0,0) );
+begin // psA4, psA5, psA3, psA2, psA1, psA0, psLetter, psLegal, psUserDefined
   FDefaultPaperSize := Value;
   if Value<>psUserDefined then begin
     FDefaultPageWidth := PAPERSIZE[Value,0];

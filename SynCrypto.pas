@@ -9,7 +9,7 @@ unit SynCrypto;
     This file is part of Synopse framework.
 
     Synopse framework. Copyright (C) 2017 Arnaud Bouchez
-      Synopse Informatique - http://synopse.info
+      Synopse Informatique - https://synopse.info
 
   *** BEGIN LICENSE BLOCK *****
   Version: MPL 1.1/GPL 2.0/LGPL 2.1
@@ -197,7 +197,7 @@ unit SynCrypto;
      -> avoid classes.TThread and system.BeginThread() use
      -> application is still "officialy" mono-threaded (i.e. IsMultiThread=false),
      for faster System.pas and FastMM4 (prevent CPU locking - see
-     http://synopse.info/forum/viewtopic.php?id=57 about Delphi & multi-core)
+     https://synopse.info/forum/viewtopic.php?id=57 about Delphi & multi-core)
    - some other minor fixes and enhancements
 
    Version 1.10
@@ -1949,6 +1949,7 @@ const
     'iss','sub','aud','exp','nbf','iat','jti');
 
 function ToText(res: TJWTResult): PShortString; overload;
+function ToCaption(res: TJWTResult): string; overload;
 
 {$endif NOVARIANTS}
 
@@ -9893,6 +9894,11 @@ end;
 function ToText(res: TJWTResult): PShortString;
 begin
   result := GetEnumName(TypeInfo(TJWTResult),ord(res));
+end;
+
+function ToCaption(res: TJWTResult): string;
+begin
+  result := GetCaptionFromEnum(TypeInfo(TJWTResult),ord(res));
 end;
 
 {$endif NOVARIANTS}

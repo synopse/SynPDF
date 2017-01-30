@@ -7,7 +7,7 @@ unit SynCommons;
     This file is part of Synopse framework.
 
     Synopse framework. Copyright (C) 2017 Arnaud Bouchez
-      Synopse Informatique - http://synopse.info
+      Synopse Informatique - https://synopse.info
 
   *** BEGIN LICENSE BLOCK *****
   Version: MPL 1.1/GPL 2.0/LGPL 2.1
@@ -839,7 +839,7 @@ type
   /// a CPU-dependent unsigned integer type cast of a pointer / register
   // - used for 64 bits compatibility, native under Free Pascal Compiler
 {$ifdef ISDELPHI2009}
-  PtrUInt = cardinal; { see http://synopse.info/forum/viewtopic.php?id=136 }
+  PtrUInt = cardinal; { see https://synopse.info/forum/viewtopic.php?id=136 }
 {$else}
   {$ifdef UNICODE}
   PtrUInt = NativeUInt;
@@ -1483,6 +1483,7 @@ type
     // - equals nil if len=0
     buf: pointer;
     /// initialize a temporary copy of the supplied text supplied as RawByteString
+    // - will also allocate and copy the ending #0
     procedure Init(const Source: RawByteString); overload;
     /// initialize a temporary copy of the supplied text buffer, ending with #0
     function Init(Source: PUTF8Char): PUTF8Char; overload;
@@ -2126,6 +2127,7 @@ function StringToRawUnicode(const S: string): RawUnicode; overload;
 // current RTL codepage, as with WideString conversion (but without slow
 // WideString usage)
 function StringToSynUnicode(const S: string): SynUnicode;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// convert any generic VCL Text into a Raw Unicode encoded String
 // - it's prefered to use TLanguageFile.StringToUTF8() method in mORMoti18n,
@@ -2909,6 +2911,11 @@ function UrlDecodeNextValue(U: PUTF8Char; out Value: RawUTF8): PUTF8Char;
 // - returns a pointer just after the decoded name, after the '='
 // - returns nil if there was no name=... pattern in U
 function UrlDecodeNextName(U: PUTF8Char; out Name: RawUTF8): PUTF8Char;
+
+/// checks if the supplied text don't need URI encoding
+// - returns TRUE if all its chars are plain ASCII-7 RFC compatible identifiers
+// (0..9a..zA..Z_.~)
+function IsUrlValid(P: PUTF8Char): boolean;
 
 /// encode name/value pairs into CSV/INI raw format
 function CSVEncode(const NameValuePairs: array of const;
@@ -3785,6 +3792,10 @@ function DirectoryDeleteOlderFiles(const Directory: TFileName; TimePeriod: TDate
 function EnsureDirectoryExists(const Directory: TFileName;
   RaiseExceptionOnCreationFailure: boolean=false): TFileName;
 
+/// compute an unique temporary file name
+// - following 'exename_01234567.tmp' pattern, in the system temporary folder
+function TemporaryFileName: TFileName;
+
 type
   {$A-}
   /// file found result item, as returned by FindFiles()
@@ -3816,7 +3827,6 @@ function FindFiles(const Directory,Mask: TFileName;
 
 /// convert a result list, as returned by FindFiles(), into an array of Files[].Name
 function FindFilesDynArrayToFileNames(const Files: TFindFilesDynArray): TFileNameDynArray;
-
 
 {$ifdef DELPHI5OROLDER}
 
@@ -6625,6 +6635,13 @@ type
   // - this array as a fixed size, ready to handle up to MAX_SQLFIELDS items
   TSQLDBFieldTypeArray = array[0..MAX_SQLFIELDS-1] of TSQLDBFieldType;
 
+  /// how TSQLVar may be processed
+  // - by default, ftDate will use seconds resolution unless svoDateWithMS is set
+  TSQLVarOption = (svoDateWithMS);
+
+  /// defines how TSQLVar may be processed
+  TSQLVarOptions = set of TSQLVarOption;
+
   /// memory structure used for database values by reference storage
   // - used mainly by SynDB, mORMot, mORMotDB and mORMotSQLite3 units
   // - defines only TSQLDBFieldType data types (similar to those handled by
@@ -6634,9 +6651,13 @@ type
   // - variable-length data (e.g. UTF-8 text or binary BLOB) are never stored
   // within this record, but VText/VBlob will point to an external (temporary)
   // memory buffer
-  // - date/time is stored as ISO-8601 text, and currency as double or
-  // BCD in most databases
+  // - date/time is stored as ISO-8601 text (with milliseconds if svoDateWithMS
+  // option is set and the database supports it), and currency as double or BCD
+  // in most databases
   TSQLVar = record
+    /// how this value should be processed
+    Options: TSQLVarOptions;
+    /// the type of the value stored
     case VType: TSQLDBFieldType of
     ftInt64: (
       VInt64: Int64);
@@ -7344,6 +7365,8 @@ type
     procedure AddTimeLog(Value: PInt64);
     /// append a TUnixTime value, expanded as Iso-8601 encoded text
     procedure AddUnixTime(Value: PInt64);
+    /// append a TUnixMSTime value, expanded as Iso-8601 encoded text
+    procedure AddUnixMSTime(Value: PInt64; WithMS: boolean=false);
     /// append a TDateTime value, expanded as Iso-8601 encoded text
     // - use 'YYYY-MM-DDThh:mm:ss' format (with FirstChar='T')
     // - if WithMS is TRUE, will append '.sss' for milliseconds resolution
@@ -7536,6 +7559,9 @@ type
     // - may be used with InternalJSONWriter, as a faster alternative to
     // ! AddNoJSONEscapeUTF8(Source.Text);
     procedure AddNoJSONEscape(Source: TTextWriter); overload;
+    /// append some UTF-8 chars to the buffer
+    // - if supplied json is '', will write 'null'
+    procedure AddRawJSON(const json: RawJSON);
     /// append some chars, quoting all " chars
     // - same algorithm than AddString(QuotedStr()) - without memory allocation
     // - this function implements what is specified in the official SQLite3
@@ -8768,6 +8794,12 @@ type
     // - returns TRUE if aKey was found, FALSE if no match exists
     // - will update the associated timeout value of the entry, if applying
     function FindAndCopy(const aKey; out aValue): boolean;
+    /// search of a stored value by its primary key, then delete and return it
+    // - returns TRUE if aKey was found, fill aValue with its content,
+    // and delete the entry in the internal storage
+    // - so this method is thread-safe
+    // - returns FALSE if no match exists
+    function FindAndExtract(const aKey; out aValue): boolean;
     /// search for a primary key presence
     // - returns TRUE if aKey was found, FALSE if no match exists
     // - this method is thread-safe
@@ -10877,17 +10909,21 @@ function crc63c(buf: PAnsiChar; len: cardinal): Int64;
 type
   /// store a 128-bit hash value
   // - e.g. a MD5 digest, or array[0..3] of cardinal (TBlock128)
+  // - consumes 16 bytes of memory
   THash128 = array[0..15] of byte;
   /// store a 256-bit hash value
   // - e.g. a SHA-256 digest, a TECCSignature result, or array[0..7] of cardinal
+  // - consumes 32 bytes of memory
   THash256 = array[0..31] of byte;
   /// store a 128-bit buffer
   // - e.g. an AES block
+  // - consumes 16 bytes of memory
   TBlock128 = array[0..3] of cardinal;
 
   /// pointer to a 128-bit hash value
   PHash128 = ^THash128;
   /// map a 128-bit hash as an array of lower bit size values
+  // - consumes 16 bytes of memory
   THash128Rec = packed record
   case integer of
   0: (Lo,Hi: Int64);
@@ -10898,6 +10934,7 @@ type
   /// pointer to an array of two 64-bit hash values
   PHash128Rec = ^THash128Rec;
   /// map a 256-bit hash as an array of lower bit size values
+  // - consumes 32 bytes of memory
   THash256Rec = packed record
   case integer of
   0: (Lo,Hi: THash128);
@@ -10909,6 +10946,7 @@ type
   /// pointer to an array of two 128-bit hash values
   PHash256Rec = ^THash256Rec;
   /// map an infinite array of 128-bit hash values
+  // - each item consumes 16 bytes of memory
   THash128Array = array[0..(maxInt div sizeof(THash128))-1] of THash128;
   /// pointer to an infinite array of 128-bit hash values
   PHash128Array = ^THash128Array;
@@ -12145,6 +12183,9 @@ const
   IsJsonIdentifier: set of byte =
     [ord('_'),ord('0')..ord('9'),ord('a')..ord('z'),ord('A')..ord('Z'),
      ord('.'),ord('['),ord(']')];
+  IsURIUnreserved: set of byte =
+    [ord('a')..ord('z'),ord('A')..ord('Z'),ord('0')..ord('9'),
+     ord('-'),ord('.'),ord('_'),ord('~')];
 {$else}
   /// used e.g. by inlined function GetLineContains()
   ANSICHARNOT01310 = [#1..#9,#11,#12,#14..#255];
@@ -12172,14 +12213,15 @@ const
   IsJsonIdentifier =
     [ord('_'),ord('0')..ord('9'),ord('a')..ord('z'),ord('A')..ord('Z'),
      ord('.'),ord('['),ord(']')];
-{$endif OPT4AMD}
 
   /// used internaly for fast URI "unreserved" characters identifier
   // - defined as unreserved  = ALPHA / DIGIT / "-" / "." / "_" / "~"
   // in @http://tools.ietf.org/html/rfc3986#section-2.3
-  IsURIUnreserved: set of byte =
+  IsURIUnreserved =
     [ord('a')..ord('z'),ord('A')..ord('Z'),ord('0')..ord('9'),
      ord('-'),ord('.'),ord('_'),ord('~')];
+
+{$endif OPT4AMD}
 
 {$M+} // to have existing RTTI for published properties
 type
@@ -12340,6 +12382,19 @@ function CreateInternalWindow(const aWindowName: string; aObject: TObject): HWND
 // - both parameter values are then reset to ''/0
 function ReleaseInternalWindow(var aWindowName: string; var aWindow: HWND): boolean;
 
+/// under Windows 7 and later, will set an unique application-defined
+// Application User Model ID (AppUserModelID) that identifies the current
+// process to the taskbar
+// - this identifier allows an application to group its associated processes
+// and windows under a single taskbar button
+// - value can have no more than 128 characters, cannot contain spaces, and
+// each section should be camel-cased, as such:
+// $ CompanyName.ProductName.SubProduct.VersionInformation
+// CompanyName and ProductName should always be used, while the SubProduct and
+// VersionInformation portions are optional and depend on the application's requirements
+// - if the supplied text does not contain an '.', 'ID.ID' will be used
+function SetAppUserModelID(const AppUserModelID: string): boolean;
+
 var
   /// the number of milliseconds that have elapsed since the system was started
   // - compatibility function, to be implemented according to the running OS
@@ -12466,7 +12521,8 @@ procedure SetExecutableVersion(const aVersionText: RawUTF8); overload;
 
 type
   /// identify an operating system folder
-  TSystemPath = (spCommonData, spUserData, spCommonDocuments, spUserDocuments);
+  TSystemPath = (
+    spCommonData, spUserData, spCommonDocuments, spUserDocuments, spTempFolder);
 
 /// returns an operating system folder
 // - will return the full path of a given kind of private or shared folder,
@@ -13694,6 +13750,8 @@ type
   TDocVariantOptions = set of TDocVariantOption;
 
   /// pointer to a set of options for a TDocVariant storage
+  // - you may use e.g. @JSON_OPTIONS[true], @JSON_OPTIONS[false],
+  // @JSON_OPTIONS_FAST_STRICTJSON or @JSON_OPTIONS_FAST_EXTENDED
   PDocVariantOptions = ^TDocVariantOptions;
 
 const
@@ -16165,15 +16223,16 @@ type
   {$endif}
     /// after this method call, all FPU exceptions will be ignored
     // - until the method finishes (a try..finally block is generated by
-    // the compiler), then FPU exceptions will be
+    // the compiler), then FPU exceptions will be reset into "Delphi" mode
     // - you have to put this e.g. before calling an external libray
     // - this method is thread-safe and re-entrant (by reference-counting)
     class function ForLibraryCode: IUnknown;
     /// after this method call, all FPU exceptions will be enabled
     // - this is the Delphi normal behavior
     // - until the method finishes (a try..finally block is generated by
-    // the compiler)
-    // - you have to put this e.g. before running an external libray
+    // the compiler), then FPU execptions will be disabled again
+    // - you have to put this e.g. before running an Delphi code from
+    // a callback executed in an external libray
     // - this method is thread-safe and re-entrant (by reference-counting)
     class function ForDelphiCode: IUnknown;
   end;
@@ -16984,6 +17043,7 @@ type
   {$endif}
   public
     /// the actual 64-bit storage value
+    // - in practice, only first 63 bits are used 
     Value: TSynUniqueIdentifier;
     /// 15-bit counter (0..32767), starting with a random value
     function Counter: word;
@@ -17046,7 +17106,8 @@ type
 
   /// thread-safe 64-bit integer unique identifier computation
   // - may be used on client side for something similar to a MongoDB ObjectID,
-  // but compatible with TSQLRecord.ID: TID properties
+  // but compatible with TSQLRecord.ID: TID properties, since it will contain
+  // a 63-bit unsigned integer, following our ORM expectations
   // - each identifier would contain a 16-bit process identifier, which is
   // supplied by the application, and should be unique for this process at a
   // given time
@@ -17096,6 +17157,8 @@ type
       out aIdentifier: TSynUniqueIdentifier): boolean;
     /// some 32-bit value, derivated from aSharedObfuscationKey as supplied
     // to the class constructor
+    // - FromObfuscated and ToObfuscated methods will validate their hexadecimal
+    // content with this value to secure the associated CRC 
     // - may be used e.g. as system-depending salt
     property CryptoCRC: cardinal read fCryptoCRC;
     /// direct access to the associated mutex
@@ -17300,7 +17363,7 @@ uses
   Linux,SysCall,
   {$endif}
   {$endif}
-  SynFPCTypInfo, TypInfo; // small wrapper unit around FPC's TypInfo.pp
+  SynFPCTypInfo, TypInfo, StrUtils; // small wrapper unit around FPC's TypInfo.pp
 {$endif}
 
 
@@ -18956,6 +19019,7 @@ begin
     exit; // nothing to truncate
   end;
   while (maxUTF8>0) and (ord(Text[maxUTF8]) and $c0=$80) do dec(maxUTF8);
+  if (maxUTF8>0) and (ord(Text[maxUTF8]) and $80<>0) then dec(maxUTF8);
   SetLength(text,maxUTF8);
   result := true;
 end;
@@ -21231,7 +21295,8 @@ begin
   info := GetTypeInfo(aTypeInfo,tkEnumeration);
   if info<>nil then begin
     {$ifdef FPC} // no redirection if aTypeInfo is already the base type
-    if info^.{$ifdef FPC_ENUMHASINNER}inner.{$endif}EnumBaseType<>nil then
+    if (info^.{$ifdef FPC_ENUMHASINNER}inner.{$endif}EnumBaseType<>nil) and
+       (info^.{$ifdef FPC_ENUMHASINNER}inner.{$endif}EnumBaseType<>aTypeInfo) then
     {$endif}
       info := GetTypeInfo(Deref(info^.{$ifdef FPC_ENUMHASINNER}inner.{$endif}EnumBaseType));
     MaxValue := info^.{$ifdef FPC_ENUMHASINNER}inner.{$endif}MaxValue;
@@ -21801,6 +21866,7 @@ procedure VariantToSQLVar(const Input: variant; var temp: RawByteString;
   var Output: TSQLVar);
 var wasString: boolean;
 begin
+  Output.Options := [];
   with TVarData(Input) do
   if VType=varVariant or varByRef then
     VariantToSQLVar(PVariant(VPointer)^,temp,Output) else
@@ -23530,7 +23596,7 @@ begin
 var i: integer;
 {$endif}
 begin
-  // use ffGeneral: see http://synopse.info/forum/viewtopic.php?pid=442#p442
+  // use ffGeneral: see https://synopse.info/forum/viewtopic.php?pid=442#p442
   result := FloatToText(PChar(@S[1]), Value, fvExtended, ffGeneral,
     Precision, 0, SettingsUS);
   {$ifdef UNICODE} // FloatToText(PWideChar) is faster than FloatToText(PAnsiChar)
@@ -27416,6 +27482,23 @@ begin
         raise ESynException.CreateUTF8('Impossible to create "%" folder',[Directory]);
 end;
 
+var
+  TemporaryFileNameRandom: integer;
+
+function TemporaryFileName: TFileName;
+var random: string[8];
+    rnd: cardinal;
+begin // fast cross-platform implementation
+  if TemporaryFileNameRandom=0 then
+    FillRandom(@TemporaryFileNameRandom,1);
+  random[0] := #8;
+  repeat
+    rnd := InterlockedIncrement(TemporaryFileNameRandom); // thread-safe :)
+    SynCommons.BinToHex(@rnd,@random[1],sizeof(rnd));
+    result := format('%s%s_%s.tmp',[GetSystemPath(spTempFolder),ExeVersion.ProgramName,random]);
+  until not FileExists(result);
+end;
+
 {$ifdef DELPHI5OROLDER}
 
 /// DirectoryExists returns a boolean value that indicates whether the
@@ -30226,25 +30309,13 @@ function UrlEncode(const NameValuePairs: array of const): RawUTF8;
 // (['select','*','where','ID=12','offset',23,'object',aObject]);
 var A, n: PtrInt;
     name, value: RawUTF8;
-  function Invalid(P: PAnsiChar): boolean;
-  begin
-    result := true;
-    if P<>nil then begin
-      repeat // cf. rfc3986 2.3. Unreserved Characters
-        if not (P^ in ['a'..'z','A'..'Z','0'..'9','_','.','~']) then
-          exit else
-          inc(P);
-      until P^=#0;
-      result := false;
-    end;
-  end;
 begin
   result := '';
   n := high(NameValuePairs);
   if n>0 then begin
     for A := 0 to n shr 1 do begin
       VarRecToUTF8(NameValuePairs[A*2],name);
-      if Invalid(pointer(name)) then
+      if not IsUrlValid(pointer(name)) then
         continue; // just skip invalid names
       with NameValuePairs[A*2+1] do
         if VType=vtObject then
@@ -30253,6 +30324,19 @@ begin
       result := result+'&'+name+'='+UrlEncode(value);
     end;
     result[1] := '?';
+  end;
+end;
+
+function IsUrlValid(P: PUTF8Char): boolean;
+begin
+  result := false;
+  if P<>nil then begin
+    repeat // cf. rfc3986 2.3. Unreserved Characters
+      if ord(P^) in IsURIUnreserved then
+        inc(P) else
+        exit;
+    until P^=#0;
+    result := true;
   end;
 end;
 
@@ -34619,6 +34703,8 @@ end;
 
 {$ifdef MSWINDOWS}
 
+// wrapper around some low-level Windows-specific API
+
 {$ifdef DELPHI6OROLDER}
 function GetFileVersion(const FileName: TFileName): cardinal;
 var Size, Size2: DWord;
@@ -34707,7 +34793,38 @@ begin
     result := false;
 end;
 
+var
+  LastAppUserModelID: string;
+
+function SetAppUserModelID(const AppUserModelID: string): boolean;
+var shell32: THandle;
+    id: SynUnicode;
+    SetCurrentProcessExplicitAppUserModelID: function(appID: PWidechar): HResult; stdcall;
+begin
+  if AppUserModelID=LastAppUserModelID then begin
+    result := true;
+    exit; // nothing to set
+  end;
+  result := false;
+  shell32 := GetModuleHandle('shell32.dll');
+  if shell32=0 then
+    exit;
+  SetCurrentProcessExplicitAppUserModelID := GetProcAddress(
+    shell32,'SetCurrentProcessExplicitAppUserModelID');
+  if not Assigned(SetCurrentProcessExplicitAppUserModelID) then
+    exit; // API available since Windows Seven / Server 2008 R2
+  id := StringToSynUnicode(AppUserModelID);
+  if Pos('.',AppUserModelID)=0 then
+    id := id+'.'+id; // at least CompanyName.ProductName
+  if SetCurrentProcessExplicitAppUserModelID(pointer(id))<>S_OK then
+    exit;
+  result := true;
+  LastAppUserModelID := AppUserModelID;
+end;
+
 {$else}
+
+// wrapper around some low-level OS (non Windows) specific API
 
 const
   _SC_PAGE_SIZE = $1000;
@@ -34885,28 +35002,50 @@ const
   CSIDL_COMMON_APPDATA = $0023;
   CSIDL_COMMON_DOCUMENTS = $002E;
   CSIDL: array[TSystemPath] of integer = (
-  // spCommonData, spUserData, spCommonDocuments, spUserDocuments
+  // spCommonData, spUserData, spCommonDocuments, spUserDocuments, spTempFolder
     CSIDL_COMMON_APPDATA, CSIDL_LOCAL_APPDATA,
-    CSIDL_COMMON_DOCUMENTS, CSIDL_PERSONAL);
+    CSIDL_COMMON_DOCUMENTS, CSIDL_PERSONAL, 0);
+  ENV: array[TSystemPath] of TFileName = (
+    'ALLUSERSAPPDATA', 'LOCALAPPDATA', '', '', 'TEMP');
 var tmp: array[0..MAX_PATH] of char;
     k: TSystemPath;
 begin
-  if _SystemPath[spCommonData]='' then
+  if _SystemPath[spCommonData]='' then begin
     for k := low(k) to high(k) do
-      if SHGetFolderPath(0,CSIDL[k],0,0,@tmp)=S_OK then
-        _SystemPath[k] := IncludeTrailingPathDelimiter(tmp) else
-        _SystemPath[k] := IncludeTrailingPathDelimiter(GetEnvironmentVariable('APPDATA'));
+      if (CSIDL[k]<>0) and (SHGetFolderPath(0,CSIDL[k],0,0,@tmp)=S_OK) then
+        _SystemPath[k] := IncludeTrailingPathDelimiter(tmp) else begin
+        _SystemPath[k] := GetEnvironmentVariable(ENV[k]);
+        if _SystemPath[k]='' then
+          _SystemPath[k] := GetEnvironmentVariable('APPDATA');
+        _SystemPath[k] := IncludeTrailingPathDelimiter(_SystemPath[k]);
+      end;
+    _SystemPath[spTempFolder] := IncludeTrailingPathDelimiter(GetEnvironmentVariable('TEMP'));
+  end;
   result := _SystemPath[kind];
 end;
 {$else MSWINDOWS}
 var
-  _HomePath: TFileName;
+  _HomePath,_TempPath: TFileName;
 
 function GetSystemPath(kind: TSystemPath): TFileName;
 begin
-  if _HomePath='' then
-    _HomePath := IncludeTrailingPathDelimiter(GetEnvironmentVariable('HOME'));
-  result := _HomePath;
+  if kind=spTempFolder then begin
+    if _TempPath='' then begin
+      _TempPath := GetEnvironmentVariable('TMPDIR');
+      if _TempPath='' then
+        _TempPath := GetEnvironmentVariable('TMP');
+      if _TempPath='' then
+        if DirectoryExists('/var/tmp') then
+          _TempPath := '/var/tmp' else
+          _TempPath := '/tmp';
+      _TempPath := IncludeTrailingPathDelimiter(_TempPath);
+    end;
+    result := _TempPath;
+  end else begin
+    if _HomePath='' then
+      _HomePath := IncludeTrailingPathDelimiter(GetEnvironmentVariable('HOME'));
+    result := _HomePath;
+  end;
 end;
 {$endif MSWINDOWS}
 
@@ -38599,13 +38738,13 @@ procedure TJSONCustomParserRTTI.WriteOneLevel(aWriter: TTextWriter; var P: PByte
     {$ifndef NOVARIANTS}
     ptVariant:   aWriter.AddVariant(PVariant(Value)^,twJSONEscape);
     {$endif}
+    ptRawJSON:   aWriter.AddRawJSON(PRawJSON(Value)^);
     ptRawByteString:
       aWriter.WrBase64(PPointer(Value)^,length(PRawByteString(Value)^),true);
-    ptRawJSON, ptRawUTF8, ptString, ptSynUnicode,
+    ptRawUTF8, ptString, ptSynUnicode,
     ptDateTime, ptDateTimeMS, ptGUID, ptWideString: begin
       aWriter.Add('"');
       case Prop.PropertyType of
-      ptRawJSON:       aWriter.AddNoJSONEscape(PPointer(Value)^,length(PRawJSON(Value)^));
       ptRawUTF8:       aWriter.AddJSONEscape(PPointer(Value)^);
       ptString:        aWriter.AddJSONEscapeString(PString(Value)^);
       ptSynUnicode,
@@ -40408,8 +40547,10 @@ begin
   if (n=0) or (VKind=dvArray) then
     exit; // nothing to add
   VKind := dvObject;
-  SetLength(VValue,VCount+n);
-  SetLength(VName,VCount+n);
+  if length(VValue)<VCount+n then begin
+    SetLength(VValue,VCount+n);
+    SetLength(VName,VCount+n);
+  end;
   for arg := 0 to n-1 do begin
     VarRecToUTF8(NameValuePairs[arg*2],VName[arg+VCount]);
     if dvoValueCopiedByReference in VOptions then
@@ -40885,8 +41026,7 @@ function TDocVariantData.AddItemFromText(const aValue: RawUTF8;
   AllowVarDouble: boolean): integer;
 begin
   result := InternalAdd(''); // FPC does not allow VValue[InternalAdd(aName)]
-  if not GetNumericVariantFromJSON(pointer(aValue),TVarData(VValue[result]),
-      AllowVarDouble) then
+  if not GetNumericVariantFromJSON(pointer(aValue),TVarData(VValue[result]),AllowVarDouble) then
     RawUTF8ToVariant(aValue,VValue[result]);
 end;
 
@@ -45946,7 +46086,12 @@ end;
 
 procedure TTextWriter.AddUnixTime(Value: PInt64);
 begin // inlined UnixTimeToDateTime()
-  AddDateTime(Value^ / SecsPerDay + UnixDateDelta);
+  AddDateTime(Value^/SecsPerDay+UnixDateDelta);
+end;
+
+procedure TTextWriter.AddUnixMSTime(Value: PInt64; WithMS: boolean);
+begin // inlined UnixMSTimeToDateTime()
+  AddDateTime(Value^/MSecsPerDay+UnixDateDelta,WithMS);
 end;
 
 procedure TTextWriter.AddDateTime(Value: PDateTime; FirstChar: AnsiChar;
@@ -45968,9 +46113,9 @@ begin
     end;
     if frac(Value^)<>0 then begin
       TimeToIso8601PChar(Value^,B,true,FirstChar,WithMS);
-      inc(B,9);
       if WithMS then
-        inc(B,4);
+        inc(B,13) else
+        inc(B,9);
     end;
     dec(B);
   end;
@@ -45993,7 +46138,9 @@ begin
   end;
   if frac(Value)<>0 then begin
     TimeToIso8601PChar(Value,B,true,'T',WithMS);
-    inc(B,9);
+    if WithMS then
+      inc(B,13) else
+      inc(B,9);
   end;
   dec(B);
 end;
@@ -46433,6 +46580,13 @@ begin
   if Source.fTotalFileSize=0 then
     AddNoJSONEscape(Source.fTempBuf,Source.B-Source.fTempBuf+1) else
     AddNoJSONEscapeUTF8(Source.Text);
+end;
+
+procedure TTextWriter.AddRawJSON(const json: RawJSON);
+begin
+  if json='' then
+    AddShort('null') else
+    AddNoJSONEscape(pointer(json),length(json));
 end;
 
 procedure TTextWriter.WriteObjectAsString(Value: TObject;
@@ -53910,6 +54064,25 @@ begin
       fValues.ElemCopyAt(ndx,aValue);
       if fSafe.Padding[DIC_TIMESEC].VInteger>0 then
         fTimeout[ndx] := GetTickCount64 shr 10+fSafe.Padding[DIC_TIMESEC].VInteger;
+      result := true;
+    end else
+      result := false;
+  finally
+    fSafe.UnLock;
+  end;
+end;
+
+function TSynDictionary.FindAndExtract(const aKey; out aValue): boolean;
+var ndx: integer;
+begin
+  fSafe.Lock;
+  try
+    ndx := fKeys.FindHashedAndDelete(aKey);
+    if ndx>=0 then begin
+      fValues.ElemCopyAt(ndx,aValue);
+      fValues.Delete(ndx);
+      if fSafe.Padding[DIC_TIMESEC].VInteger>0 then
+        fTimeOuts.Delete(ndx);
       result := true;
     end else
       result := false;
