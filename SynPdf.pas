@@ -320,10 +320,16 @@ unit SynPdf;
   - this feature need the TPdfDocument.UseUniscribe property to be forced to true
   according to the language of the text you want to render
   - can be undefined to safe some KB if you're sure you won't need it }
+
+// Added by Niki 13.09.2016
+{$define UNISCRIBE_DYNAMIC_LINK}
+{ - if defined, the PDF engine will load Windows Uniscribe API dynamically instead of statically}
+
 {$ifdef NO_USE_UNISCRIBE}
   { this special conditional can be set globaly for an application which doesn't
     need the UniScribe features }
-  {$undef USE_UNISCRIBE}
+  {$undef USE_UNISCRIBE}    
+  {$undef UNISCRIBE_DYNAMIC_LINK}
 {$endif}
 
 {$define USE_SYNGDIPLUS}
@@ -3095,18 +3101,34 @@ type
 // always available as:
 // ! pItems[i+1].iCharPos - pItems[i].iCharPos;
 // - pcItems: Pointer to the number of SCRIPT_ITEM structures processed
+{$ifndef UNISCRIBE_DYNAMIC_LINK}
 function ScriptItemize(
     const pwcInChars: PWideChar; cInChars: Integer; cMaxItems: Integer;
     const psControl: pointer; const psState: pointer;
     pItems: PScriptItem; var pcItems: Integer): HRESULT; stdcall; external Usp10;
+{$else}
+type TScriptItemize = function (
+    const pwcInChars: PWideChar; cInChars: Integer; cMaxItems: Integer;
+    const psControl: pointer; const psState: pointer;
+    pItems: PScriptItem; var pcItems: Integer): HRESULT; stdcall;
+
+var ScriptItemize: TScriptItemize;
+{$endif UNISCRIBE_DYNAMIC_LINK}
 
 /// Uniscribe function to retrieve information about the current scripts
 // - ppSp: Pointer to an array of pointers to SCRIPT_PROPERTIES structures
 // indexed by script.
 // - piNumScripts: Pointer to the number of scripts. The valid range for this
 // value is 0 through piNumScripts-1.
+{$ifndef UNISCRIBE_DYNAMIC_LINK}
 function ScriptGetProperties(out ppSp: PScriptPropertiesArray;
   out piNumScripts: Integer): HRESULT; stdcall; external Usp10;
+{$else}
+type TScriptGetProperties = function (out ppSp: PScriptPropertiesArray;
+  out piNumScripts: Integer): HRESULT; stdcall;
+
+var ScriptGetProperties: TScriptGetProperties;
+{$endif UNISCRIBE_DYNAMIC_LINK}
 
 /// Uniscribe function to convert an array of run embedding levels to a map
 // of visual-to-logical position and/or logical-to-visual position
@@ -3114,8 +3136,15 @@ function ScriptGetProperties(out ppSp: PScriptPropertiesArray;
 // - pbLevel: Array of run embedding levels
 // - piVisualToLogical: List of run indices in visual order
 // - piLogicalToVisual: List of visual run positions
+{$ifndef UNISCRIBE_DYNAMIC_LINK}
 function ScriptLayout(cRuns: Integer; const pbLevel: PByte;
     piVisualToLogical: PInteger; piLogicalToVisual: PInteger): HRESULT; stdcall; external Usp10;
+{$else}
+type TScriptLayout = function (cRuns: Integer; const pbLevel: PByte;
+    piVisualToLogical: PInteger; piLogicalToVisual: PInteger): HRESULT; stdcall;
+
+var ScriptLayout: TScriptLayout;
+{$endif UNISCRIBE_DYNAMIC_LINK}
 
 /// Uniscribe function to generate glyphs and visual attributes for an Unicode run
 // - hdc: Optional (see under caching)
@@ -3128,16 +3157,38 @@ function ScriptLayout(cRuns: Integer; const pbLevel: PByte;
 // - pwLogClust: Logical clusters
 // - psva: Visual glyph attributes
 // - pcGlyphs: Count of glyphs generated
+{$ifndef UNISCRIBE_DYNAMIC_LINK}
 function ScriptShape(hdc: HDC; var psc: pointer; const pwcChars: PWideChar;
     cChars: Integer; cMaxGlyphs: Integer; psa: PScriptAnalysis;
     pwOutGlyphs: PWord; pwLogClust: PWord; psva: PScriptVisAttr;
     var pcGlyphs: Integer): HRESULT; stdcall; external Usp10;
+{$else}
+type TScriptShape = function (hdc: HDC; var psc: pointer; const pwcChars: PWideChar;
+    cChars: Integer; cMaxGlyphs: Integer; psa: PScriptAnalysis;
+    pwOutGlyphs: PWord; pwLogClust: PWord; psva: PScriptVisAttr;
+    var pcGlyphs: Integer): HRESULT; stdcall;
+
+var ScriptShape: TScriptShape;
+{$endif UNISCRIBE_DYNAMIC_LINK}
 
 /// Uniscribe function to apply the specified digit substitution settings
 // to the specified script control and script state structures
+{$ifndef UNISCRIBE_DYNAMIC_LINK}
 function ScriptApplyDigitSubstitution(
     const psds: Pointer; const psControl: pointer;
     const psState: pointer): HRESULT; stdcall; external Usp10;
+{$else}
+type TScriptApplyDigitSubstitution = function (
+    const psds: Pointer; const psControl: pointer;
+    const psState: pointer): HRESULT; stdcall;
+
+var ScriptApplyDigitSubstitution: TScriptApplyDigitSubstitution;
+{$endif UNISCRIBE_DYNAMIC_LINK}
+
+{$ifdef UNISCRIBE_DYNAMIC_LINK}
+function LoadUniscribe: boolean;
+{$endif UNISCRIBE_DYNAMIC_LINK}
+
 
 // C++Builder code should #include <usp10.h> directly instead of using these
 {$NODEFINE TScriptState }
@@ -3158,6 +3209,29 @@ function ScriptApplyDigitSubstitution(
 
 
 implementation
+
+{$ifdef UNISCRIBE_DYNAMIC_LINK}
+function LoadUniscribe: boolean;
+var
+  hModule : cardinal;
+begin
+    hModule := GetModuleHandleA('usp10.dll');
+
+    if hModule = 0
+    then
+        result := false
+    else
+    begin
+      @ScriptItemize                := GetProcAddress(hModule, 'ScriptItemize');
+      @ScriptGetProperties          := GetProcAddress(hModule, 'ScriptGetProperties');
+      @ScriptLayout                 := GetProcAddress(hModule, 'ScriptLayout');
+      @ScriptShape                  := GetProcAddress(hModule, 'ScriptShape');
+      @ScriptApplyDigitSubstitution := GetProcAddress(hModule, 'ScriptApplyDigitSubstitution');
+
+      result := true;
+    end
+end;
+{$endif UNISCRIBE_DYNAMIC_LINK}
 
 
 function RGBA(r, g, b, a: cardinal): COLORREF; {$ifdef HASINLINE}inline;{$endif}
@@ -5618,6 +5692,11 @@ begin
         break;
       end;
   NewDoc;
+
+  // load uniscribe dynamic link
+  {$ifdef UNISCRIBE_DYNAMIC_LINK}
+    LoadUniscribe();
+  {$endif UNISCRIBE_DYNAMIC_LINK}
 end;
 
 function TPdfDocument.GetInfo: TPdfInfo;
