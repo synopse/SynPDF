@@ -928,6 +928,9 @@ type
     /// returns a binary buffer filled with some pseudorandom data
     // - this method is thread-safe
     function FillRandomBytes(Len: integer): TBytes;
+    /// returns an hexa-encoded binary buffer filled with some pseudorandom data
+    // - this method is thread-safe
+    function FillRandomHex(Len: integer): RawUTF8; 
     /// computes a random ASCII password
     // - will contain uppercase/lower letters, digits and $.:()?%!-+*/@#
     // excluding ;,= to allow direct use in CSV content
@@ -1386,7 +1389,10 @@ type
     procedure Init(key: pointer; keylen: integer);
     /// call this method for each continuous message block
     // - iterate over all message blocks, then call Done to retrieve the HMAC
-    procedure Update(msg: pointer; msglen: integer);
+    procedure Update(msg: pointer; msglen: integer); overload;
+    /// call this method for each continuous message block
+    // - iterate over all message blocks, then call Done to retrieve the HMAC
+    procedure Update(const msg: RawByteString); overload;
     /// computes the HMAC of all supplied message according to the key
     function Done: cardinal;
     /// computes the HMAC of the supplied message according to the key
@@ -1841,6 +1847,8 @@ type
     /// compute a HTTP Authorization header containing a JWT for a given payload
     // - just a wrapper around Compute(), returned the HTTP header value:
     // $ Authorization: <HttpAuthorizationHeader>
+    // following the expected pattern:
+    // $ Authorization: Bearer <Token>
     // - this method is thread-safe
     function ComputeAuthorizationHeader(const DataNameValue: array of const;
       const Issuer: RawUTF8=''; const Subject: RawUTF8=''; const Audience: RawUTF8='';
@@ -1852,7 +1860,14 @@ type
     // - supplied JWT is transmitted e.g. in HTTP header:
     // $ Authorization: Bearer <Token>
     // - this method is thread-safe
-    procedure Verify(const Token: RawUTF8; out JWT: TJWTContent);
+    procedure Verify(const Token: RawUTF8; out JWT: TJWTContent); overload;
+    /// check a JWT value, and its signature
+    // - will validate all expected Claims, and the associated signature
+    // - verification state is returned as function result
+    // - supplied JWT is transmitted e.g. in HTTP header:
+    // $ Authorization: Bearer <Token>
+    // - this method is thread-safe
+    function Verify(const Token: RawUTF8): TJWTResult; overload;
     /// check a HTTP Authorization header value as JWT, and its signature
     // - will validate all expected Claims, and the associated signature
     // - verification state is returned in JWT.result (jwtValid for a valid JWT),
@@ -1939,6 +1954,13 @@ type
       aIDIdentifier: TSynUniqueIdentifierProcess=0; aIDObfuscationKey: RawUTF8=''); reintroduce;
     /// finalize the instance
     destructor Destroy; override;
+    /// low-level helper to re-compute the internal HMAC shared secret
+    // - by definition, expects aSecretPBKDF2Rounds>0 (otherwise aSecret is
+    // expected to be passed directly to the HMAC function)
+    // - may be used to provide any non Delphi client with the expected secret
+    // - caller should call FillZero(aHMACSecret) as soon as it consummed it
+    procedure ComputeHMACSecret(const aSecret: RawUTF8; aSecretPBKDF2Rounds: integer;
+      out aHMACSecret: THash256);
   end;
 
 const
@@ -2687,6 +2709,11 @@ end;
 procedure THMAC_CRC32C.Update(msg: pointer; msglen: integer);
 begin
   seed := crc32c(seed,msg,msglen);
+end;
+
+procedure THMAC_CRC32C.Update(const msg: RawByteString);
+begin
+  seed := crc32c(seed,pointer(msg),length(msg));
 end;
 
 function THMAC_CRC32C.Done: cardinal;
@@ -9093,6 +9120,17 @@ begin
   FillRandom(pointer(result),Len);
 end;
 
+function TAESPRNG.FillRandomHex(Len: integer): RawUTF8;
+var bin: pointer;
+begin
+  SetString(result,nil,Len*2);
+  if Len=0 then
+    exit;
+  bin := @PByteArray(result)[Len]; // temporary store random bytes at the end 
+  FillRandom(bin,Len);
+  SynCommons.BinToHex(bin,pointer(result),Len);
+end;
+
 function TAESPRNG.RandomPassword(Len: integer): RawUTF8;
 const CHARS: array[0..137] of AnsiChar =
   'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'+
@@ -9648,6 +9686,13 @@ begin
     fCache.Add(Token,JWT);
 end;
 
+function TJWTAbstract.Verify(const Token: RawUTF8): TJWTResult;
+var jwt: TJWTContent;
+begin
+  Verify(Token,jwt);
+  result := jwt.result;
+end;
+
 function TJWTAbstract.CheckAgainstActualTimestamp(var JWT: TJWTContent): boolean;
 var nowunix, unix: cardinal;
 begin
@@ -9851,13 +9896,21 @@ constructor TJWTHS256.Create(const aSecret: RawUTF8; aSecretPBKDF2Rounds: intege
 var secret: THash256;
 begin
   inherited Create('HS256',aClaims,aAudience,aExpirationMinutes,aIDIdentifier,aIDObfuscationKey);
-  if aSecretPBKDF2Rounds>0 then begin
-    PBKDF2_HMAC_SHA256(aSecret,fHeaderB64,aSecretPBKDF2Rounds,secret);
+  if (aSecret<>'') and (aSecretPBKDF2Rounds>0) then begin
+    ComputeHMACSecret(aSecret,aSecretPBKDF2Rounds,secret);
     fHmacPrepared.Init(@secret,sizeof(secret));
     FillZero(secret);
   end else
     fHmacPrepared.Init(pointer(aSecret),length(aSecret));
-  fHmacPrepared.Update(pointer(fHeaderB64),length(fHeaderB64));    
+  fHmacPrepared.Update(pointer(fHeaderB64),length(fHeaderB64));
+end;
+
+procedure TJWTHS256.ComputeHMACSecret(const aSecret: RawUTF8; aSecretPBKDF2Rounds: integer;
+  out aHMACSecret: THash256);
+begin
+  if (self<>nil) and (aSecret<>'') and (aSecretPBKDF2Rounds>0) then
+    PBKDF2_HMAC_SHA256(aSecret,fHeaderB64,aSecretPBKDF2Rounds,aHMACSecret) else
+    FillZero(aHMACSecret);
 end;
 
 function TJWTHS256.ComputeSignature(const payload64: RawUTF8): RawUTF8;
@@ -9881,7 +9934,7 @@ begin
   hmac := fHmacPrepared; // thread-safe re-use of prepared HMAC(header+'.')
   hmac.Update(pointer(payload64),length(payload64));
   hmac.Done(res);
-  if CompareMem(@res,pointer(signature),sizeof(res)) then
+  if IsEqual(res,PSHA256Digest(signature)^) then
     JWT.result := jwtValid;
 end;
 

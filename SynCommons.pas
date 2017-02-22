@@ -36,6 +36,7 @@ unit SynCommons;
    - itSDS
    - Johan Bontes
    - kevinday
+   - Maciej Izak (hnb)
    - Marius Maximus (mariuszekpl)
    - mazinsw
    - mingda
@@ -738,6 +739,8 @@ unit SynCommons;
     and a more complete SYNOPSE_FRAMEWORK_FULLVERSION constant has been added
   - added x64 support for TSynFPUException class
   - fixed [63aa36f485] memory corruption in TSynAnsiConvert.AnsiToUnicodeString
+  - extend TFileVersion by version resources stored in strings in the
+    first locale section. Windows only
 
 *)
 
@@ -1840,6 +1843,20 @@ function Utf8TruncateToUnicodeLength(var text: RawUTF8; maxUtf16: integer): bool
 // - returns FALSE if text was not truncated, TRUE otherwise
 function Utf8TruncateToLength(var text: RawUTF8; maxUTF8: cardinal): boolean;
 
+/// compute the truncated length of the supplied UTF-8 value if it exceeds the
+// specified UTF-8 Unicode characters count
+// - this function will ensure that the returned content will contain only valid
+// UTF-8 sequence, i.e. will trim the whole trailing UTF-8 sequence
+// - returns maxUTF8 if text was not truncated, or the number of fitting bytes
+function Utf8TruncatedLength(const text: RawUTF8; maxUTF8: cardinal): integer; overload;
+
+/// compute the truncated length of the supplied UTF-8 value if it exceeds the
+// specified UTF-8 Unicode characters count
+// - this function will ensure that the returned content will contain only valid
+// UTF-8 sequence, i.e. will trim the whole trailing UTF-8 sequence
+// - returns maxUTF8 if text was not truncated, or the number of fitting bytes
+function Utf8TruncatedLength(text: PAnsiChar; textlen,maxUTF8: cardinal): integer; overload;
+
 /// calculate the UTF-16 Unicode characters count of the UTF-8 encoded first line
 // - count may not match the UCS4 glyphs number, in case of UTF-16 surrogates
 // - end the parsing at first #13 or #10 character
@@ -2090,6 +2107,9 @@ function VariantToInt64Def(const V: Variant; DefaultValue: Int64): Int64;
 
 /// convert any numerical Variant into a floating point value
 function VariantToDouble(const V: Variant; var Value: double): boolean;
+
+/// convert any numerical Variant into a floating point value
+function VariantToDoubleDef(const V: Variant; const default: double=0): double; 
 
 /// convert any numerical Variant into a fixed decimals floating point value
 function VariantToCurrency(const V: Variant; var Value: currency): boolean;
@@ -3311,6 +3331,11 @@ function Split(const Str, SepStr: RawUTF8; StartPos: integer=1): RawUTF8; overlo
 // - if any DestPtr[]=nil, the item will be skipped
 procedure Split(const Str: RawUTF8; const SepStr: array of RawUTF8;
   const DestPtr: array of PRawUTF8); overload;
+
+/// returns the last occurence of the given SepChar separated context
+// - e.g. SplitRight('01/2/34','/')='34'
+// - if SepChar doesn't appear, will return Str, e.g. SplitRight('123','/')='123'
+function SplitRight(const Str: RawUTF8; SepChar: AnsiChar): RawUTF8;
 
 /// fast version of StringReplace(S, OldPattern, NewPattern,[rfReplaceAll]);
 function StringReplaceAll(const S, OldPattern, NewPattern: RawUTF8): RawUTF8;
@@ -5965,6 +5990,10 @@ procedure ObjArraySetLength(var aObjArray; aLength: integer);
 function ObjArrayFind(const aObjArray; aItem: TObject): integer;
   {$ifdef HASINLINE}inline;{$endif}
 
+/// wrapper to count all not nil items in a T*ObjArray dynamic array storage
+// - as expected by TJSONSerializer.RegisterObjArrayForJSON()
+function ObjArrayCount(const aObjArray): integer;
+
 /// wrapper to delete an item in a T*ObjArray dynamic array storage
 // - as expected by TJSONSerializer.RegisterObjArrayForJSON()
 // - do nothing if the index is out of range in the dynamic array
@@ -6143,7 +6172,14 @@ const
 // - will return e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
 // - using a shortstring will allow fast allocation on the stack, so is
 // preferred e.g. when providing a GUID to a ESynException.CreateUTF8()
-function GUIDToShort(const guid: TGUID): TGUIDShortString;
+function GUIDToShort(const guid: TGUID): TGUIDShortString; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// convert a TGUID into text
+// - will return e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
+// - using a shortstring will allow fast allocation on the stack, so is
+// preferred e.g. when providing a GUID to a ESynException.CreateUTF8()
+procedure GUIDToShort(const guid: TGUID; out dest: TGUIDShortString); overload;
 
 /// convert some text into its TGUID binary value
 // - expect e.g. '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without any {})
@@ -6772,6 +6808,8 @@ type
   // to avoid memory allocations, BUT it may break internal process if you change
   // some values in place (since VValue/VName and VCount won't match) - as such,
   // if you set this option, ensure that you use the content as read-only
+  // - you may use TTextWriter.RegisterCustomJSONSerializerSetOptions() class
+  // method to customize the serialization for a given type
   TJSONCustomParserSerializationOptions = set of TJSONCustomParserSerializationOption;
 
   TJSONCustomParserRTTI = class;
@@ -7416,12 +7454,12 @@ type
     // - CR = #13 writes CR+LF chars (i.e. if you write #13 in the Format
     // string, it will output #13#10 chars)
     {$ifdef OLDTEXTWRITERFORMAT}
-    // - $ = #36 indicates an integer to be written with 2 digits and a comma
-    // - £ = #163 indicates an integer to be written with 4 digits and a comma
-    // - µ = #181 indicates an integer to be written with 3 digits without any comma
-    // - ¤ = #164 indicates CR+LF chars
-    // - § = #167 indicates to trim last comma
-    // - | = #124 will write the next char e.g. Add('%|$',[10]) will write '10$'
+    // - $ dollar = #36 indicates an integer to be written with 2 digits and a comma
+    // - | vertical = #124 will write the next char e.g. Add('%|$',[10]) will write '10$'
+    // - pound = #163 indicates an integer to be written with 4 digits and a comma
+    // - micro = #181 indicates an integer to be written with 3 digits without any comma
+    // - currency = #164 indicates CR+LF chars
+    // - section = #167 indicates to trim last comma
     // - since some of this characters above are > #127, they are not UTF-8
     // ready, so we expect the input format to be WinAnsi, i.e. mostly English
     // text (with chars < #128) with some values to be inserted inside
@@ -10532,6 +10570,11 @@ procedure BinToHexDisplay(Bin, Hex: PAnsiChar; BinBytes: integer); overload;
 /// fast conversion from binary data into hexa chars, ready to be displayed
 function BinToHexDisplay(Bin: PAnsiChar; BinBytes: integer): RawUTF8; overload;
 
+type
+  /// used e.g. by PointerToHexShort/CardinalToHexShort/Int64ToHexShort
+  // - such result type would avoid a string allocation on heap
+  TShort16 = string[16];
+
 /// fast conversion from a pointer data into hexa chars, ready to be displayed
 // - use internally BinToHexDisplay()
 function PointerToHex(aPointer: Pointer): RawUTF8; overload;
@@ -10540,10 +10583,20 @@ function PointerToHex(aPointer: Pointer): RawUTF8; overload;
 // - use internally BinToHexDisplay()
 procedure PointerToHex(aPointer: Pointer; var result: RawUTF8); overload;
 
+/// fast conversion from a pointer data into hexa chars, ready to be displayed
+// - use internally BinToHexDisplay()
+// - such result type would avoid a string allocation on heap
+function PointerToHexShort(aPointer: Pointer): TShort16; overload;
+
 /// fast conversion from a Cardinal value into hexa chars, ready to be displayed
 // - use internally BinToHexDisplay()
 // - reverse function of HexDisplayToCardinal()
 function CardinalToHex(aCardinal: Cardinal): RawUTF8;
+
+/// fast conversion from a Cardinal value into hexa chars, ready to be displayed
+// - use internally BinToHexDisplay()
+// - such result type would avoid a string allocation on heap
+function CardinalToHexShort(aCardinal: Cardinal): TShort16;
 
 /// fast conversion from a Int64 value into hexa chars, ready to be displayed
 // - use internally BinToHexDisplay()
@@ -10554,6 +10607,11 @@ function Int64ToHex(aInt64: Int64): RawUTF8; overload;
 // - use internally BinToHexDisplay()
 // - reverse function of HexDisplayToInt64()
 procedure Int64ToHex(aInt64: Int64; var result: RawUTF8); overload;
+
+/// fast conversion from a Int64 value into hexa chars, ready to be displayed
+// - use internally BinToHexDisplay()
+// - such result type would avoid a string allocation on heap
+function Int64ToHexShort(aInt64: Int64): TShort16;
 
 /// fast conversion from hexa chars into a pointer
 function HexDisplayToBin(Hex: PAnsiChar; Bin: PByte; BinBytes: integer): boolean;
@@ -10808,24 +10866,24 @@ function UInt4DigitsToUTF8(Value: Cardinal): RawUTF8;
 type
   /// used e.g. by UInt4DigitsToShort/UInt3DigitsToShort/UInt2DigitsToShort
   // - such result type would avoid a string allocation on heap
-  Short4 = string[4];
+  TShort4 = string[4];
 
 /// creates a 4 digits short string from a 0..9999 value
-// - using Short4 as returned string would avoid a string allocation on heap
+// - using TShort4 as returned string would avoid a string allocation on heap
 // - could be used e.g. as parameter to FormatUTF8()
-function UInt4DigitsToShort(Value: Cardinal): Short4;
+function UInt4DigitsToShort(Value: Cardinal): TShort4;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// creates a 3 digits short string from a 0..999 value
-// - using Short4 as returned string would avoid a string allocation on heap
+// - using TShort4 as returned string would avoid a string allocation on heap
 // - could be used e.g. as parameter to FormatUTF8()
-function UInt3DigitsToShort(Value: Cardinal): Short4;
+function UInt3DigitsToShort(Value: Cardinal): TShort4;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// creates a 2 digits short string from a 0..99 value
-// - using Short4 as returned string would avoid a string allocation on heap
+// - using TShort4 as returned string would avoid a string allocation on heap
 // - could be used e.g. as parameter to FormatUTF8()
-function UInt2DigitsToShort(Value: byte): Short4;
+function UInt2DigitsToShort(Value: byte): TShort4;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// compare to floating point values, with IEEE 754 double precision
@@ -10989,6 +11047,7 @@ function IsZero(const dig: THash128): boolean; overload;
 
 /// returns TRUE if all 16 bytes of both 128-bit buffers do match
 // - e.g. a MD5 digest, or an AES block
+// - this function is not sensitive to any timing attack
 function IsEqual(const A,B: THash128): boolean; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
@@ -11010,6 +11069,7 @@ function IsZero(const dig: THash256): boolean; overload;
 
 /// returns TRUE if all 32 bytes of both 256-bit buffers do match
 // - e.g. a SHA-256 digest, or a TECCSignature result
+// - this function is not sensitive to any timing attack
 function IsEqual(const A,B: THash256): boolean; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
@@ -11542,7 +11602,9 @@ function MultiEventFind(const EventList; const Event: TMethod): integer;
 // - the list is not checked for duplicates
 procedure MultiEventMerge(var DestList; const ToBeAddedList);
 
-
+/// compare two TMethod instances
+function EventEquals(const eventA,eventB): boolean;
+  {$ifdef HASINLINE}inline;{$endif}
 
 { ************ fast ISO-8601 types and conversion routines ***************** }
 
@@ -12250,6 +12312,33 @@ type
     /// version info of the exe file as '3.1'
     // - return "string" type, i.e. UnicodeString for Delphi 2009+
     Main: string;
+    /// associated CompanyName string version resource
+    // - only available on Windows - contains '' under Linux
+    CompanyName: RawUTF8;
+    /// associated FileDescription string version resource
+    // - only available on Windows - contains '' under Linux
+    FileDescription: RawUTF8;
+    /// associated FileVersion string version resource
+    // - only available on Windows - contains '' under Linux
+    FileVersion: RawUTF8;
+    /// associated InternalName string version resource
+    // - only available on Windows - contains '' under Linux
+    InternalName: RawUTF8;
+    /// associated LegalCopyright string version resource
+    // - only available on Windows - contains '' under Linux
+    LegalCopyright: RawUTF8;
+    /// associated OriginalFileName string version resource
+    // - only available on Windows - contains '' under Linux
+    OriginalFilename: RawUTF8;
+    /// associated ProductName string version resource
+    // - only available on Windows - contains '' under Linux
+    ProductName: RawUTF8;
+    /// associated ProductVersion string version resource
+    // - only available on Windows - contains '' under Linux
+    ProductVersion: RawUTF8;
+    /// associated Comments string version resource
+    // - only available on Windows - contains '' under Linux
+    Comments: RawUTF8;
     /// retrieve application version from exe file name
     // - DefaultVersion32 is used if no information Version was included into
     // the executable resources (on compilation time)
@@ -15459,6 +15548,12 @@ type
     // - here dates are expected to be encoded with ISO-8601, i.e. YYYY-MM-DD
     // - you can specify a prompt text, when asking for any missing switch
     function AsDate(const Switch: RawUTF8; Default: TDateTime; const Prompt: string): TDateTime;
+    /// returns a command line switch value as enumeration ordinal
+    // - RTTI will be used to check for the enumeration text, or plain integer
+    // value will be returned as ordinal value
+    // - you can specify a prompt text, when asking for any missing switch
+    function AsEnum(const Switch, Default: RawUTF8; TypeInfo: pointer;
+      const Prompt: string): integer;
     /// returns all command line values as an array of UTF-8 text
     // - i.e. won't interpret the various switches in the input parameters
     // - as created e.g. by TCommandLine.CreateAsArray constructor
@@ -15521,6 +15616,12 @@ type
     // - here dates are expected to be encoded with ISO-8601, i.e. YYYY-MM-DD
     // - you can specify a prompt text, when asking for any missing switch
     function AsDate(const Switch: RawUTF8; Default: TDateTime; const Prompt: string): TDateTime;
+    /// returns a command line switch value as enumeration ordinal
+    // - RTTI will be used to check for the enumeration text, or plain integer
+    // value will be returned as ordinal value
+    // - you can specify a prompt text, when asking for any missing switch
+    function AsEnum(const Switch, Default: RawUTF8; TypeInfo: pointer;
+      const Prompt: string): integer;
     /// returns all command line values as an array of UTF-8 text
     // - i.e. won't interpret the various switches in the input parameters
     // - as created e.g. by TCommandLine.CreateAsArray constructor
@@ -17091,7 +17192,12 @@ type
     // timestamp
     // - may be used e.g. to limit database queries on a particular time range
     // - bits 0..30 would be 0, i.e. would set Counter = 0 and ProcessID = 0
-    procedure FromDateTime(aDateTime: TDateTime);
+    procedure FromDateTime(const aDateTime: TDateTime);
+    /// fill this unique identifier with a fake value corresponding to a given
+    // timestamp
+    // - may be used e.g. to limit database queries on a particular time range
+    // - bits 0..30 would be 0, i.e. would set Counter = 0 and ProcessID = 0
+    procedure FromUnixTime(const aUnixTime: TUnixTime);
   end;
   {$A+}
 
@@ -17320,7 +17426,7 @@ procedure ZeroCompress(P: PAnsiChar; Len: integer; Dest: TFileBufferWriter);
 // - returns Dest='' if P^ is not a valid ZeroCompress() function result
 // - used for spare bit sets, e.g. TSynBloomFilter serialization
 // - will also check the crc32c of the supplied content
-procedure ZeroDecompress(P: PByte; Len: integer; out Dest: RawByteString);
+procedure ZeroDecompress(P: PByte; Len: integer; {$ifdef FPC}var{$else}out{$endif} Dest: RawByteString);
 
 /// RLE compression of XORed memory buffers resulting in mostly zeros
 // - will perform ZeroCompress(Dest^ := New^ xor Old^) without any temporary
@@ -19018,10 +19124,31 @@ begin
     result := false;
     exit; // nothing to truncate
   end;
-  while (maxUTF8>0) and (ord(Text[maxUTF8]) and $c0=$80) do dec(maxUTF8);
-  if (maxUTF8>0) and (ord(Text[maxUTF8]) and $80<>0) then dec(maxUTF8);
+  while (maxUTF8>0) and (ord(text[maxUTF8]) and $c0=$80) do dec(maxUTF8);
+  if (maxUTF8>0) and (ord(text[maxUTF8]) and $80<>0) then dec(maxUTF8);
   SetLength(text,maxUTF8);
   result := true;
+end;
+
+function Utf8TruncatedLength(const text: RawUTF8; maxUTF8: cardinal): integer;
+begin
+  result := length(text);
+  if cardinal(result)<maxUTF8 then
+    exit;
+  result := maxUTF8;
+  while (result>0) and (ord(text[result]) and $c0=$80) do dec(result);
+  if (result>0) and (ord(text[result]) and $80<>0) then dec(result);
+end;
+
+function Utf8TruncatedLength(text: PAnsiChar; textlen,maxUTF8: cardinal): integer;
+begin
+  if textlen<maxUTF8 then begin
+    result := textlen;
+    exit;
+  end;
+  result := maxUTF8;
+  while (result>0) and (ord(text[result]) and $c0=$80) do dec(result);
+  if (result>0) and (ord(text[result]) and $80<>0) then dec(result);
 end;
 
 function Utf8FirstLineToUnicodeLength(source: PUTF8Char): PtrInt;
@@ -20427,7 +20554,8 @@ const
 {$endif}
 
 type
-  TOrdType = (otSByte,otUByte,otSWord,otUWord,otSLong,otULong);
+  TOrdType = (otSByte,otUByte,otSWord,otUWord,otSLong,otULong
+    {$ifdef FPC_NEWRTTI},otSQWord,otUQWord{$endif});
   TFloatType = (ftSingle,ftDoub,ftExtended,ftComp,ftCurr);
   TTypeKinds = set of TTypeKind;
   PTypeKind = ^TTypeKind;
@@ -20506,6 +20634,33 @@ type
   PTypeInfoStored = ^PTypeInfo;
   {$endif}
 
+  {$ifdef FPC_NEWRTTI}
+  PInitManagedField = ^TInitManagedField;
+  TInitManagedField =
+  {$ifndef FPC_REQUIRES_PROPER_ALIGNMENT}
+  packed
+  {$endif FPC_REQUIRES_PROPER_ALIGNMENT}
+  record
+    TypeInfo: PTypeInfoStored;
+    Offset: sizeint;
+  end;
+
+  PRecInitData = ^TRecInitData;
+  TRecInitData =
+  {$ifndef FPC_REQUIRES_PROPER_ALIGNMENT}
+  packed
+  {$endif FPC_REQUIRES_PROPER_ALIGNMENT}
+  record
+    Terminator: Pointer;
+    Size: Integer;
+    {$ifdef FPC_HAS_MANAGEMENT_OPERATORS}
+    ManagementOp: Pointer;
+    {$endif}
+    ManagedFieldCount: Integer;
+    ManagedFields: array[0..0] of TInitManagedField;
+  end;
+  {$endif}
+
   /// map the Delphi/FPC record field RTTI
   TFieldInfo =
     {$ifndef FPC_REQUIRES_PROPER_ALIGNMENT}
@@ -20520,13 +20675,15 @@ type
     {$endif FPC}
   end;
   PFieldInfo = ^TFieldInfo;
-  {$ifdef ISDELPHI2010}
+  {$ifdef ISDELPHI2010_OR_FPC_NEWRTTI}
   /// map the Delphi record field enhanced RTTI (available since Delphi 2010)
   TEnhancedFieldInfo = packed record
     TypeInfo: PTypeInfoStored;
     Offset: PtrUInt;
+    {$ifdef ISDELPHI2010}
     Flags: Byte;
     NameLen: byte; // = Name[0] = length(Name)
+    {$ENDIF}
   end;
   PEnhancedFieldInfo = ^TEnhancedFieldInfo;
   {$endif}
@@ -20593,18 +20750,27 @@ type
     );
     {$ifdef FPC}
     tkRecord, tkObject:(
+      {$ifdef FPC_NEWRTTI}
+      RecInitInfo: Pointer;
+      {$endif}
       recSize: longint;
-      {$ifdef FPC_HAS_MANAGEMENT_OPERATORS}
-      recInitTable: PPRecordInitTable;
-      {$endif FPC_HAS_MANAGEMENT_OPERATORS}
+      {$ifdef FPC_NEWRTTI}
+      TotalFieldCount: longint;
+      // note: for FPC 3.1.x and never ManagedCount is deprecated
+      {$else}
       ManagedCount: longint;
-      // note: FPC generates RTTI for unmanaged fields (as in TEnhancedFieldInfo)
+      // note: FPC for 3.0.x and previous generates RTTI for unmanaged fields (as in TEnhancedFieldInfo)
+      {$endif}
     {$else}
     tkRecord: (
       recSize: cardinal;
       ManagedCount: integer;
     {$endif FPC}
+    {$ifdef DELPHI_OR_FPC_OLDRTTI}
       ManagedFields: array[0..0] of TFieldInfo;
+    {$else}
+      AllFields: array[0..0] of TEnhancedFieldInfo;
+    {$endif}
       {$ifdef ISDELPHI2010} // enhanced RTTI containing info about all fields
       NumOps: Byte;
       //RecOps: array[0..0] of Pointer;
@@ -20614,6 +20780,9 @@ type
     );
     tkEnumeration: (
       EnumType: TOrdType;
+      {$ifdef FPC_REQUIRES_PROPER_ALIGNMENT}
+      tkEnumerationAlignment:DWORD; // needed for correct alignment !!??
+      {$endif}
       {$ifdef FPC_ENUMHASINNER}
       inner:
       {$ifndef FPC_REQUIRES_PROPER_ALIGNMENT}
@@ -20634,6 +20803,9 @@ type
     );
     tkSet: (
       SetType: TOrdType;
+      {$ifdef FPC_REQUIRES_PROPER_ALIGNMENT}
+      tkSetAlignment:DWORD; // needed for correct alignment !!??
+      {$endif}
       SetBaseType: PTypeInfoStored;
     );
     tkFloat: (
@@ -21574,6 +21746,12 @@ begin
       result := VariantToDouble(variant(tmp),Value) else
       result := false;
   end;
+end;
+
+function VariantToDoubleDef(const V: Variant; const default: double=0): double;
+begin
+  if not VariantToDouble(V,result) then
+    result := default;
 end;
 
 function VariantToCurrency(const V: Variant; var Value: currency): boolean;
@@ -22658,6 +22836,17 @@ asm     // eax=SubStr, edx=S, ecx=Offset
         lea     eax, [edx + ecx + 1]
 end;
 {$endif PUREPASCAL}
+
+function SplitRight(const Str: RawUTF8; SepChar: AnsiChar): RawUTF8;
+var i: integer;
+begin
+  for i := length(Str) downto 1 do
+    if Str[i]=SepChar then begin
+      result := copy(Str,i+1,maxInt);
+      exit;
+    end;
+  result := Str;
+end;
 
 function Split(const Str, SepStr: RawUTF8; StartPos: integer): RawUTF8;
 var i: integer;
@@ -26256,26 +26445,44 @@ end;
 
 function PointerToHex(aPointer: Pointer): RawUTF8;
 begin
-  FastNewRawUTF8(result,sizeof(Pointer)*2);
-  BinToHexDisplay(aPointer,pointer(result),sizeof(Pointer));
+  FastNewRawUTF8(result,sizeof(aPointer)*2);
+  BinToHexDisplay(aPointer,pointer(result),sizeof(aPointer));
 end;
 
 function CardinalToHex(aCardinal: Cardinal): RawUTF8;
 begin
-  FastNewRawUTF8(result,sizeof(Cardinal)*2);
-  BinToHexDisplay(@aCardinal,pointer(result),sizeof(Cardinal));
+  FastNewRawUTF8(result,sizeof(aCardinal)*2);
+  BinToHexDisplay(@aCardinal,pointer(result),sizeof(aCardinal));
 end;
 
 function Int64ToHex(aInt64: Int64): RawUTF8;
 begin
   FastNewRawUTF8(result,sizeof(Int64)*2);
-  BinToHexDisplay(@AInt64,pointer(result),sizeof(Int64));
+  BinToHexDisplay(@aInt64,pointer(result),sizeof(Int64));
 end;
 
 procedure Int64ToHex(aInt64: Int64; var result: RawUTF8);
 begin
   FastNewRawUTF8(result,sizeof(Int64)*2);
-  BinToHexDisplay(@AInt64,pointer(result),sizeof(Int64));
+  BinToHexDisplay(@aInt64,pointer(result),sizeof(Int64));
+end;
+
+function PointerToHexShort(aPointer: Pointer): TShort16;
+begin
+  result[0] := AnsiChar(sizeof(aPointer)*2);
+  BinToHexDisplay(@aPointer,@result[1],sizeof(aPointer));
+end;
+
+function CardinalToHexShort(aCardinal: Cardinal): TShort16;
+begin
+  result[0] := AnsiChar(sizeof(aCardinal)*2);
+  BinToHexDisplay(@aCardinal,@result[1],sizeof(aCardinal));
+end;
+
+function Int64ToHexShort(aInt64: Int64): TShort16;
+begin
+  result[0] := AnsiChar(sizeof(aInt64)*2);
+  BinToHexDisplay(@aInt64,@result[1],sizeof(aInt64));
 end;
 
 type TWordRec = packed record YDiv100, YMod100: byte; end;
@@ -26340,19 +26547,19 @@ begin
   YearToPChar(Value,pointer(result));
 end;
 
-function UInt4DigitsToShort(Value: Cardinal): Short4;
+function UInt4DigitsToShort(Value: Cardinal): TShort4;
 begin
   result[0] := #4;
   YearToPChar(Value,@result[1]);
 end;
 
-function UInt3DigitsToShort(Value: Cardinal): Short4;
+function UInt3DigitsToShort(Value: Cardinal): TShort4;
 begin
   YearToPChar(Value,@result[0]);
   result[0] := #3; // override first digit
 end;
 
-function UInt2DigitsToShort(Value: byte): Short4;
+function UInt2DigitsToShort(Value: byte): TShort4;
 begin
   result[0] := #2;
   if Value>99 then
@@ -31909,7 +32116,7 @@ asm
         pop     ebx
         not     eax
 end;
-
+{$endif PUREPASCAL}
 {$ifdef CPU386}
 procedure GetCPUID(Param: Cardinal; var Registers: TRegisters);
 asm
@@ -32010,7 +32217,6 @@ asm // eax=crc, edx=buf, ecx=len
 @0:     not     eax
 end;
 {$endif CPU386}
-{$endif PUREPASCAL}
 
 function crc32cUTF8ToHex(const str: RawUTF8): RawUTF8;
 begin
@@ -32055,8 +32261,8 @@ function IsEqual(const A,B: THash128): boolean;
 var a_: TPtrIntArray absolute A;
     b_: TPtrIntArray absolute B;
 begin
-  result := (a_[0]=b_[0]) and (a_[1]=b_[1])
-    {$ifndef CPU64} and (a_[2]=b_[2]) and (a_[3]=b_[3]){$endif};
+  result := ((a_[0] xor b_[0]) or (a_[1] xor b_[1])
+    {$ifndef CPU64} or (a_[2] xor b_[2]) or (a_[3] xor b_[3]){$endif})=0;
 end;
 
 procedure FillZero(out dig: THash128);
@@ -32093,9 +32299,10 @@ function IsEqual(const A,B: THash256): boolean;
 var a_: TPtrIntArray absolute A;
     b_: TPtrIntArray absolute B;
 begin
-  result := (a_[0]=b_[0]) and (a_[1]=b_[1]) and (a_[2]=b_[2]) and (a_[3]=b_[3])
-          {$ifndef CPU64} and (a_[4]=b_[4]) and (a_[5]=b_[5])
-                          and (a_[6]=b_[6]) and (a_[7]=b_[7]){$endif};
+  result := ((a_[0] xor b_[0]) or (a_[1] xor b_[1]) or
+             (a_[2] xor b_[2]) or (a_[3] xor b_[3])
+    {$ifndef CPU64} or (a_[4] xor b_[4]) or (a_[5] xor b_[5])
+                    or (a_[6] xor b_[6]) or (a_[7] xor b_[7]) {$endif})=0;
 end;
 
 procedure FillZero(out dig: THash256);
@@ -33501,10 +33708,15 @@ end;
 
 function GUIDToShort(const guid: TGUID): TGUIDShortString;
 begin
-  result[0] := #38;
-  result[1] := '{';
-  result[38] := '}';
-  GUIDToText(@result[2],@guid);
+  GUIDToShort(guid,result);
+end;
+
+procedure GUIDToShort(const guid: TGUID; out dest: TGUIDShortString); 
+begin
+  dest[0] := #38;
+  dest[1] := '{';
+  dest[38] := '}';
+  GUIDToText(@dest[2],@guid);
 end;
 
 function GUIDToString(const guid: TGUID): string;
@@ -34838,11 +35050,19 @@ constructor TFileVersion.Create(const aFileName: TFileName;
 var M,D: word;
 {$ifdef MSWINDOWS}
     Size, Size2: DWord;
-    Pt: Pointer;
+    Pt, StrPt, StrValPt: Pointer;
+    LanguageInfo: RawUTF8;
     Info: ^TVSFixedFileInfo;
     FileTime: TFILETIME;
     SystemTime: TSYSTEMTIME;
     tmp: TFileName;
+    function ReadResourceByName(const From: RawUTF8): RawUTF8;
+    var sz: DWord;
+    begin
+      VerQueryValueA(Pt,PAnsiChar('\StringFileInfo\'+LanguageInfo+'\'+From),StrValPt,sz);
+      if sz>0 then
+        SetRawUTF8(Result,StrValPt,sz)
+    end;
 {$endif}
 begin
   fFileName := aFileName;
@@ -34873,6 +35093,19 @@ begin
               SystemTime.wYear,SystemTime.wMonth,SystemTime.wDay);
           end;
         end;
+        VerQueryValue(Pt, '\VarFileInfo\Translation', StrPt, Size2);
+        if Size2 >= 4 then begin
+          LanguageInfo := BinToHexDisplay(PAnsiChar(StrPt), 2) + BinToHexDisplay(PAnsiChar(StrPt)+2, 2);
+          CompanyName := ReadResourceByName('CompanyName');
+          FileDescription := ReadResourceByName('FileDescription');
+          FileVersion := ReadResourceByName('FileVersion');
+          InternalName := ReadResourceByName('InternalName');
+          LegalCopyright := ReadResourceByName('LegalCopyright');
+          OriginalFilename := ReadResourceByName('OriginalFilename');
+          ProductName := ReadResourceByName('ProductName');
+          ProductVersion := ReadResourceByName('ProductVersion');
+          Comments := ReadResourceByName('Comments');
+        end
       finally
         Freemem(Pt);
       end;
@@ -35632,7 +35865,10 @@ end;
 { ************ low-level RTTI types and conversion routines }
 
 {$ifdef FPC}
+procedure RecordClear(var Dest; TypeInfo: pointer);
+  [external name 'FPC_FINALIZE'];
 
+{$ifdef FPC_OLDRTTI}
 function RTTIManagedSize(typeInfo: Pointer): SizeInt; inline;
 begin
   case PTypeKind(typeInfo)^ of // match tkManagedTypes
@@ -35669,9 +35905,6 @@ begin
   result := -1;
 end;
 
-procedure RecordClear(var Dest; TypeInfo: pointer);
-  [external name 'FPC_FINALIZE'];
-
 procedure RecordAddRef(var Data; TypeInfo : pointer);
   [external name 'FPC_ADDREF'];
 
@@ -35695,8 +35928,12 @@ begin
       inc(PByte(dest),size);
     end;
 end;
+{$else FPC_OLDRTTI}
+procedure RecordCopy(var Dest; const Source; TypeInfo: pointer);
+  [external name 'FPC_COPY'];
+{$endif FPC_OLDRTTI}
 
-{$else}
+{$else FPC}
 
 procedure CopyArray(dest, source, typeInfo: Pointer; cnt: PtrUInt);
 asm
@@ -35960,7 +36197,7 @@ begin // info is expected to come from a DeRef() if retrieved from RTTI
     {$ifdef HASCODEPAGE}
     if itemsize<>0 then
       SetCodePage(PRawByteString(data)^,PWord(
-        {$ifdef FPC_REQUIRES_PROPER_ALIGNMENT}GetFPCTypeData(pointer(info))
+        {$ifdef FPC}GetFPCTypeData(pointer(info))
         {$else}PtrUInt(info)+info^.NameLen+2{$endif})^,false);
     {$endif}
     inc(source,itemsize);
@@ -36021,6 +36258,9 @@ end;
 function RecordEquals(const RecA, RecB; TypeInfo: pointer;
   PRecSize: PInteger): boolean;
 var info,fieldinfo: PTypeInfo;
+    {$ifdef FPC_NEWRTTI}
+    recInitData: PRecInitData;
+    {$endif}
     F: integer;
     Field: PFieldInfo;
     Diff: cardinal;
@@ -36038,16 +36278,22 @@ begin
     result := true;
     exit;
   end;
-  Field := @info^.ManagedFields[0];
   Diff := 0;
+  {$ifdef FPC_NEWRTTI}
+  recInitData := GetFPCRecInitData(AlignTypeData(PByte(info)+2));
+  Field := @recInitData^.ManagedFields[0];
+  for F := 1 to recInitData^.ManagedFieldCount do begin
+  {$else}
+  Field := @info^.ManagedFields[0];
   for F := 1 to info^.ManagedCount do begin
+  {$endif}
     fieldinfo := DeRef(Field^.TypeInfo);
-    {$ifdef FPC} // FPC does include RTTI for unmanaged fields! :)
+    {$ifdef FPC_OLDRTTI} // FPC does include RTTI for unmanaged fields
     if not (fieldinfo^.Kind in tkManagedTypes) then begin
       inc(Field);
       continue; // as with Delphi
     end;
-    {$endif};
+    {$endif}
     Diff := Field^.Offset-Diff;
     if Diff<>0 then begin
       if not CompareMem(A,B,Diff) then
@@ -36072,6 +36318,9 @@ end;
 
 function RecordSaveLength(const Rec; TypeInfo: pointer; Len: PInteger): integer;
 var info,fieldinfo: PTypeInfo;
+    {$ifdef FPC_NEWRTTI}
+    recInitData: PRecInitData;
+    {$endif}
     F, recsize,saved: integer;
     Field: PFieldInfo;
     R: PAnsiChar;
@@ -36082,13 +36331,22 @@ begin
     result := 0; // should have been checked before
     exit;
   end;
+  {$ifdef FPC_NEWRTTI}
+  recInitData := GetFPCRecInitData(AlignTypeData(PByte(info)+2));
+  Field := @recInitData^.ManagedFields[0];
+  {$else}
   Field := @info^.ManagedFields[0];
+  {$endif}
   result := info^.recSize;
   if Len<>nil then
     Len^ := result;
+  {$ifdef FPC_NEWRTTI}
+  for F := 1 to recInitData^.ManagedFieldCount do begin
+  {$else}
   for F := 1 to info^.ManagedCount do begin
+  {$endif}
     fieldinfo := DeRef(Field^.TypeInfo);
-    {$ifdef FPC} // FPC does include RTTI for unmanaged fields! :)
+    {$ifdef FPC_OLDRTTI} // FPC does include RTTI for unmanaged fields! :)
     if not (fieldinfo^.Kind in tkManagedTypes) then begin
       inc(Field);
       continue; // as with Delphi
@@ -36107,6 +36365,9 @@ end;
 function RecordSave(const Rec; Dest: PAnsiChar; TypeInfo: pointer;
   out Len: integer): PAnsiChar; 
 var info,fieldinfo: PTypeInfo;
+    {$ifdef FPC_NEWRTTI}
+    recInitData: PRecInitData;
+    {$endif}
     F: integer;
     Diff: cardinal;
     Field: PFieldInfo;
@@ -36119,11 +36380,17 @@ begin
     exit;
   end;
   Len := info^.recSize;
-  Field := @info^.ManagedFields[0];
   Diff := 0;
+  {$ifdef FPC_NEWRTTI}
+  recInitData := GetFPCRecInitData(AlignTypeData(PByte(info)+2));
+  Field := @recInitData^.ManagedFields[0];
+  for F := 1 to recInitData^.ManagedFieldCount do begin
+  {$else}
+  Field := @info^.ManagedFields[0];
   for F := 1 to info^.ManagedCount do begin
+  {$endif}
     fieldinfo := DeRef(Field^.TypeInfo);
-    {$ifdef FPC} // FPC does include RTTI for unmanaged fields! :)
+    {$ifdef FPC_OLDRTTI} // FPC does include RTTI for unmanaged fields! :)
     if not (fieldinfo^.Kind in tkManagedTypes) then begin
       inc(Field);
       continue; // as with Delphi
@@ -36266,6 +36533,9 @@ end;
 function RecordLoad(var Rec; Source: PAnsiChar; TypeInfo: pointer;
   Len: PInteger): PAnsiChar;
 var info,fieldinfo: PTypeInfo;
+    {$ifdef FPC_NEWRTTI}
+    recInitData: PRecInitData;
+    {$endif}
     F: integer;
     Diff: cardinal;
     Field: PFieldInfo;
@@ -36278,18 +36548,31 @@ begin
     exit;
   if Len<>nil then
     Len^ := info^.recSize;
+  {$ifdef FPC_NEWRTTI}
+  recInitData := GetFPCRecInitData(AlignTypeData(PByte(info)+2));
+  Field := @recInitData^.ManagedFields[0];
+  {$else}
   Field := @info^.ManagedFields[0];
+  {$endif}
   if Source=nil then begin  // inline RecordClear() function
+    {$ifdef FPC_NEWRTTI}
+    for F := 1 to recInitData^.ManagedFieldCount do begin
+    {$else}
     for F := 1 to  info^.ManagedCount do begin
+    {$endif}
       _Finalize(R+Field^.Offset,Deref(Field^.TypeInfo));
       inc(Field);
     end;
     exit;
   end;
   Diff := 0;
+  {$ifdef FPC_NEWRTTI}
+  for F := 1 to recInitData^.ManagedFieldCount do begin
+  {$else}
   for F := 1 to info^.ManagedCount do begin
+  {$endif}
     fieldinfo := DeRef(Field^.TypeInfo);
-    {$ifdef FPC} // FPC does include RTTI for unmanaged fields! :)
+    {$ifdef FPC_OLDRTTI} // FPC does include RTTI for unmanaged fields! :)
     if not (fieldinfo^.Kind in tkManagedTypes) then begin
       inc(Field);
       continue; // as with Delphi
@@ -37946,6 +38229,9 @@ begin
         otSByte,otUByte: fDataSize := 1;
         otSWord,otUWord: fDataSize := 2;
         otSLong,otULong: fDataSize := 4;
+        {$ifdef FPC_NEWRTTI}
+        otSQWord,otUQWord: fDataSize := 8;
+        {$endif}
       end;
       if kind=tkEnumeration then
         fKnownType := ktEnumeration else
@@ -38281,6 +38567,9 @@ begin
     otSWord,otUWord: result := ptWord;
     otSLong: result := ptInteger;
     otULong: result := ptCardinal;
+    {$ifdef FPC_NEWRTTI}
+    otSQWord,otUQWord: result := ptInt64;
+    {$endif}
     end;
   tkInt64: result := ptInt64;
   {$ifdef FPC}
@@ -39597,11 +39886,11 @@ begin
       JSON := GotoNextNotSpace(JSON);
       if JSON^='"' then begin
         Val := GetJSONField(result,result,@wasString,EndOfObject);
-        GetJSONToAnyVariant(Value,Val,EndOfObject,TryCustomVariants,false);
+        GetJSONToAnyVariant(Value,Val,EndOfObject,TryCustomVariants,AllowDouble);
       end else
-        GetJSONToAnyVariant(Value,result,EndOfObject,TryCustomVariants,false);
+        GetJSONToAnyVariant(Value,result,EndOfObject,TryCustomVariants,AllowDouble);
     end else
-      GetJSONToAnyVariant(Value,result,EndOfObject,TryCustomVariants,false);
+      GetJSONToAnyVariant(Value,result,EndOfObject,TryCustomVariants,AllowDouble);
   end else begin
     Val := GetJSONField(result,result,@wasString,EndOfObject);
     GetVariantFromJSON(Val,wasString,Value,nil,AllowDouble);
@@ -39973,6 +40262,8 @@ var i: integer;
 begin
   if TVarData(Value).VType and VTYPE_STATIC<>0 then
     VarClear(Value);
+  if (Options<>nil) and (dvoAllowDoubleValue in Options^) then
+    AllowDouble := true; // for ProcessSimple() above
   if EndOfObject<>nil then
     EndOfObject^ := ' ';
   if JSON^ in [#1..' '] then repeat inc(JSON) until not(JSON^ in [#1..' ']);
@@ -39980,8 +40271,6 @@ begin
     ProcessSimple(GetJSONField(JSON,JSON,@wasString,EndOfObject));
     exit;
   end;
-  if dvoAllowDoubleValue in Options^ then
-    AllowDouble := true; // for ProcessSimple() above
   if JSON^='"' then
     if dvoJSONObjectParseWithinString in Options^ then begin
       ToBeParsed := GetJSONField(JSON,JSON,@wasString,EndOfObject);
@@ -40188,7 +40477,7 @@ begin
   // (e.g. when called directly from TSQLPropInfoRTTIVariant.SetValue)
   if (TryCustomVariants<>nil) and (JSON<>nil) then
     if GotoNextNotSpace(JSON)^ in ['{','['] then begin
-      GetJSONToAnyVariant(Value,JSON,nil,TryCustomVariants,false);
+      GetJSONToAnyVariant(Value,JSON,nil,TryCustomVariants,AllowDouble);
       exit;
     end else
     AllowDouble := dvoAllowDoubleValue in TryCustomVariants^;
@@ -43289,7 +43578,7 @@ begin
     exit; // avoid GPF if void
   end;
   // first store the element size+type to check for the format (name='' mostly)
-  Dest := pointer(ToVarUInt32(ElemSize,pointer(Dest)));
+  Dest := PAnsiChar(ToVarUInt32(ElemSize,pointer(Dest)));
   if ElemType=nil then
     Dest^ := #0 else
     {$ifdef FPC}
@@ -43300,7 +43589,7 @@ begin
   inc(Dest);
   // then store dynamic array count
   n := Count;
-  Dest := pointer(ToVarUInt32(n,pointer(Dest)));
+  Dest := PAnsiChar(ToVarUInt32(n,pointer(Dest)));
   if n=0 then begin
     result := Dest;
     exit;
@@ -43396,7 +43685,11 @@ end;
 function TDynArray.ToKnownType(exactType: boolean): TDynArrayKind;
 var nested: PTypeInfo;
     {$ifdef FPC}
+    {$ifdef FPC_NEWRTTI}
+    recInitData: PRecInitData;
+    {$else}
     f: integer;
+    {$endif}
     {$endif}
 label Bin, Rec;
 begin
@@ -43465,16 +43758,23 @@ rec:    nested := GetFPCAlignPtr(nested);
         {$else}
 rec:    inc(PtrUInt(nested),nested^.NameLen);
         {$endif}
-        {$ifdef FPC}
+        {$ifdef FPC_OLDRTTI}
         f := RTTIFirstManagedFieldIndex(nested);
         if f<0 then
           goto Bin;
         with nested^.ManagedFields[f] do
-        {$else}
+        {$else FPC_OLDRTTI}
+        {$ifdef FPC_NEWRTTI}
+        recInitData := GetFPCRecInitData(AlignTypeData(PByte(nested)+2));
+        if recInitData^.ManagedFieldCount=0 then // only binary content -> full content
+          goto Bin;
+        with recInitData^.ManagedFields[0] do
+        {$else FPC_NEWRTTI}
         if nested^.ManagedCount=0 then // only binary content -> full content
           goto Bin;
         with nested^.ManagedFields[0] do
-        {$endif}
+        {$endif FPC_NEWRTTI}
+        {$endif FPC_OLDRTTI}
         case Offset of
         0: case DeRef(TypeInfo)^.Kind of
            tkLString{$ifdef FPC},tkLStringOld{$endif}: fKnownType := djRawUTF8;
@@ -44500,7 +44800,7 @@ procedure TDynArray.ElemCopy(const A; var B);
 begin
   if ElemType=nil then
     MoveFast(A,B,ElemSize) else begin
-    {$ifdef FPC}
+    {$ifdef FPC_OLDRTTI}
     RecordClear(B,ElemType); // inlined CopyArray()
     MoveFast(A,B,ElemSize);
     RecordAddRef(B,ElemType);
@@ -45374,6 +45674,16 @@ function ObjArrayFind(const aObjArray; aItem: TObject): integer;
 begin
   result := PtrUIntScanIndex(pointer(aObjArray),
     length(TObjectDynArray(aObjArray)),PtrUInt(aItem));
+end;
+
+function ObjArrayCount(const aObjArray): integer;
+var i: integer;
+    a: TObjectDynArray absolute aObjArray;
+begin
+  result := 0;
+  for i := 0 to length(a)-1 do
+    if a[i]<>nil then
+      inc(result);
 end;
 
 procedure ObjArrayDelete(var aObjArray; aItemIndex: integer;
@@ -47220,13 +47530,13 @@ begin // we put const char > #127 as #??? -> asiatic MBCS codepage OK
       13: AddCR;
       ord('%'): break;
       {$ifdef OLDTEXTWRITERFORMAT}
-      164: AddCR; // ¤ -> add CR,LF
-      167: if B^=',' then dec(B); // §
+      164: AddCR; // currency sign -> add CR,LF
+      167: if B^=',' then dec(B); // section sign to ignore next comma
       ord('|'): begin
         inc(F); // |% -> %
         goto write;
       end;
-      ord('$'),163,181: // $,£,µ
+      ord('$'),163,181: // dollar, pound, micro sign
         break; // process command value
       {$endif}
       else begin
@@ -47246,9 +47556,9 @@ write:  if B>=BEnd then
     {$ifdef OLDTEXTWRITERFORMAT}
     ord('$'): with Values[ValuesIndex] do
            if Vtype=vtInteger then Add2(VInteger);
-    163: with Values[ValuesIndex] do // £
+    163: with Values[ValuesIndex] do // pound sign
            if Vtype=vtInteger then Add4(VInteger);
-    181: with Values[ValuesIndex] do // µ
+    181: with Values[ValuesIndex] do // micro sign
            if Vtype=vtInteger then Add3(VInteger);
     {$endif}
     end;
@@ -48609,7 +48919,7 @@ begin
   P := @PByteArray(fTempBuf)[fEchoStart];
   while (L>0) and (P[L-1] in [10,13]) do // trim right CR/LF chars
     dec(L);
-  LI := length(fEchoBuf); // faster append to fEchoBuf
+  LI := length(fEchoBuf); // fast append to fEchoBuf
   SetLength(fEchoBuf,LI+L);
   MoveFast(P^,PByteArray(fEchoBuf)[LI],L);
 end;
@@ -51103,12 +51413,8 @@ begin
     fValues.Delete(i);
     exit;
   end;
-  if fNoPrompt then begin
-    result := Default;
-    exit;
-  end;
-  result := '';
-  if Prompt='' then
+  result := Default;
+  if fNoPrompt or (Prompt='') then
     exit;
   TextColor(ccLightGray);
   {$I-}
@@ -51151,6 +51457,15 @@ begin
   result := Iso8601ToDateTime(res);
   if result=0 then
     result := Default;
+end;
+
+function TCommandLine.AsEnum(const Switch, Default: RawUTF8; TypeInfo: pointer;
+  const Prompt: string): integer;
+var res: RawUTF8;
+begin
+  res := AsUTF8(Switch, Default, Prompt);
+  if not ToInteger(res,result) then
+    result := GetEnumNameValue(TypeInfo,pointer(res),length(res),true);
 end;
 
 function TCommandLine.AsArray: TRawUTF8DynArray;
@@ -52611,7 +52926,6 @@ begin
   {$ifdef VER3_0_1}+' 3.0.1'{$endif}
   {$ifdef VER3_0_2}+' 3.0.2'{$endif}
   {$ifdef VER3_1_1}+' 3.1.1'{$endif}
-    {$ifdef FPC_HAS_EXTENDEDINTERFACERTTI}+' ERTTI'{$endif}
     {$ifdef FPC_HAS_MANAGEMENT_OPERATORS}+' MOP'{$endif}
 {$else}
   {$ifdef VER130} 'Delphi 5'{$endif}
@@ -54358,7 +54672,8 @@ begin
     fMap := 0;
   end;
   {$else}
-  if fBuf<>nil then
+  if (fBuf<>nil) and (fBufSize>0)
+    {$ifndef KYLIX3} and (fFileSize<>fBufSize){$endif} then
     {$ifdef KYLIX3}munmap{$else}fpmunmap{$endif}(fBuf,fBufSize);
   {$endif}
   fBuf := nil;
@@ -58732,13 +59047,13 @@ begin
   Dest.Write4(crc);
 end;
 
-procedure ZeroDecompress(P: PByte; Len: integer; out Dest: RawByteString);
+procedure ZeroDecompress(P: PByte; Len: integer; {$ifdef FPC}var{$else}out{$endif} Dest: RawByteString);
 var PEnd,D,DEnd: PAnsiChar;
     DestLen,crc: cardinal;
 begin
   PEnd := PAnsiChar(P)+Len-4;
   DestLen := FromVarUInt32(P);
-  SetLength(Dest,DestLen);
+  SetString(Dest,nil,DestLen); // FPC uses var
   D := pointer(Dest);
   DEnd := D+DestLen;
   crc := 0;
@@ -60098,9 +60413,14 @@ begin
   result := (Length(hexa)=16) and HexDisplayToBin(pointer(hexa),@Value,sizeof(Value));
 end;
 
-procedure TSynUniqueIdentifierBits.FromDateTime(aDateTime: TDateTime);
+procedure TSynUniqueIdentifierBits.FromDateTime(const aDateTime: TDateTime);
 begin
   Value := DateTimeToUnixTime(aDateTime) shl 31;
+end;
+
+procedure TSynUniqueIdentifierBits.FromUnixTime(const aUnixTime: TUnixTime);
+begin
+  Value := aUnixTime shl 31;
 end;
 
 
@@ -60152,13 +60472,15 @@ end;
 procedure TSynUniqueIdentifierGenerator.ComputeFromDateTime(const aDateTime: TDateTime;
   out result: TSynUniqueIdentifierBits);
 begin // assume fLastCounter=0
-  result.Value := (DateTimeToUnixTime(aDateTime) shl 31) or fIdentifierShifted;
+  ComputeFromUnixTime(DateTimeToUnixTime(aDateTime),result);
 end;
 
 procedure TSynUniqueIdentifierGenerator.ComputeFromUnixTime(const aUnixTime: TUnixTime;
   out result: TSynUniqueIdentifierBits);
 begin // assume fLastCounter=0
-  result.Value := (aUnixTime shl 31) or fIdentifierShifted;
+  result.Value := aUnixTime shl 31;
+  if self<>nil then
+    result.Value := result.Value or fIdentifierShifted;
 end;
 
 constructor TSynUniqueIdentifierGenerator.Create(aIdentifier: TSynUniqueIdentifierProcess;
@@ -61520,6 +61842,13 @@ begin
   MoveFast(New[0],Dest[d],n*sizeof(TMethod));
 end;
 
+function EventEquals(const eventA,eventB): boolean;
+var A: TMethod absolute eventA;
+    B: TMethod absolute eventB;
+begin
+  result := (A.Code=B.Code) and (A.Data=B.Data); 
+end;
+
 var
   GarbageCollectorFreeAndNilList: TList;
 
@@ -61578,6 +61907,12 @@ begin
   GetCPUID(7,regs);
   PIntegerArray(@CpuFeatures)^[2] := regs.ebx;
   PByteArray(@CpuFeatures)^[12] := regs.ecx;
+  {$ifdef Darwin}
+  {$ifdef CPU64}
+  // SSE42 asm does not (yet) work on Darwin x64 ...
+  Exclude(CpuFeatures, cfSSE42);
+  {$endif}
+  {$endif}
 end;
 {$endif CPUINTEL}
 
