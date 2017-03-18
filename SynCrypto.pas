@@ -273,20 +273,21 @@ uses
 {$ifdef MSWINDOWS}
   Windows,
 {$else}
-{$ifdef KYLIX3}
+  {$ifdef KYLIX3}
   LibC,
   SynKylix,
-{$endif}
-{$ifdef FPC}
+  {$endif}
+  {$ifdef FPC}
+  BaseUnix,
   SynFPCLinux,
-{$endif FPC}
-{$endif}
+  {$endif FPC}
+  {$endif MSWINDOWS}
   SysUtils,
 {$ifndef LVCL}
   {$ifndef DELPHI5OROLDER}
   RTLConsts,
   {$endif}
-{$endif}
+{$endif LVCL}
   Classes,
   SynLZ, // already included in SynCommons, and used by CompressShaAes()
   SynCommons;
@@ -454,10 +455,23 @@ type
     /// Initialize AES contexts for cypher
     // - first method to call before using this class
     // - KeySize is in bits, i.e. 128,192,256
-    constructor Create(const aKey; aKeySize: cardinal); virtual;
-    /// Initialize AES contexts for cypher
+    constructor Create(const aKey; aKeySize: cardinal); overload; virtual;
+    /// Initialize AES contexts for AES-128 cypher
+    // - first method to call before using this class
+    // - just a wrapper around Create(aKey,128);
+    constructor Create(const aKey: THash128); overload;
+    /// Initialize AES contexts for AES-256 cypher
+    // - first method to call before using this class
+    // - just a wrapper around Create(aKey,256);
+    constructor Create(const aKey: THash256); overload;
+    /// Initialize AES contexts for cypher, from SHA-256 hash
     // - here the Key is supplied as a string, and will be hashed using SHA-256
-    constructor CreateFromSha256(const aKey: RawUTF8); virtual;
+    constructor CreateFromSha256(const aKey: RawUTF8);
+    /// Initialize AES contexts for cypher, from PBKDF2_HMAC_SHA256 derivation
+    // - here the Key is supplied as a string, and will be hashed using
+    // PBKDF2_HMAC_SHA256 with the specified salt and rounds
+    constructor CreateFromPBKDF2(const aKey: RawUTF8; const aSalt: RawByteString;
+      aRounds: Integer);
     /// compute a class instance similar to this one
     function Clone: TAESAbstract; virtual;
     /// compute a class instance similar to this one, for performing the
@@ -554,7 +568,10 @@ type
     // - may be used e.g. for AES-GCM or our custom AES-CTR modes
     // - default implementation, for a non AEAD protocol, returns false
     function MACGetLast(out aCRC: THash256): boolean; virtual;
-    /// validate if an encrypted buffer matches the stored MAC
+    /// validate if the computed AEAD MAC matches the expected supplied value
+    // - is just a wrapper around MACGetLast() and IsEqual() functions
+    function MACEquals(const aCRC: THash256): boolean; virtual;
+    /// validate if an encrypted buffer matches the stored AEAD MAC
     // - expects the 256-bit MAC, as returned by MACGetLast, to be stored after
     // the encrypted data
     // - default implementation, for a non AEAD protocol, returns false
@@ -983,7 +1000,12 @@ type
     // TAESPRNG instance to gather randomness
     // - for reference, see TKS1 as used for LUKS and defined in
     // @https://gitlab.com/cryptsetup/cryptsetup/wikis/TKS1-draft.pdf
-    function AFSplit(const Buffer; BufferBytes, StripesCount: integer): RawByteString;
+    function AFSplit(const Buffer; BufferBytes, StripesCount: integer): RawByteString; overload;
+    /// create an anti-forensic representation of a key for safe storage
+    // - a binary buffer will be split into StripesCount items, ready to be
+    // saved on disk; returned length is BufferBytes*(StripesCount+1) bytes
+    // - jsut a wrapper around the other overloaded AFSplit() funtion
+    function AFSplit(const Buffer: RawByteString; StripesCount: integer): RawByteString; overload;
     /// retrieve a key from its anti-forensic representation
     // - is the reverse function of AFSplit() method
     // - returns TRUE if the input buffer matches BufferBytes value
@@ -1057,7 +1079,9 @@ type
     /// initialize SHA1 context for hashing
     procedure Init;
     /// update the SHA1 context with some data
-    procedure Update(Buffer: pointer; Len: integer);
+    procedure Update(Buffer: pointer; Len: integer); overload;
+    /// update the SHA1 context with some data
+    procedure Update(const Buffer: RawByteString); overload;
     /// finalize and compute the resulting SHA1 hash Digest of all data
     // affected to Update() method
     // - will also call Init to reset all internal temporary context, for safety
@@ -1082,7 +1106,9 @@ type
     /// initialize SHA256 context for hashing
     procedure Init;
     /// update the SHA256 context with some data
-    procedure Update(Buffer: pointer; Len: integer);
+    procedure Update(Buffer: pointer; Len: integer); overload;
+    /// update the SHA256 context with some data
+    procedure Update(const Buffer: RawByteString); overload;
     /// finalize and compute the resulting SHA256 hash Digest of all data
     // affected to Update() method
     procedure Final(out Digest: TSHA256Digest; NoInit: boolean=false);
@@ -1094,7 +1120,7 @@ type
 
   /// 64 bytes buffer, used internally during HMAC process
   TByte64 = array[0..15] of cardinal;
-  
+
   TMD5In = array[0..15] of cardinal;
   PMD5In = ^TMD5In;
   /// 128 bits memory block for MD5 hash digest storage
@@ -1113,7 +1139,9 @@ type
     /// initialize MD5 context for hashing
     procedure Init;
     /// update the MD5 context with some data
-    procedure Update(const buffer; Len: cardinal);
+    procedure Update(const buffer; Len: cardinal); overload;
+    /// update the MD5 context with some data
+    procedure Update(const Buffer: RawByteString); overload;
     /// finalize the MD5 hash process
     // - the resulting hash digest would be stored in buf public variable
     procedure Finalize;
@@ -1353,7 +1381,15 @@ procedure HMAC_SHA256(key,msg: pointer; keylen,msglen: integer; out result: TSHA
 /// compute the PBKDF2 derivation of a password using HMAC over SHA256
 // - this function expect the resulting key length to match SHA256 digest size
 procedure PBKDF2_HMAC_SHA256(const password,salt: RawByteString; count: Integer;
-  out result: TSHA256Digest; const saltdefault: RawByteString='');
+  out result: TSHA256Digest; const saltdefault: RawByteString=''); overload;
+
+/// compute the PBKDF2 derivation of a password using HMAC over SHA256, into
+// several 256-bit items, so can be used to return any size of output key
+// - this function expect the result array to have the expected output length
+// - allows resulting key length to be more than one SHA256 digest size, e.g.
+// to be used for both Encryption and MAC
+procedure PBKDF2_HMAC_SHA256(const password,salt: RawByteString; count: Integer;
+  var result: THash256DynArray; const saltdefault: RawByteString=''); overload;
 
 /// compute the HMAC message authentication code using crc256c as hash function
 // - HMAC over a non cryptographic hash function like crc256c is known to be
@@ -1386,15 +1422,21 @@ type
   public
     /// prepare the HMAC authentication with the supplied key
     // - consider using Compute to re-use a prepared HMAC instance 
-    procedure Init(key: pointer; keylen: integer);
+    procedure Init(key: pointer; keylen: integer); overload;
+    /// prepare the HMAC authentication with the supplied key
+    // - consider using Compute to re-use a prepared HMAC instance 
+    procedure Init(const key: RawByteString); overload;
     /// call this method for each continuous message block
     // - iterate over all message blocks, then call Done to retrieve the HMAC
     procedure Update(msg: pointer; msglen: integer); overload;
+      {$ifdef HASINLINE}inline;{$endif}
     /// call this method for each continuous message block
     // - iterate over all message blocks, then call Done to retrieve the HMAC
     procedure Update(const msg: RawByteString); overload;
+      {$ifdef HASINLINE}inline;{$endif}
     /// computes the HMAC of all supplied message according to the key
-    function Done: cardinal;
+    function Done(NoInit: boolean=false): cardinal;
+      {$ifdef HASINLINE}inline;{$endif}
     /// computes the HMAC of the supplied message according to the key
     // - similar to a single Update(msg,msglen) followed by Done, but re-usable
     // - this method is thread-safe
@@ -1472,6 +1514,60 @@ function AESSHA256(const s, Password: RawByteString; Encrypt: boolean): RawByteS
 // - outStream will be larger/smaller than Len: this is a full AES version with
 // a triming TAESFullHeader at the beginning
 procedure AESSHA256Full(bIn: pointer; Len: Integer; outStream: TStream; const Password: RawByteString; Encrypt: boolean); overload;
+
+var
+  /// salt for CryptDataForCurrentUser function
+  // - is filled with some random bytes by default, but you may override
+  // it for a set of custom processes calling CryptDataForCurrentUser
+  CryptProtectDataEntropy: THash256 = (
+    $19,$8E,$BA,$52,$FA,$D6,$56,$99,$7B,$73,$1B,$D0,$8B,$3A,$95,$AB,
+    $94,$63,$C2,$C0,$78,$05,$9C,$8B,$85,$B7,$A1,$E3,$ED,$93,$27,$18);
+
+{$ifdef MSWINDOWS}
+/// protect some data for the current user, using Windows DPAPI
+// - the application can specify a secret salt text, which should reflect the
+// current execution context, to ensure nobody could decrypt the data without
+// knowing this application-specific AppSecret value 
+// - will use CryptProtectData DPAPI function call under Windows
+// - see https://msdn.microsoft.com/en-us/library/ms995355
+// - this function is Windows-only, could be slow, and you don't know which
+// algorithm is really used on your system, so using CryptDataForCurrentUser()
+// may be a better (and cross-platform) alternative
+// - also note that DPAPI has been closely reverse engineered - see e.g.
+// https://www.passcape.com/index.php?section=docsys&cmd=details&id=28
+function CryptDataForCurrentUserDPAPI(const Data,AppSecret: RawByteString; Encrypt: boolean): RawByteString;
+{$endif}
+
+/// protect some data via AES-256-CFB and a secret known by the current user only
+// - the application can specify a secret salt text, which should reflect the
+// current execution context, to ensure nobody could decrypt the data without
+// knowing this application-specific AppSecret value 
+// - here data is cyphered using a random secret key, stored in a file located in
+// ! GetSystemPath(spUserData)+sep+PBKDF2_HMAC_SHA256(CryptProtectDataEntropy,User)
+// with sep='_' under Windows, and sep='.syn-' under Linux/Posix
+// - under Windows, it will encode the secret file via CryptProtectData DPAPI,
+// so has the same security level than plain CryptDataForCurrentUserDPAPI()
+// - under Linux/POSIX, access to the $HOME user's .xxxxxxxxxxx secret file with
+// chmod 400 is considered to be a safe enough approach
+// - this function is up to 100 times faster than CryptDataForCurrentUserDPAPI,
+// generates smaller results, and is consistent on all Operating Systems
+// - you can use this function over a specified variable, to cypher it in place,
+// with try ... finally block to protect memory access of the plain data:
+// !  constructor TMyClass.Create;
+// !  ...
+// !    fSecret := CryptDataForCurrentUser('Some Secret Value','appsalt',true);
+// !  ...
+// !  procedure TMyClass.DoSomething;
+// !  var plain: RawByteString;
+// !  begin
+// !    plain := CryptDataForCurrentUser(fSecret,'appsalt',false);
+// !    try
+// !      // here plain = 'Some Secret Value'
+// !    finally
+// !      FillZero(plain); // safely erase uncyphered content from heap
+// !    end;
+// !  end;
+function CryptDataForCurrentUser(const Data,AppSecret: RawByteString; Encrypt: boolean): RawByteString;
 
 const
   SHA1DIGESTSTRLEN = sizeof(TSHA1Digest)*2;
@@ -1588,11 +1684,6 @@ procedure XorOffset(P: PByteArray; Index,Count: integer);
 // - Compression compatible, since the XOR value is always the same, the
 // compression rate will not change a lot
 procedure XorConst(p: PIntegerArray; Count: integer);
-
-/// fast compute of some 32-bit random value
-// - will use RDRAND Intel x86/x64 opcode if available, or fast gsl_rng_taus2
-// generator by P. L'Ecuyer (period=2^88, i.e. about 10^26)
-function Random32: cardinal;
 
 var
   /// the encryption key used by CompressShaAes() global function
@@ -2613,6 +2704,34 @@ begin
   FillZero(tmp);
 end;
 
+procedure PBKDF2_HMAC_SHA256(const password,salt: RawByteString; count: Integer;
+  var result: THash256DynArray; const saltdefault: RawByteString);
+var n,i: integer;
+    iter: RawByteString;
+    tmp: TSHA256Digest;
+    mac: THMAC_SHA256;
+    first: THMAC_SHA256;
+begin
+  first.Init(pointer(password),length(password));
+  SetLength(iter,sizeof(integer));
+  for n := 0 to high(result) do begin
+    PInteger(iter)^ := bswap32(n+1); // U1 = PRF(Password, Salt || INT_32_BE(i))
+    if salt='' then
+      HMAC_SHA256(password,saltdefault+iter,result[n]) else
+      HMAC_SHA256(password,salt+iter,result[n]);
+    tmp := result[n];
+    for i := 2 to count do begin
+      mac := first; // re-use the very same SHA-256 context for best performance
+      mac.sha.Update(@tmp,sizeof(tmp));
+      mac.Done(tmp,true);
+      XorMemory(@result[n],@tmp,sizeof(result[n]));
+    end;
+  end;
+  FillZero(tmp);
+  FillcharFast(mac,sizeof(mac),0);
+  FillcharFast(first,sizeof(first),0);
+end;
+
 function SHA256(const s: RawByteString): RawUTF8;
 var SHA: TSHA256;
     Digest: TSHA256Digest;
@@ -2689,6 +2808,11 @@ end;
 
 { THMAC_CRC32C }
 
+procedure THMAC_CRC32C.Init(const key: RawByteString);
+begin
+  Init(pointer(key),length(key));
+end;
+
 procedure THMAC_CRC32C.Init(key: pointer; keylen: integer);
 var i: integer;
     k0,k0xorIpad: TByte64;
@@ -2716,10 +2840,11 @@ begin
   seed := crc32c(seed,pointer(msg),length(msg));
 end;
 
-function THMAC_CRC32C.Done: cardinal;
+function THMAC_CRC32C.Done(NoInit: boolean): cardinal;
 begin
   result := crc32c(seed,@step7data,sizeof(step7data));
-  FillcharFast(self,sizeof(self),0);
+  if not NoInit then
+    FillcharFast(self,sizeof(self),0);
 end;
 
 function THMAC_CRC32C.Compute(msg: pointer; msglen: integer): cardinal;
@@ -5988,6 +6113,11 @@ begin
   end;
 end;
 
+procedure TSHA256.Update(const Buffer: RawByteString);
+begin
+  Update(pointer(Buffer),length(Buffer));
+end;
+
 procedure SHA256Weak(const s: RawByteString; out Digest: TSHA256Digest);
 var L: integer;
     SHA: TSHA256;
@@ -7386,6 +7516,11 @@ begin
   MoveFast(p^,in_,len and 63);
 end;
 
+procedure TMD5.Update(const Buffer: RawByteString);
+begin
+  Update(pointer(Buffer),length(Buffer));
+end;
+
 function MD5Buf(const Buffer; Len: Cardinal): TMD5Digest;
 var MD5: TMD5;
 begin
@@ -7674,6 +7809,11 @@ begin
   end;
 end;
 
+procedure TSHA1.Update(const Buffer: RawByteString);
+begin
+  Update(pointer(Buffer),length(Buffer));
+end;
+
 
 { TAESAbstract }
 
@@ -7747,7 +7887,7 @@ begin
 end;
 
 constructor TAESAbstract.Create(const aKey; aKeySize: cardinal);
-var blockmode: PShortString;
+var tmp: PShortString; // temp variable to circumvent FPC bug
 begin
    if (aKeySize<>128) and (aKeySize<>192) and (aKeySize<>256) then
     raise ESynCrypto.CreateUTF8(
@@ -7756,14 +7896,32 @@ begin
   fKeySizeBytes := fKeySize shr 3;
   MoveFast(aKey,fKey,fKeySizeBytes);
   TAESPRNG.Main.FillRandom(TAESBLock(fIVCTR)); // set nonce + ctr
-  blockmode := PPointer(PPtrInt(self)^+vmtClassName)^;
-  fIVCtr.magic := crc32c($aba5aba5,@blockmode^[2],6); // TAESECB_API -> 'AESECB'
+  tmp := ClassNameShort(self);
+  fIVCtr.magic := crc32c($aba5aba5,@tmp^[2],6); // TAESECB_API -> 'AESECB'
+end;
+
+constructor TAESAbstract.Create(const aKey: THash128);
+begin
+  Create(aKey,128);
+end;
+
+constructor TAESAbstract.Create(const aKey: THash256);
+begin
+  Create(aKey,256);
 end;
 
 constructor TAESAbstract.CreateFromSha256(const aKey: RawUTF8);
 var Digest: TSHA256Digest;
 begin
   SHA256Weak(aKey,Digest);
+  Create(Digest,256);
+end;
+
+constructor TAESAbstract.CreateFromPBKDF2(const aKey: RawUTF8; const aSalt: RawByteString;
+  aRounds: Integer);
+var Digest: TSHA256Digest;
+begin
+  PBKDF2_HMAC_SHA256(aKey,aSalt,aRounds,Digest,ToText(ClassType));
   Create(Digest,256);
 end;
 
@@ -7916,6 +8074,12 @@ end;
 function TAESAbstract.MACGetLast(out aCRC: THash256): boolean;
 begin
   result := false;
+end;
+
+function TAESAbstract.MACEquals(const aCRC: THash256): boolean;
+var mac: THash256;
+begin
+  result := MACGetLast(mac) and IsEqual(mac,aCRC);
 end;
 
 function TAESAbstract.MACCheckError(aEncrypted: pointer; Count: cardinal): boolean;
@@ -8232,11 +8396,12 @@ end;
 
 function TAESAbstractAEAD.MACSetNonce(const aKey: THash256; aAssociated: pointer;
   aAssociatedLen: integer): boolean;
+var rec: THash256Rec absolute aKey;
 begin
   // safe seed for plain text crc, before AES encryption
   // from TECDHEProtocol.SetKey, aKey is a CTR to avoid replay attacks
-  fMACKey.plain := THash256Rec(aKey).Lo;
-  XorBlock16(@fMACKey.plain,@THash256Rec(aKey).Hi);
+  fMACKey.plain := rec.Lo;
+  XorBlock16(@fMACKey.plain,@rec.Hi);
   // neutral seed for encrypted crc, to check for errors, with no compromission
   if (aAssociated<>nil) and (aAssociatedLen>0) then
     crc128c(aAssociated,aAssociatedLen,fMACKey.encrypted) else
@@ -8245,11 +8410,12 @@ begin
 end;
 
 function TAESAbstractAEAD.MACGetLast(out aCRC: THash256): boolean;
+var rec: THash256Rec absolute aCRC;
 begin
   // encrypt the plain text crc, to perform message authentication and integrity
-  AES.Encrypt(fMAC.plain,THash256Rec(aCRC).Lo);
+  AES.Encrypt(fMAC.plain,rec.Lo);
   // store the encrypted text crc, to check for errors, with no compromission
-  THash256Rec(aCRC).Hi := fMAC.encrypted;
+  rec.Hi := fMAC.encrypted;
   result := true;
 end;
 
@@ -8840,52 +9006,8 @@ begin
   Seed;
 end;
 
-{$ifdef CPUINTEL}
-/// get 32-bit value from NIST SP 800-90A compliant RDRAND Intel x86/x64 opcode
-function RdRand32: cardinal;
-{$ifdef CPU64}
-{$ifdef FPC}nostackframe; assembler;
-asm
-{$else}
-asm
-  .noframe
-{$endif FPC}
-{$endif CPU64}
-{$ifdef CPU32}
-asm
-{$endif}
-  // rdrand eax: same opcodes for x86 and x64
-  db $0f,$c7,$f0
-  // returns in eax, ignore carry flag (eax=0 won't hurt)
-end;
-// https://software.intel.com/en-us/articles/intel-digital-random-number-generator-drng-software-implementation-guide
-{$endif}
-
-var
-  rs1: cardinal = 2654435761;
-  rs2: cardinal = 668265263;
-  rs3: cardinal = 3266489917;
-
-function Random32: cardinal;
-begin
-  {$ifdef CPUINTEL}
-  if cfRAND in CpuFeatures then begin
-    result := RdRand32;
-    exit;
-  end;
-  {$endif}
-  result := rs1;
-  rs1 := ((result and -2)shl 12) xor (((result shl 13)xor result)shr 19);
-  result := rs2;
-  rs2 := ((result and -8)shl 4) xor (((result shl 2)xor result)shr 25);
-  result := rs3;
-  rs3 := ((result and -16)shl 17) xor (((result shl 3)xor result)shr 11);
-  result := rs1 xor rs2 xor result;
-end;
-
 procedure FillSystemRandom(Buffer: PByteArray; Len: integer; AllowBlocking: boolean);
 var fromos: boolean;
-    g: array[0..63] of byte;
     i: integer;
     {$ifdef LINUX}
     dev: integer;
@@ -8893,6 +9015,7 @@ var fromos: boolean;
     {$ifdef MSWINDOWS}
     prov: HCRYPTPROV;
     {$endif}
+    tmp: array[byte] of byte;
 begin
   fromos := false;
   {$ifdef LINUX}
@@ -8919,20 +9042,15 @@ begin
   {$endif}
   if fromos then
     exit;
-  {$ifdef CPUINTEL}
-  if cfRAND in CpuFeatures then
-    for i := 0 to (Len shr 2)-1 do
-      PCardinalArray(Buffer)^[i] := PCardinalArray(Buffer)^[i] xor RdRand32;
-  {$endif}
   i := Len;
   repeat
-    SynCommons.FillRandom(@g,sizeof(g) shr 2); // SynCommons used as fallback
-    if i<=SizeOf(g) then begin
-      XorMemory(@Buffer^[Len-i],@g,i);
+    SynCommons.FillRandom(@tmp,SizeOf(tmp) shr 2); // SynCommons as fallback
+    if i<=SizeOf(tmp) then begin
+      XorMemory(@Buffer^[Len-i],@tmp,i);
       break;
     end;
-    XorMemory(@Buffer^[Len-i],@g,SizeOf(g));
-    dec(i,SizeOf(g));
+    XorMemory(@Buffer^[Len-i],@tmp,SizeOf(tmp));
+    dec(i,SizeOf(tmp));
   until false;
 end;
 
@@ -8947,31 +9065,28 @@ var time: Int64;
     threads: array[0..2] of TThreadID;
     version: RawByteString;
     hmac: THMAC_SHA256;
-    entropy: array[0..3] of TSHA256Digest; // 128 bytes
+    entropy: array[0..3] of THash256; // 128 bytes
     paranoid: cardinal;
     p: PByteArray;
     i: integer;
   procedure hmacInit;
   var timenow: Int64;
       g: TGUID;
-      i {$ifdef CPUINTEL}, val{$endif}: cardinal;
+      i, val: cardinal;
   begin
     hmac.Init(@entropy,sizeof(entropy)); // bytes on CPU stack
     hmac.Update(@time,sizeof(time));
+    hmac.Update(ExeVersion.Hash.b);
     QueryPerformanceCounter(timenow);
     hmac.Update(@timenow,sizeof(timenow)); // include GetEntropy() execution time
     for i := 0 to timenow and 3 do begin
       CreateGUID(g); // not random, but genuine
       hmac.Update(@g,sizeof(g));
     end;
-    {$ifdef CPUINTEL}
-    hmac.Update(@CpuFeatures,sizeof(CpuFeatures));
-    if cfRAND in CpuFeatures then
-      for i := 1 to (PCardinal(@entropy[3])^ and 15)+2 do begin
-        val := RdRand32;
-        hmac.Update(@val,sizeof(val));
-      end;
-    {$endif}
+    for i := 1 to (Random32 and 15)+2 do begin
+      val := Random32;
+      hmac.Update(@val,sizeof(val));
+    end;
   end;
 begin
   QueryPerformanceCounter(time);
@@ -9007,17 +9122,7 @@ begin
     paranoid := PByteArray(@entropy)^[i and (sizeof(entropy)-1)];
     p^[i] := p^[i] xor Xor32Byte[(cardinal(p^[i]) shl 5) xor paranoid] xor paranoid;
   end;
-  {$ifdef CPUINTEL}
-  if not (cfRAND in CpuFeatures) then
-  {$endif}
-    repeat // seed Random32 function above
-      QueryPerformanceCounter(time);
-      rs1 := rs1 xor time xor PCardinal(@entropy[0])^;
-      rs2 := rs2 xor time xor PCardinal(@entropy[1])^;
-      rs3 := rs3 xor time xor PCardinal(@entropy[2])^;
-    until (rs1>1) and (rs2>7) and (rs3>15);
-  for i := 1 to PCardinal(@entropy[3])^ and 15 do
-    Random32; // warm up
+  Random32Seed(@entropy[3],sizeof(entropy[3]));
 end;
 
 procedure TAESPRNG.Seed;
@@ -9207,6 +9312,11 @@ begin
   XorBlockN(@Buffer,dst,pointer(tmp),BufferBytes); // B[i] := A[i] xor C[i];
 end;
 
+function TAESPRNG.AFSplit(const Buffer: RawByteString; StripesCount: integer): RawByteString;
+begin
+  result := AFSplit(pointer(Buffer)^,length(Buffer),StripesCount);
+end;
+
 class function TAESPRNG.AFUnsplit(const Split: RawByteString;
   out Buffer; BufferBytes: integer): boolean;
 var len: cardinal;
@@ -9235,7 +9345,7 @@ begin
   len := length(Split);
   if (len=0) or (len mod cardinal(StripesCount+1)<>0) then
     exit;
-  len := len div cardinal(StripesCount);
+  len := len div cardinal(StripesCount+1);
   SetLength(result,len);
   if not AFUnsplit(Split,pointer(result)^,len) then
     result := '';
@@ -9454,6 +9564,162 @@ begin
     Index := 0;
   if Count<Depth then
     inc(Count);
+end;
+
+{$ifdef MSWINDOWS}
+type
+  DATA_BLOB = record
+    cbData: DWORD;
+    pbData: PAnsiChar;
+  end;
+  PDATA_BLOB = ^DATA_BLOB;
+const
+  CRYPTPROTECT_UI_FORBIDDEN = $1;
+  CRYPTDLL = 'Crypt32.dll';
+
+function CryptProtectData(const DataIn: DATA_BLOB; szDataDescr: PWideChar;
+  OptionalEntropy: PDATA_BLOB; Reserved, PromptStruct: Pointer; dwFlags: DWORD;
+  var DataOut: DATA_BLOB): BOOL; stdcall; external CRYPTDLL name 'CryptProtectData';
+function CryptUnprotectData(const DataIn: DATA_BLOB; szDataDescr: PWideChar;
+  OptionalEntropy: PDATA_BLOB; Reserved, PromptStruct: Pointer; dwFlags: DWORD;
+  var DataOut: DATA_BLOB): Bool; stdcall; external CRYPTDLL name 'CryptUnprotectData';
+
+function CryptDataForCurrentUserDPAPI(const Data,AppSecret: RawByteString; Encrypt: boolean): RawByteString;
+var src,dst,ent: DATA_BLOB;
+    e: PDATA_BLOB;
+    ok: boolean;
+begin
+  src.pbData := pointer(Data);
+  src.cbData := length(Data);
+  if AppSecret<>'' then begin
+    ent.pbData := pointer(AppSecret);
+    ent.cbData := length(AppSecret);
+    e := @ent;
+  end else
+    e := nil;
+  if Encrypt then
+    ok := CryptProtectData(src,nil,e,nil,nil,CRYPTPROTECT_UI_FORBIDDEN,dst) else
+    ok := CryptUnprotectData(src,nil,e,nil,nil,CRYPTPROTECT_UI_FORBIDDEN,dst);
+  if ok then begin
+    SetString(result,dst.pbData,dst.cbData);
+    LocalFree(HLOCAL(dst.pbData));
+  end else
+    result := '';
+end;
+{$endif}
+
+var
+  __h: THash256;
+
+procedure read__h;
+var keyfile: TFileName;
+    instance: THash256;
+    key,key2,appsec: RawByteString;
+begin
+  SetString(appsec,PAnsiChar(@CryptProtectDataEntropy),32);
+  PBKDF2_HMAC_SHA256(appsec,ExeVersion.User,100,instance);
+  FillZero(appsec);
+  appsec := BinToBase64URI(@instance,15); // local file has 21 chars length
+  keyfile := format({$ifdef MSWINDOWS}'%s_%s'{$else}'%s.syn-%s'{$endif},
+    [GetSystemPath(spUserData),appsec]); // .* files are hidden under Linux 
+  SetString(appsec,PAnsiChar(@instance[15]),17); // use remaining bytes as key
+  try
+    key := StringFromFile(keyfile);
+    if key<>'' then begin
+      try
+        key2 := TAESCFB.SimpleEncrypt(key,appsec,false,true);
+      except
+        key2 := ''; // handle decryption error
+      end;
+      FillZero(key);
+      {$ifdef MSWINDOWS}
+      key := CryptDataForCurrentUserDPAPI(key2,appsec,false);
+      {$else}
+      key := key2;
+      {$endif}
+      if TAESPRNG.AFUnsplit(key,__h,sizeof(__h)) then
+        exit; // successfully extracted secret key in __h
+    end;
+    if FileExists(keyfile) then // allow rewrite of invalid local file
+      {$ifdef MSWINDOWS}
+      SetFileAttributes(pointer(keyfile),FILE_ATTRIBUTE_NORMAL);
+      {$else}
+      {$ifdef FPC}fpchmod{$else}chmod{$endif}(pointer(keyfile),S_IRUSR or S_IWUSR);
+      {$endif}
+    TAESPRNG.Main.FillRandom(__h);
+    key := TAESPRNG.Main.AFSplit(__h,sizeof(__h),126);
+    {$ifdef MSWINDOWS} // 4KB local file, DPAPI-cyphered but with no DPAPI BLOB layout
+    key2 := CryptDataForCurrentUserDPAPI(key,appsec,true);
+    FillZero(key);
+    {$else} // 4KB local chmod 400 hidden file in $HOME folder under Linux/POSIX
+    key2 := key;
+    {$endif}
+    key := TAESCFB.SimpleEncrypt(key2,appsec,true,true);
+    if not FileFromString(key,keyfile) then
+      ESynCrypto.CreateUTF8('Unable to write %',[keyfile]);
+    {$ifdef MSWINDOWS}
+    SetFileAttributes(pointer(keyfile),FILE_ATTRIBUTE_HIDDEN or FILE_ATTRIBUTE_READONLY);
+    {$else}
+    {$ifdef FPC}fpchmod{$else}chmod{$endif}(pointer(keyfile),S_IRUSR);
+    {$endif}
+  finally
+    FillZero(key);
+    FillZero(key2);
+    FillZero(appsec);
+  end;
+end;
+
+function CryptDataForCurrentUser(const Data,AppSecret: RawByteString; Encrypt: boolean): RawByteString;
+type
+  TCryptData = packed record
+    nonce,mac: THash256;
+    crc: cardinal;
+    data: RawByteString;
+  end;
+  PCryptData = ^TCryptData;
+const
+  VERSION = 1;
+var aes: TAESCFBCRC;
+    rec: TCryptData;
+    hmac: THMAC_SHA256;
+    secret: THash256;
+begin
+  result := '';
+  if Data='' then
+    exit;
+  if IsZero(__h) then
+    read__h;
+  hmac.Init(@CryptProtectDataEntropy,sizeof(CryptProtectDataEntropy));
+  hmac.Update(AppSecret);
+  hmac.Update(__h);
+  hmac.Done(secret);
+  aes := TAESCFBCRC.Create(secret);
+  try
+    FillZero(secret);
+    if Encrypt then begin
+      TAESPRNG.Main.FillRandom(rec.nonce);
+      aes.MACSetNonce(rec.nonce);
+      rec.Data := aes.EncryptPKCS7(Data,true);
+      aes.MACGetLast(rec.mac);
+      rec.crc := crc32c(VERSION,@rec.nonce,64);
+      result := RecordSave(rec,TypeInfo(TCryptData));
+    end else begin
+      if (length(Data)<68) or
+         (PCryptData(Data)^.crc<>crc32c(VERSION,pointer(data),64)) or
+         (RecordLoad(rec,Pointer(Data),TypeInfo(TCryptData))=nil) then
+        exit;
+      aes.MACSetNonce(rec.nonce);
+      result := aes.DecryptPKCS7(rec.Data,true);
+      if result<>'' then
+        if not aes.MACEquals(rec.mac) then begin
+          FillZero(result);
+          result := '';
+        end;
+    end;
+  finally
+    FillZero(rec.data);
+    aes.Free;
+  end;
 end;
 
 
@@ -9974,6 +10240,7 @@ finalization
   if PadLockLibHandle<>0 then
     FreeLibrary(PadLockLibHandle); // same on Win+Linux, thanks to SysUtils
 {$endif}
+  FillZero(__h);
 {$ifdef MSWINDOWS}
   if CryptoAPI.Handle<>0 then begin
     {$ifdef USE_PROV_RSA_AES}
