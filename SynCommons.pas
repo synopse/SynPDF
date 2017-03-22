@@ -2493,6 +2493,15 @@ function DoubleToString(Value: Double): string;
 // - decimals are joined by 2 (no decimal, 2 decimals, 4 decimals)
 function Curr64ToString(Value: Int64): string;
 
+type
+  /// used to store a set of 8-bit encoded characters
+  TSynAnsicharSet = set of AnsiChar;
+
+/// returns the supplied text content, without any control char
+// - a control char has an ASCII code #0 .. #32, i.e. text[]<=' '
+// - you can specify a custom char set to be excluded, if needed
+function TrimControlChars(const text: RawUTF8; const controls: TSynAnsicharSet=[#0..' ']): RawUTF8;
+
 var
   /// best possible precision when rendering a "single" kind of float
   // - can be used as parameter for ExtendedToString/ExtendedToStr
@@ -12425,7 +12434,7 @@ var
 
 const
 {$ifdef OPT4AMD} // circumvent Delphi 5 and Delphi 6 compilation issues :(
-  ANSICHARNOT01310: set of AnsiChar = [#1..#9,#11,#12,#14..#255];
+  ANSICHARNOT01310: TSynAnsicharSet = [#1..#9,#11,#12,#14..#255];
   IsWord: set of byte =
     [ord('0')..ord('9'),ord('a')..ord('z'),ord('A')..ord('Z')];
   IsIdentifier: set of byte =
@@ -17135,6 +17144,16 @@ type
   // unless BackgroundExecute is run from a VCL timer
   TOnSystemUseMeasured = procedure(ProcessID: integer; const Data: TSystemUseData) of object;
 
+  /// internal storage of CPU and RAM usage for none process
+  TSystemUseProcess = record
+    ID: integer;
+    Data: TSystemUseDataDynArray;
+    PrevKernel: Int64;
+    PrevUser: Int64;
+  end;
+  /// internal storage of CPU and RAM usage for a set of processes
+  TSystemUseProcessDynArray = array of TSystemUseProcess;
+
   /// monitor CPU and RAM usage of one or several processes
   // - you should execute BackgroundExecute on a regular pace (e.g. every second)
   // to gather low-level CPU and RAM information for the given set of processes
@@ -17142,19 +17161,17 @@ type
   // - use Current class function to access a process-wide instance
   TSystemUse = class(TSynPersistent)
   protected
-    fProcess: array of record
-      ID: integer;
-      PrevKernel: Int64;
-      PrevUser: Int64;
-      Data: TSystemUseDataDynArray;
-    end;
+    fProcess: TSystemUseProcessDynArray;
+    fProcesses: TDynArray;
     fDataIndex: integer;
     fSysPrevKernel: Int64;
     fSysPrevUser: Int64;
+    fOpenProcessFlags: integer;
     fSafe: TAutoLocker;
     fHistoryDepth: integer;
     fOnMeasured: TOnSystemUseMeasured;
     fTimer: TSynBackgroundTimer;
+    fUnsubscribeProcessOnAccessError: boolean;
     function ProcessIndex(aProcessID: integer): integer;
   public
     /// a TSynBackgroundThreadProcess compatible event
@@ -17182,40 +17199,44 @@ type
     constructor Create(aHistoryDepth: integer=60); reintroduce; overload; virtual;
     /// finalize all internal data information
     destructor Destroy; override;
+    /// add a Process ID to the internal tracking list
+    procedure Subscribe(aProcessID: integer);
+    /// remove a Process ID from the internal tracking list
+    function Unsubscribe(aProcessID: integer): boolean;
     /// returns the total (Kernel+User) CPU usage percent of the supplied process
     // - aProcessID=0 will return information from the current process
-    // - returns -1 if the Process ID was not registered as Create() parameter
+    // - returns -1 if the Process ID was not registered via Create/Subscribe
     function Percent(aProcessID: integer=0): single; overload;
     /// returns the Kernel-space CPU usage percent of the supplied process
     // - aProcessID=0 will return information from the current process
-    // - returns -1 if the Process ID was not registered as Create() parameter
+    // - returns -1 if the Process ID was not registered via Create/Subscribe
     function PercentKernel(aProcessID: integer=0): single; overload;
     /// returns the User-space CPU usage percent of the supplied process
     // - aProcessID=0 will return information from the current process
-    // - returns -1 if the Process ID was not registered as Create() parameter
+    // - returns -1 if the Process ID was not registered via Create/Subscribe
     function PercentUser(aProcessID: integer=0): single; overload;
     /// returns the total (Work+Paged) RAM use of the supplied process, in KB
     // - aProcessID=0 will return information from the current process
-    // - returns 0 if the Process ID was not registered as Create() parameter
+    // - returns 0 if the Process ID was not registered via Create/Subscribe
     function KB(aProcessID: integer=0): cardinal; overload;
     /// returns the detailed CPU and RAM usage percent of the supplied process
     // - aProcessID=0 will return information from the current process
-    // - returns -1 if the Process ID was not registered as Create() parameter
+    // - returns -1 if the Process ID was not registered via Create/Subscribe
     function Data(out aData: TSystemUseData; aProcessID: integer=0): boolean; overload;
     /// returns the detailed CPU and RAM usage percent of the supplied process
     // - aProcessID=0 will return information from the current process
-    // - returns TimeStamp=0 if the Process ID was not registered as Create() parameter
+    // - returns TimeStamp=0 if the Process ID was not registered via Create/Subscribe
     function Data(aProcessID: integer=0): TSystemUseData; overload;
     /// returns total (Kernel+User) CPU usage percent history of the supplied process
     // - aProcessID=0 will return information from the current process
-    // - returns nil if the Process ID was not registered as Create() parameter
+    // - returns nil if the Process ID was not registered via Create/Subscribe
     // - returns the sample values as an array, starting from the last to the oldest
     // - you can customize the maximum depth, with aDepth < HistoryDepth
     function History(aProcessID: integer=0; aDepth: integer=0): TSingleDynArray; overload;
     /// returns total (Kernel+User) CPU usage percent history of the supplied
     // process, as a string of two digits values
     // - aProcessID=0 will return information from the current process
-    // - returns '' if the Process ID was not registered as Create() parameter
+    // - returns '' if the Process ID was not registered via Create/Subscribe
     // - you can customize the maximum depth, with aDepth < HistoryDepth
     // - the memory history (in MB) can be optionally returned in aDestMemoryMB
     function HistoryText(aProcessID: integer=0; aDepth: integer=0;
@@ -17223,7 +17244,7 @@ type
     {$ifndef NOVARIANTS}
     /// returns total (Kernel+User) CPU usage percent history of the supplied process
     // - aProcessID=0 will return information from the current process
-    // - returns null if the Process ID was not registered as Create() parameter
+    // - returns null if the Process ID was not registered via Create/Subscribe
     // - returns the sample values as a TDocVariant array, starting from the
     // last to the oldest, with two digits precision (as currency values)
     // - you can customize the maximum depth, with aDepth < HistoryDepth
@@ -17234,10 +17255,14 @@ type
     class function Current(aCreateIfNone: boolean=true): TSystemUse;
     /// returns detailed CPU and RAM usage history of the supplied process
     // - aProcessID=0 will return information from the current process
-    // - returns nil if the Process ID was not registered as Create() parameter
+    // - returns nil if the Process ID was not registered via Create/Subscribe
     // - returns the sample values as an array, starting from the last to the oldest
     // - you can customize the maximum depth, with aDepth < HistoryDepth
     function HistoryData(aProcessID: integer=0; aDepth: integer=0): TSystemUseDataDynArray; overload;
+    /// if any unexisting (e.g. closed/killed) process should be unregistered 
+    // - e.g. if OpenProcess() API call fails
+    property UnsubscribeProcessOnAccessError: boolean
+      read fUnsubscribeProcessOnAccessError write fUnsubscribeProcessOnAccessError;
     /// how many items are stored internally, and returned by the History() method
     property HistoryDepth: integer read fHistoryDepth;
     /// executed when TSystemUse.BackgroundExecute finished its measurement
@@ -20624,6 +20649,28 @@ begin
     end;
   end;
   tmp.Done(dest,result);
+end;
+
+function TrimControlChars(const text: RawUTF8; const controls: TSynAnsicharSet): RawUTF8;
+var len,i,j,n: integer;
+    P: PAnsiChar;
+begin
+  len := length(text);
+  for i := 1 to len do
+    if text[i] in controls then begin
+      n := i-1;
+      SetString(result,nil,len);
+      P := pointer(result);
+      MoveFast(pointer(text)^,P^,n);
+      for j := i+1 to len do
+        if not(text[j] in controls) then begin
+          P[n] := text[j];
+          inc(n);
+        end;
+      SetLength(result, n);
+      exit;
+    end;
+  result := text; // no control char found
 end;
 
 {$ifdef CPU64}
@@ -51041,13 +51088,13 @@ function IsValidEmail(P: PUTF8Char): boolean;
 // http://www.howtodothings.com/computers/a1169-validating-email-addresses-in-delphi.html
 const
   // Valid characters in an "atom"
-  atom_chars: set of AnsiChar = [#33..#255] -
+  atom_chars: TSynAnsicharSet = [#33..#255] -
      ['(', ')', '<', '>', '@', ',', ';', ':', '\', '/', '"', '.', '[', ']', #127];
   // Valid characters in a "quoted-string"
-  quoted_string_chars: set of AnsiChar = [#0..#255] - ['"', #13, '\'];
+  quoted_string_chars: TSynAnsicharSet = [#0..#255] - ['"', #13, '\'];
   // Valid characters in a subdomain
-  letters: set of AnsiChar = ['A'..'Z', 'a'..'z'];
-  letters_digits: set of AnsiChar = ['0'..'9', 'A'..'Z', 'a'..'z'];
+  letters: TSynAnsicharSet = ['A'..'Z', 'a'..'z'];
+  letters_digits: TSynAnsicharSet = ['0'..'9', 'A'..'Z', 'a'..'z'];
 type
   States = (STATE_BEGIN, STATE_ATOM, STATE_QTEXT, STATE_QCHAR,
     STATE_QUOTE, STATE_LOCAL_PERIOD, STATE_EXPECTING_SUBDOMAIN,
@@ -61300,6 +61347,9 @@ begin
 end;
 
 procedure TSynBackgroundThreadMethodAbstract.ExecuteLoop;
+{$ifndef DELPHI5OROLDER}
+var E: TObject;
+{$endif}
 begin
   case FixedWaitFor(fProcessEvent,INFINITE) of
     wrSignaled:
@@ -61328,7 +61378,9 @@ begin
             fBackgroundException := ESynException.CreateUTF8(
               'Redirected %: "%"',[E,E.Message]);
           {$else}
-          fBackgroundException := AcquireExceptionObject;
+          E := AcquireExceptionObject;
+          if E.InheritsFrom(Exception) then
+            fBackgroundException := Exception(E);
           {$endif}
         end;
       finally
@@ -61738,6 +61790,8 @@ type
     PagefileUsage: PtrUInt;
     PeakPagefileUsage: PtrUInt;
   end;
+const
+  PROCESS_QUERY_LIMITED_INFORMATION = $1000;
 
 var
   hsapi: HMODULE;
@@ -61770,9 +61824,10 @@ begin
     difftot := (skrn-fSysPrevKernel)+(susr-fSysPrevUser);
     fSysPrevKernel := skrn;
     fSysPrevUser := susr;
-    for i := 0 to high(fProcess) do
+    for i := high(fProcess) downto 0 do // backwards for fProcesses.Delete(i)
     with fProcess[i] do begin
-      hnd := OpenProcess(PROCESS_QUERY_INFORMATION or PROCESS_VM_READ,false,ID);
+      hnd := OpenProcess(fOpenProcessFlags,false,ID);
+      if hnd<>0 then
       try
         if GetProcessTimes(hnd,ftp,fte,ftkrn,ftusr) then begin
           FileTimeToInt64(ftkrn,pkrn);
@@ -61803,7 +61858,10 @@ begin
         end;
       finally
         CloseHandle(hnd);
-      end;
+      end else
+        if UnsubscribeProcessOnAccessError then
+          // if GetLastError=ERROR_INVALID_PARAMETER then
+          fProcesses.Delete(i);
     end;
   finally
     fSafe.Leave;
@@ -61832,6 +61890,8 @@ var i: integer;
     {$endif}
 begin
   inherited Create;
+  fSafe := TAutoLocker.Create;
+  fProcesses.Init(TypeInfo(TSystemUseProcessDynArray),fProcess);
   {$ifdef MSWINDOWS}
   if not Assigned(GetSystemTimes) then begin
     h := GetModuleHandle(kernel32);
@@ -61843,24 +61903,24 @@ begin
        not Assigned(GetProcessMemoryInfo) then
       exit; // no system monitoring API under oldest Windows
   end;
+  if OSVersion<wVista then
+    fOpenProcessFlags := PROCESS_QUERY_INFORMATION else
+    fOpenProcessFlags := PROCESS_QUERY_LIMITED_INFORMATION;
   {$else}
   exit; // not implemented yet
   {$endif}
-  fSafe := TAutoLocker.Create;
   if aHistoryDepth<=0 then
     aHistoryDepth := 1;
   fHistoryDepth := aHistoryDepth;
   SetLength(fProcess,length(aProcessID));
-  if fProcess=nil then
-    Create([0]) else
-    for i := 0 to high(aProcessID) do begin
-      {$ifdef MSWINDOWS}
-      if aProcessID[i]=0 then
-        fProcess[i].ID := GetCurrentProcessID else
-      {$endif}
-        fProcess[i].ID := aProcessID[i];
-      SetLength(fProcess[i].Data,fHistoryDepth);
-    end;
+  for i := 0 to high(aProcessID) do begin
+    {$ifdef MSWINDOWS}
+    if aProcessID[i]=0 then
+      fProcess[i].ID := GetCurrentProcessID else
+    {$endif}
+      fProcess[i].ID := aProcessID[i];
+    SetLength(fProcess[i].Data,fHistoryDepth);
+  end;
 end;
 
 constructor TSystemUse.Create(aHistoryDepth: integer);
@@ -61874,8 +61934,45 @@ begin
   fSafe.Free;
 end;
 
-function TSystemUse.ProcessIndex(aProcessID: integer): integer;
+procedure TSystemUse.Subscribe(aProcessID: integer);
+var i,n: integer;
 begin
+  {$ifdef MSWINDOWS}
+  if aProcessID=0 then
+    aProcessID := GetCurrentProcessID;
+  {$endif}
+  fSafe.Enter;
+  try
+    n := length(fProcess);
+    for i := 0 to n-1 do
+      if fProcess[i].ID=aProcessID then
+        exit; // already subscribed
+    SetLength(fProcess,n+1);
+    fProcess[n].ID := aProcessID;
+    SetLength(fProcess[n].Data,fHistoryDepth);
+  finally
+    fSafe.Leave;
+  end;
+end;
+
+function TSystemUse.Unsubscribe(aProcessID: integer): boolean;
+var i: integer;
+begin
+  fSafe.Enter;
+  try
+    i := ProcessIndex(aProcessID);
+    if i>=0 then begin
+      fProcesses.Delete(i);
+      result := true;
+    end else
+      result := false;
+  finally
+    fSafe.Leave;
+  end;
+end;
+
+function TSystemUse.ProcessIndex(aProcessID: integer): integer;
+begin // caller should have made fSafe.Enter
   {$ifdef MSWINDOWS}
   if aProcessID=0 then
     aProcessID := GetCurrentProcessID;
@@ -61890,19 +61987,19 @@ end;
 function TSystemUse.Data(out aData: TSystemUseData; aProcessID: integer=0): boolean;
 var i: integer;
 begin
-  i := ProcessIndex(aProcessID);
-  if i>=0 then begin
-    fSafe.Enter;
-    try
+  fSafe.Enter;
+  try
+    i := ProcessIndex(aProcessID);
+    if i>=0 then begin
       with fProcess[i] do
         aData := Data[fDataIndex];
-    finally
-      fSafe.Leave;
+      result := aData.TimeStamp<>0;
+    end else begin
+      FillCharFast(aData,SizeOf(aData),0);
+      result := false;
     end;
-    result := aData.TimeStamp<>0;
-  end else begin
-    FillCharFast(aData,SizeOf(aData),0);
-    result := false;
+  finally
+    fSafe.Leave;
   end;
 end;
 
@@ -61936,10 +62033,10 @@ end;
 function TSystemUse.HistoryData(aProcessID,aDepth: integer): TSystemUseDataDynArray;
 var i,n,last: integer;
 begin
-  i := ProcessIndex(aProcessID);
-  if i>=0 then begin
-    fSafe.Enter;
-    try
+  fSafe.Enter;
+  try
+    i := ProcessIndex(aProcessID);
+    if i>=0 then
       with fProcess[i] do begin
         n := length(Data);
         last := n-1;
@@ -61957,12 +62054,12 @@ begin
             break;
           end;
         end;
-      end;
-    finally
-      fSafe.Leave;
-    end;
-  end else
-    result := nil;
+      end
+    else
+      result := nil;
+  finally
+    fSafe.Leave;
+  end;
 end;
 
 function TSystemUse.History(aProcessID,aDepth: integer): TSingleDynArray;
