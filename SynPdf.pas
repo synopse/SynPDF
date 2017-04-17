@@ -1533,6 +1533,10 @@ type
     // fMissingBookmarks list, and will be linked at CreateBookMark method call
     function CreateLink(const ARect: TPdfRect; const aBookmarkName: RawUTF8;
       BorderStyle: TPdfAnnotationBorder=abSolid; BorderWidth: integer=1): TPdfDictionary;
+
+    // to create a real hyper-link -- added by @shenmin(https://github.com/shenmin)
+    function CreateHyperLink(const ARect : TPdfRect; const url : String) : TPdfDictionary;
+
     /// create an Outline entry at a specified position of the current page
     // - the outline tree is created from the specified numerical level (0=root),
     // just after the item added via the previous CreateOutline call
@@ -1876,7 +1880,7 @@ type
     procedure ConcatToCTM(a, b, c, d, e, f: Single; Decimals: Cardinal=6); {  cm  }
 
     /// Set the flatness tolerance in the graphics state
-    // - see Section 6.5.1, “Flatness Tolerance” of the PDF 1.3 reference:
+    // - see Section 6.5.1, Flatness Tolerance of the PDF 1.3 reference:
     // The flatness tolerance controls the maximum permitted distance in
     // device pixels between the mathematically correct path and an
     // approximation constructed from straight line segments
@@ -1960,7 +1964,7 @@ type
     // it does nothing
     procedure Closepath;                                         {  h   }
     /// End the path object without filling or stroking it
-    // - This operator is a “path-painting no-op,” used primarily for the
+    // - This operator is a path-painting no-op, used primarily for the
     // side effect of changing the clipping path
     procedure NewPath;                                           {  n   }
     /// Stroke the path
@@ -2001,7 +2005,7 @@ type
     // the page affected by painting operators. The closed subpaths of this path
     // define the area that can be painted. Marks falling inside this area will
     // be applied to the page; those falling outside it will not. (Precisely what
-    // is considered to be “inside” a path is discussed under “Filling,” above.)
+    // is considered to be inside a path is discussed under Filling, above.)
     // - The initial clipping path includes the entire page. Both clipping path
     // methods (Clip and EoClip) may appear after the last path construction operator
     // and before the path-painting operator that terminates a path object.
@@ -2026,7 +2030,7 @@ type
     // - word spacing is used by the ShowText and ShowTextNextLine methods
     // - Default value is 0
     procedure SetWordSpace(wordSpace: Single);                   {  Tw  }
-    /// Set the horizontal scaling to (scale ÷ 100)
+    /// Set the horizontal scaling to (scale 100)
     // - hScaling is a number specifying the percentage of the normal width
     // - Default value is 100 (e.g. normal width)
     procedure SetHorizontalScaling(hScaling: Single);              {  Tz  }
@@ -5965,6 +5969,38 @@ begin
     result.AddItem('Dest',aDest.GetValue);
 end;
 
+// to create a real hyper-link -- added by @shenmin(https://github.com/shenmin)
+function TPdfDocument.CreateHyperLink(const ARect : TPdfRect; const url : String) : TPdfDictionary;
+var FAnnotation, FURIObj, FBorderStyle: TPdfDictionary;
+    aArray: TPdfArray;
+    aPage: TPdfPage;
+begin
+  FURIObj := TPdfDictionary.Create(FXref);
+  FURIObj.FSaveAtTheEnd := true;
+  FURIObj.AddItem('S', 'URI');
+  FURIObj.AddItemTextString('URI', url);
+  FXref.AddObject(FURIObj);
+  FAnnotation := TPdfDictionary.Create(FXref);
+  FAnnotation.FSaveAtTheEnd := true;
+  FXref.AddObject(FAnnotation);
+  FAnnotation.AddItem('Type', 'Annot');
+  FAnnotation.AddItem('Subtype', 'Link');
+  FAnnotation.AddItem('A', FURIObj);
+  FBorderStyle := TPdfDictionary.Create(FXRef);
+  FBorderStyle.AddItem('W',0);
+  FAnnotation.AddItem('BS',FBorderStyle);
+  with ARect do
+    FAnnotation.AddItem('Rect',TPdfArray.CreateReals(FXRef,[Left,Top,Right,Bottom]));
+  aPage := FCanvas.Page;
+  aArray := aPage.PdfArrayByName('Annots');
+  if aArray=nil then begin
+    aArray := TPdfArray.Create(FXRef);
+    aPage.AddItem('Annots', aArray);
+  end;
+  aArray.AddItem(FAnnotation);
+  Result := FAnnotation;
+end;
+
 function TPdfDocument.CreateDestination: TPdfDestination;
 begin
   Result := TPdfDestination.Create(Self);
@@ -6480,7 +6516,7 @@ function TPdfDocument.TTFFontPostcriptName(aFontIndex: integer; AStyle: TPdfFont
 // see http://www.microsoft.com/typography/OTSPEC/name.htm
 function TrueTypeFontName(const aFontName: RawUTF8; AStyle: TPdfFontStyles): PDFString;
 var i: Integer;
-begin // from PDF 1.3 § 5.5.2
+begin // from PDF 1.3 5.5.2
   SetString(result,PAnsiChar(pointer(aFontName)),length(aFontName));
   for i := length(result) downto 1 do
     if (Result[i]<=' ') or (Result[i]>=#127) then
@@ -8089,7 +8125,7 @@ end;
 
 const
   { collection of flags defining various characteristics of the font
-    see PDF Reference 1.3 §5.7.1 }
+    see PDF Reference 1.3 5.7.1 }
   PDF_FONT_FIXED_WIDTH = 1;
   PDF_FONT_SERIF       = 2;
   PDF_FONT_SYMBOLIC    = 4;
@@ -8324,7 +8360,7 @@ begin
   WR := TPdfWrite.Create(fDoc,DS);
   try
     if Unicode then begin
-      // 1. Unicode Font (see PDF 1.3 reference §5.9)
+      // 1. Unicode Font (see PDF 1.3 reference ?.9)
       // create descendant font
       Descendant := TPdfDictionary.Create(fDoc.FXref);
       Descendant.AddItem('Type','Font');
@@ -10849,7 +10885,7 @@ begin
           for y := 0 to fPixelHeight-1 do
             FWriter.AddRGB(B.ScanLine[y],PInc,fPixelWidth);
           if (PInc=3) and (B.TransparentMode=tmFixed) then begin
-            // [ min1 max1 … minn maxn ]
+            // [ min1 max1 minn maxn ]
             TransparentColor := B.TransparentColor;
             FAttributes.AddItem('Mask',TPdfArray.CreateReals(nil,
               [(TransparentColor and $ff), (TransparentColor and $ff),
