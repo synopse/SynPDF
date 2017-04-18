@@ -577,18 +577,35 @@ type
     // - default implementation, for a non AEAD protocol, returns false
     function MACCheckError(aEncrypted: pointer; Count: cardinal): boolean; virtual;
 
-    /// simple wrapper able to cypher/decypher any content
-    // - here all data variable could be text or binary
+    /// simple wrapper able to cypher/decypher any in-memory content
+    // - here data variables could be text or binary
+    // - use StringToUTF8() to define the Key parameter from a VCL string
     // - if IVAtBeginning is TRUE, a random Initialization Vector will be computed,
     // and stored at the beginning of the output binary buffer
     class function SimpleEncrypt(const Input,Key: RawByteString; Encrypt: boolean;
       IVAtBeginning: boolean=false): RawByteString; overload;
-    /// simple wrapper able to cypher/decypher any content
-    // - here all data variable could be text or binary
+    /// simple wrapper able to cypher/decypher any in-memory content
+    // - here data variables could be text or binary
+    // - you could use e.g. THMAC_SHA256 to safely compute the Key/KeySize value 
     // - if IVAtBeginning is TRUE, a random Initialization Vector will be computed,
     // and stored at the beginning of the output binary buffer
     class function SimpleEncrypt(const Input: RawByteString; const Key;
       KeySize: integer; Encrypt: boolean; IVAtBeginning: boolean=false): RawByteString; overload;
+    /// simple wrapper able to cypher/decypher any file content
+    // - just a wrapper around SimpleEncrypt() and StringFromFile/FileFromString
+    // - use StringToUTF8() to define the Key parameter from a VCL string
+    // - if IVAtBeginning is TRUE, a random Initialization Vector will be computed,
+    // and stored at the beginning of the output binary buffer
+    class function SimpleEncryptFile(const InputFile, OutputFile: TFileName;
+      const Key: RawByteString; Encrypt: boolean;
+      IVAtBeginning: boolean=false): boolean; overload;
+    /// simple wrapper able to cypher/decypher any file content
+    // - just a wrapper around SimpleEncrypt() and StringFromFile/FileFromString
+    // - you could use e.g. THMAC_SHA256 to safely compute the Key/KeySize value 
+    // - if IVAtBeginning is TRUE, a random Initialization Vector will be computed,
+    // and stored at the beginning of the output binary buffer
+    class function SimpleEncryptFile(const InputFile, Outputfile: TFileName; const Key;
+      KeySize: integer; Encrypt: boolean; IVAtBeginning: boolean=false): boolean; overload;
 
     /// associated Key Size, in bits (i.e. 128,192,256)
     property KeySize: cardinal read fKeySize;
@@ -8115,6 +8132,32 @@ begin
   end;
 end;
 
+class function TAESAbstract.SimpleEncryptFile(const InputFile, OutputFile: TFileName;
+  const Key: RawByteString; Encrypt, IVAtBeginning: boolean): boolean;
+var src,dst: RawByteString;
+begin
+  result := false;
+  src := StringFromFile(InputFile);
+  if src<>'' then begin
+    dst := SimpleEncrypt(src,Key,Encrypt,IVAtBeginning);
+    if dst<>'' then
+      result := FileFromString(dst,OutputFile);
+  end;
+end;
+
+class function TAESAbstract.SimpleEncryptFile(const InputFile, Outputfile: TFileName;
+  const Key; KeySize: integer; Encrypt, IVAtBeginning: boolean): boolean;
+var src,dst: RawByteString;
+begin
+  result := false;
+  src := StringFromFile(InputFile);
+  if src<>'' then begin
+    dst := SimpleEncrypt(src,Key,KeySize,Encrypt,IVAtBeginning);
+    if dst<>'' then
+      result := FileFromString(dst,OutputFile);
+  end;
+end;
+
 function TAESAbstract.Clone: TAESAbstract;
 begin
   result := TAESAbstractClass(ClassType).Create(fKey,fKeySize);
@@ -9072,27 +9115,29 @@ var time: Int64;
   procedure hmacInit;
   var timenow: Int64;
       g: TGUID;
-      i, val: cardinal;
+      i,val: cardinal;
   begin
     hmac.Init(@entropy,sizeof(entropy)); // bytes on CPU stack
     hmac.Update(@time,sizeof(time));
     hmac.Update(ExeVersion.Hash.b);
     QueryPerformanceCounter(timenow);
     hmac.Update(@timenow,sizeof(timenow)); // include GetEntropy() execution time
+    val := UnixTimeUTC;
+    hmac.Update(@val,sizeof(val));
     for i := 0 to timenow and 3 do begin
       CreateGUID(g); // not random, but genuine
       hmac.Update(@g,sizeof(g));
     end;
     for i := 1 to (Random32 and 15)+2 do begin
-      val := Random32;
+      val := Random32; // RDRAND Intel x86/x64 opcode or gsl_rng_taus2()
       hmac.Update(@val,sizeof(val));
     end;
   end;
 begin
   QueryPerformanceCounter(time);
+  // retrieve some initial entropy from OS
   SetLength(result,Len);
   p := pointer(result);
-  // retrieve some initial entropy from OS
   FillSystemRandom(p,len,true);
   // always xor some explicit entropy - it won't hurt
   hmacInit;
@@ -9122,7 +9167,6 @@ begin
     paranoid := PByteArray(@entropy)^[i and (sizeof(entropy)-1)];
     p^[i] := p^[i] xor Xor32Byte[(cardinal(p^[i]) shl 5) xor paranoid] xor paranoid;
   end;
-  Random32Seed(@entropy[3],sizeof(entropy[3]));
 end;
 
 procedure TAESPRNG.Seed;
