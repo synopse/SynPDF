@@ -466,7 +466,7 @@
     {$if CompilerVersion >= 32.0}
       {$define ISDELPHI102}
       {$ifdef CPUX64}
-      {$ifdef VER320}
+      {$ifdef VER320withoutAprilUpdate}
         {$undef HASINLINE} // circumvent Delphi 10.2 Tokyo Win64 compiler bug
         {$define HASINLINENOTX86}
       {$endif}
@@ -548,6 +548,14 @@
   // undefined by default: BCC32 -pr fastcall (=Delphi resgister) is broken
   // because of issues with BCC32 itself, or some obfuscated calls in source?
   // -> allow to use external SQlite3 libraries in addition to static version
+{$endif}
+
+{$ifdef CPUX86} // safest to reset x87 exceptions
+{$ifndef PUREPASCAL}
+{$ifndef DELPHI5OROLDER}
+  {$define RESETFPUEXCEPTION}
+{$endif}
+{$endif}
 {$endif}
 
 {$ifdef FPC}

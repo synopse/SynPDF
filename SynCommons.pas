@@ -1558,6 +1558,13 @@ type
     function AsBinary: RawByteString;
   end;
 
+  /// function prototype to be used for hashing of an element
+  // - it must return a cardinal hash, with as less collision as possible
+  // - a good candidate is our crc32() function in optimized asm in SynZip unit
+  // - TDynArrayHashed.Init will use crc32c() if no custom function is supplied,
+  // which will run either as software or SSE4.2 hardware
+  THasher = function(crc: cardinal; buf: PAnsiChar; len: cardinal): cardinal;
+
 var
   /// global TSynAnsiConvert instance to handle WinAnsi encoding (code page 1252)
   // - this instance is global and instantied during the whole program life time
@@ -2098,6 +2105,13 @@ function VariantToVariantUTF8(const V: Variant): variant;
 // array of custom variant types values
 // - for instance, an array of TDocVariant will be optimized for speed
 procedure VariantDynArrayClear(var Value: TVariantDynArray);
+
+/// crc32c-based hash of a variant value
+// - complex string types will make up to 255 uppercase characters conversion
+// if CaseInsensitive is true
+// - you can specify your own hashing function if crc32c is not what you expect
+function VariantHash(const value: variant; CaseInsensitive: boolean;
+  Hasher: THasher=nil): cardinal;
 
 {$endif NOVARIANTS}
 
@@ -2659,7 +2673,7 @@ function StrCompFast(Str1, Str2: pointer): PtrInt;
 
 /// SSE 4.2 version of StrComp(), to be used with PUTF8Char/PAnsiChar
 // - please note that this optimized version may read up to 15 bytes
-// beyond the string; this is rarely a problem but it can in principle
+// beyond the string; this is rarely a problem but it may in principle
 // generate a protection violation (e.g. when used over mapped files) - in this
 // case, you can use the slightly slower StrCompFast() function instead
 function StrCompSSE42(Str1, Str2: pointer): PtrInt;
@@ -2845,8 +2859,13 @@ function ToCardinal(const text: RawUTF8; out value: cardinal; minimal: cardinal=
 
 /// get the signed 64-bit integer value stored in a RawUTF8 string
 // - returns TRUE if the supplied text was successfully converted into an Int64
-function ToInt64(const text: RawUTF8; out value: Int64): boolean;
+function ToInt64(const text: RawUTF8; out value: Int64): boolean; 
   {$ifdef HASINLINE}inline;{$endif}
+
+/// get the signed 64-bit integer value stored in a RawUTF8 string
+// - returns the default value if the supplied text was not successfully
+// converted into an Int64
+function UTF8ToInt64(const text: RawUTF8; const default: Int64=0): Int64;
 
 /// encode a string to be compatible with URI encoding
 function UrlEncode(const svar: RawUTF8): RawUTF8; overload;
@@ -2956,10 +2975,15 @@ function UrlDecodeNextValue(U: PUTF8Char; out Value: RawUTF8): PUTF8Char;
 // - returns nil if there was no name=... pattern in U
 function UrlDecodeNextName(U: PUTF8Char; out Name: RawUTF8): PUTF8Char;
 
-/// checks if the supplied text don't need URI encoding
-// - returns TRUE if all its chars are plain ASCII-7 RFC compatible identifiers
-// (0..9a..zA..Z_.~)
+/// checks if the supplied UTF-8 text don't need URI encoding
+// - returns TRUE if all its chars are non-void plain ASCII-7 RFC compatible
+// identifiers (0..9a..zA..Z-_.~)
 function IsUrlValid(P: PUTF8Char): boolean;
+
+/// checks if the supplied UTF-8 text values don't need URI encoding
+// - returns TRUE if all its chars of all strings are non-void plain ASCII-7 RFC
+// compatible identifiers (0..9a..zA..Z-_.~)
+function AreUrlValid(const Url: array of RawUTF8): boolean;
 
 /// ensure the supplied URI contains a trailing '/' charater
 function IncludeTrailingURIDelimiter(const URI: RawByteString): RawByteString;
@@ -5216,13 +5240,6 @@ type
     function CheckHash: boolean;
   end;
 
-  /// function prototype to be used for hashing of an element
-  // - it must return a cardinal hash, with as less collision as possible
-  // - a good candidate is our crc32() function in optimized asm in SynZip unit
-  // - TDynArrayHashed.Init will use crc32c() if no custom function is supplied,
-  // which will run either as software or SSE4.2 hardware
-  THasher = function(crc: cardinal; buf: PAnsiChar; len: cardinal): cardinal;
-
   /// function prototype to be used for hashing of a dynamic array element
   // - this function must use the supplied hasher on the Elem data
   TDynArrayHashOne = function(const Elem; Hasher: THasher): cardinal;
@@ -5683,6 +5700,8 @@ type
     procedure SetVariant(Index: integer; const Value: Variant);
     function GetInt64(Index: integer): Int64;
     procedure SetInt64(Index: integer; const Value: Int64);
+    function GetBool(Index: integer): boolean;
+    procedure SetBool(Index: integer; const Value: boolean);
     function GetUnlockedInt64(Index: integer): Int64;
     procedure SetUnlockedInt64(Index: integer; const Value: Int64);
     function GetPointer(Index: integer): Pointer;
@@ -5763,7 +5782,7 @@ type
     {$ifndef NOVARIANTS}
     /// safe locked access to a Variant value
     // - you may store up to 7 variables, using an 0..6 index, shared with
-    // LockedPointer and LockedUTF8 array properties
+    // LockedBool, LockedInt64, LockedPointer and LockedUTF8 array properties
     // - returns null if the Index is out of range
     property Locked[Index: integer]: Variant read GetVariant write SetVariant;
     /// safe locked access to a Int64 value
@@ -5772,9 +5791,15 @@ type
     // - Int64s will be stored internally as a varInt64 variant
     // - returns nil if the Index is out of range, or does not store a Int64
     property LockedInt64[Index: integer]: Int64 read GetInt64 write SetInt64;
+    /// safe locked access to a boolean value
+    // - you may store up to 7 variables, using an 0..6 index, shared with
+    // Locked, LockedInt64, LockedPointer and LockedUTF8 array properties
+    // - value will be stored internally as a varBoolean variant
+    // - returns nil if the Index is out of range, or does not store a boolean
+    property LockedBool[Index: integer]: boolean read GetBool write SetBool;
     /// safe locked access to a pointer/TObject value
     // - you may store up to 7 variables, using an 0..6 index, shared with
-    // Locked and LockedUTF8 array properties
+    // Locked, LockedBool, LockedInt64 and LockedUTF8 array properties
     // - pointers will be stored internally as a varUnknown variant
     // - returns nil if the Index is out of range, or does not store a pointer
     property LockedPointer[Index: integer]: Pointer read GetPointer write SetPointer;
@@ -8521,6 +8546,7 @@ function ObjectsToJSON(const Names: array of RawUTF8; const Values: array of TOb
   Options: TTextWriterWriteObjectOptions=[woDontStoreDefault]): RawUTF8;
 
 {$ifndef NOVARIANTS}
+
 /// will convert any TObject into a TDocVariant document instance
 // - a faster alternative to Dest := _JsonFast(ObjectToJSON(Value))
 // - this would convert the TObject by representation, using only serializable
@@ -8793,7 +8819,7 @@ type
     property Safe: TSynLocker read fSafe;
   end;
 
-  /// This class is able to emulate a TStringList with our native UTF-8 string type
+  /// TStringList-class optimized to work with our native UTF-8 string type
   // - cross-compiler, from Delphi 6 and up, i.e is Unicode Ready for all
   TRawUTF8List = class
   protected
@@ -8964,9 +8990,10 @@ type
   end;
 
   /// a TRawUTF8List which will use an internal hash table for faster IndexOf()
-  // - this is a rather rough implementation: all values are re-hashed after
-  // change: but purpose of this class is to allow faster access of a static
-  // list of identifiers (e.g. service method names) which are fixed during run
+  // - purpose of this class is to allow faster access of a static list of RawUTF8
+  // values (e.g. service method names) which are somewhat fixed during run
+  // - uses a rather rough implementation: all values are re-hashed after change,
+  // just before IndexOf() call, or explicitly via the ReHash method
   TRawUTF8ListHashed = class(TRawUTF8List)
   protected
     fHash: TDynArrayHashed;
@@ -8999,13 +9026,21 @@ type
       wasAdded: PBoolean=nil): PtrInt; override;
     /// search in the low-level internal hashing table
     function HashFind(aHashCode: cardinal): integer; {$ifdef HASINLINE}inline;{$endif}
+    /// ensure all items are hashed if necessay
+    // - could be executed after several Add/AddObject calls to ensure the hash
+    // table is computed and this instance ready for the next IndexOf() call
+    // - will hash all items only if fChanged or aForceRehash is true
+    // - returns true if stored information has been re-hashed
+    function ReHash(aForceRehash: boolean=false): boolean; virtual;
     /// access to the low-level internal hashing table
+    // - could be used e.g. to retrieve Hash.IsHashElementWithoutCollision state
     property Hash: TDynArrayHashed read fHash;
   end;
 
-  /// a TRawUTF8List with an internal hash, with locking methods
+  /// a TRawUTF8List with an internal hash, with thread-safe locking methods
   // - by default, inherited methods are not protected by the mutex: you have
-  // to explicitely call Lock/UnLock to enter or leave the critical section
+  // to explicitely call Safe.Lock/UnLock to enter or leave the critical section,
+  // or use the methods overriden at this class level
   TRawUTF8ListHashedLocked = class(TRawUTF8ListHashed)
   protected
     fSafe: TSynLocker;
@@ -9055,11 +9090,13 @@ type
     /// delete all RawUTF8 items in the list
     // - just a wrapper over inherited Clear using Safe.Lock/Unlock
     procedure Clear; override;
+    /// ensure all items are hashed if necessay
+    // - just a wrapper over inherited Rehash using Safe.Lock/Unlock
+    function ReHash(aForceRehash: boolean=false): boolean; override;
   end;
 
-  /// This class is able to emulate a TStringList with our native UTF-8 string
-  // type and storing TMethod callbacks
-  // - cross-compiler, from Delphi 6 and up, i.e is Unicode Ready for all
+  /// this class stores TMethod callbacks with an associated UTF-8 string
+  // - event names will be hashed for O(1) fast access
   TRawUTF8MethodList = class(TRawUTF8ListHashed)
   protected
     fEvents: TMethodDynArray;
@@ -9097,6 +9134,9 @@ type
   // is able to store both keys and values, and provide convenient methods to
   // access the stored data, including JSON serialization and binary storage
   TSynDictionary = class(TSynPersistentLocked)
+  private
+    function GetCapacity: integer;
+    procedure SetCapacity(const Value: integer);
   protected
     fKeys: TDynArrayHashed;
     fValues: TDynArray;
@@ -9263,6 +9303,8 @@ type
     /// direct access to the associated stored values
     // - if you want to access the values, you should use fSafe.Lock/Unlock
     property Values: TDynArray read fValues;
+    /// defines how many items are currently stored in Keys/Values internal arrays
+    property Capacity: integer read GetCapacity write SetCapacity;
   end;
 
   /// event signature to locate a service for a given string key
@@ -14007,7 +14049,12 @@ const
   SYNTABLESTATEMENTWHEREID = 0;
 
   /// can be used to append to most English nouns to form a plural
+  // - see also the Plural function
   PLURAL_FORM: array[boolean] of RawUTF8 = ('','s');
+
+/// write count number and append 's' (if needed) to form a plural English noun
+// - for instance, Plural('row',100) returns '100 rows' with no heap allocation
+function Plural(const itemname: shortstring; itemcount: cardinal): shortstring;
 
 /// convert any AnsiString content into our SBF compact binary format storage
 procedure ToSBFStr(const Value: RawByteString; out Result: TSBFString);
@@ -16798,11 +16845,11 @@ type
   // code, whereas it was in fact triggerred in some external library code
   TSynFPUException = class(TSynInterfacedObject)
   protected
-  {$ifndef CPU64}
+    {$ifndef CPU64}
     fExpected8087, fSaved8087: word;
-  {$else}
+    {$else}
     fExpectedMXCSR, fSavedMXCSR: word;
-  {$endif}
+    {$endif}
     function VirtualAddRef: Integer; override;
     function VirtualRelease: Integer; override;
   public
@@ -16811,11 +16858,11 @@ type
     // ForLibraryCode/ForDelphiCode class methods
     // - for cpu32 flags are $1372 for Delphi, or $137F for library (mask all exceptions)
     // - for cpu64 flags are $1920 for Delphi, or $1FA0 for library (mask all exceptions)
-  {$ifndef CPU64}
+    {$ifndef CPU64}
     constructor Create(Expected8087Flag: word); reintroduce;
-  {$else}
+    {$else}
     constructor Create(ExpectedMXCSR: word); reintroduce;
-  {$endif}
+    {$endif}
     /// after this method call, all FPU exceptions will be ignored
     // - until the method finishes (a try..finally block is generated by
     // the compiler), then FPU exceptions will be reset into "Delphi" mode
@@ -17395,6 +17442,10 @@ type
     // - aOnProcess should have been registered by a previous call to Enable() method
     // - returns true on success, false if the supplied task was not registered
     function ExecuteNow(aOnProcess: TOnSynBackgroundTimerProcess): boolean;
+    /// returns true if there is currenly one task processed
+    function Processing: boolean;
+    /// wait until no background task is processed
+    procedure WaitUntilNotProcessing(timeoutsecs: integer=10);
     /// low-level access to the internal task list
     property Task: TSynBackgroundTimerTaskDynArray read fTask;
     /// low-level access to the internal task mutex
@@ -22733,7 +22784,7 @@ begin
   {$endif}
   varByte,
   varBoolean:
-    UInt32ToUTF8(VByte,result);
+    result := SmallUInt32UTF8[VByte];
   varInteger:
     Int32ToUTF8(VInteger,result);
   varInt64,
@@ -29723,6 +29774,14 @@ begin
   result := err=0;
 end;
 
+function UTF8ToInt64(const text: RawUTF8; const default: Int64): Int64;
+var err: integer;
+begin
+  result := GetInt64(pointer(text),err);
+  if err<>0 then
+    result := default;
+end;
+
 function GetBoolean(P: PUTF8Char): boolean;
 begin
   if P<>nil then
@@ -31424,6 +31483,16 @@ begin
   end;
 end;
 
+function AreUrlValid(const Url: array of RawUTF8): boolean;
+var i: integer;
+begin
+  result := false;
+  for i := 0 to high(Url) do
+    if not IsUrlValid(pointer(Url[i])) then
+      exit;
+  result := true;
+end;
+
 function IncludeTrailingURIDelimiter(const URI: RawByteString): RawByteString;
 begin
   if (URI<>'') and (URI[length(URI)]<>'/') then
@@ -33001,6 +33070,8 @@ asm
         not     eax
 end;
 
+{$endif PUREPASCAL}
+
 {$ifdef CPUX86}
 procedure GetCPUID(Param: Cardinal; var Registers: TRegisters);
 asm
@@ -33101,7 +33172,6 @@ asm // eax=crc, edx=buf, ecx=len
 @0:     not     eax
 end;
 {$endif CPUX86}
-{$endif PUREPASCAL}
 
 function crc32cUTF8ToHex(const str: RawUTF8): RawUTF8;
 begin
@@ -35306,6 +35376,7 @@ begin
     $46445025: result := 'application/pdf'; //  25 50 44 46 2D 31 2E
     $21726152: result := 'application/x-rar-compressed'; // 52 61 72 21 1A 07 00
     $AFBC7A37: result := 'application/x-7z-compressed';  // 37 7A BC AF 27 1C
+    $694C5153: result := 'application/x-sqlite3'; // SQlite format 3 = 53 51 4C 69
     $75B22630: result := 'audio/x-ms-wma'; // 30 26 B2 75 8E 66
     $9AC6CDD7: result := 'video/x-ms-wmv'; // D7 CD C6 9A 00 00
     $474E5089: result := 'image/png'; // 89 50 4E 47 0D 0A 1A 0A
@@ -35370,8 +35441,10 @@ begin // see http://www.garykessler.net/library/file_sigs.html for magic numbers
     case PosEx(copy(result,2,4),
         'png,gif,tiff,jpg,jpeg,bmp,doc,htm,html,css,js,ico,wof,txt,svg,'+
       // 1   5   9    14  18   23  27  31  35   40  44 47  51  55  59
-        'atom,rdf,rss,webp,appc,mani,docx,xml,json,woff,ogg,ogv,mp4,m2v,m2p,mp3,h264') of
-      // 63   68  72  76   81   86   91   96  100  105  110 114 118 122 126 130 134
+        'atom,rdf,rss,webp,appc,mani,docx,xml,json,woff,ogg,ogv,mp4,m2v,'+
+      // 63   68  72  76   81   86   91   96  100  105  110 114 118 122
+        'm2p,mp3,h264,gz') of
+      // 126 130 134  139
       1:  result := 'image/png';
       5:  result := 'image/gif';
       9:  result := 'image/tiff';
@@ -35395,6 +35468,7 @@ begin // see http://www.garykessler.net/library/file_sigs.html for magic numbers
       122,126: result := 'video/mp2';
       130: result := 'audio/mpeg';     // RFC 3003
       134: result := 'video/H264';     // RFC 6184
+      139: result := 'application/gzip';
       else
         if result<>'' then
           result := 'application/'+copy(result,2,10);
@@ -35709,16 +35783,16 @@ function FastFindPUTF8CharSorted(P: PPUTF8CharArray; R: PtrInt; Value: PUTF8Char
 var L, cmp: PtrInt;
 begin // fast O(log(n)) binary search
   L := 0;
-  if Assigned(Compare) and (0<=R) then
+  if Assigned(Compare) and (R>=0) then
     repeat
-      result := (L + R) shr 1;
+      result := (L+R) shr 1;
       cmp := Compare(P^[result],Value);
       if cmp=0 then
         exit;
       if cmp<0 then
-        L := result + 1 else
-        R := result - 1;
-    until (L > R);
+        L := result+1 else
+        R := result-1;
+    until L>R;
   result := -1;
 end;
 
@@ -40081,6 +40155,26 @@ begin // defined as a function and not an array[boolean] of RawUTF8 for FPC
   if value then
     result := 'true' else
     result := 'false';
+end;
+
+function Plural(const itemname: shortstring; itemcount: cardinal): shortstring;
+var P: PAnsiChar;
+    len: integer;
+begin
+  P := StrUInt32(@result[255],itemcount);
+  len := @result[255]-P;
+  MoveFast(P^,result[1],len);
+  inc(len);
+  result[len] := ' ';
+  if ord(itemname[0])<240 then begin // avoid buffer overflow
+    MoveFast(itemname[1],result[len+1],ord(itemname[0]));
+    inc(len,ord(itemname[0]));
+    if itemcount>1 then begin
+      inc(len);
+      result[len] := 's';
+    end;
+  end;
+  result[0] := AnsiChar(len);
 end;
 
 function TJSONCustomParserRTTI.IfDefaultSkipped(var Value: PByte): boolean;
@@ -46638,51 +46732,78 @@ end;
 
 function HashByte(const Elem; Hasher: THasher): cardinal;
 begin
-  result := Byte(Elem);
+  result := Hasher(0,@Elem,sizeof(byte));
 end;
 
 function HashWord(const Elem; Hasher: THasher): cardinal;
 begin
-  result := Word(Elem);
+  result := Hasher(0,@Elem,sizeof(word));
 end;
 
 function HashInteger(const Elem; Hasher: THasher): cardinal;
 begin
-  result := Integer(Elem);
+  result := Hasher(0,@Elem,sizeof(integer));
 end;
 
 function HashCardinal(const Elem; Hasher: THasher): cardinal;
 begin
-  result := Cardinal(Elem);
+  result := Hasher(0,@Elem,sizeof(cardinal));
 end;
 
 function HashInt64(const Elem; Hasher: THasher): cardinal;
 begin
-  result := Hasher(0,@Elem,sizeof(Int64)); // better than Int64Rec.(Lo xor Hi)
+  result := Hasher(0,@Elem,sizeof(Int64));
 end;
 
 {$ifndef NOVARIANTS}
 
-function HashVariant(const Elem; Hasher: THasher): cardinal;
-var U: RawUTF8;
-    wasString: boolean;
+function VariantHash(const value: variant; CaseInsensitive: boolean;
+  Hasher: THasher): cardinal;
+var Up: array[byte] of AnsiChar; // avoid heap allocation
+  procedure ComplexType;
+  var tmp: RawUTF8;
+  begin // slow but always working conversion to string
+    VariantSaveJSON(value,twNone,tmp);
+    if CaseInsensitive then
+      result := Hasher(TVarData(value).VType,Up,UpperCopy255(Up,tmp)-Up) else
+      result := Hasher(TVarData(value).VType,pointer(tmp),length(tmp));
+  end;
 begin
-  VariantToUTF8(variant(Elem),U,wasString);
-  if PtrUInt(U)=0 then
-    result := HASH_ONVOIDCOLISION else
-    result := Hasher(0,Pointer(PtrUInt(U)),
-      {$ifdef FPC}PStrRec(Pointer(PtrUInt(U)-STRRECSIZE))^.length
-      {$else}PInteger(PtrUInt(U)-sizeof(integer))^{$endif});
+  if not Assigned(Hasher) then
+    Hasher := @crc32c;
+  with TVarData(value) do
+  case VType of
+    varNull, varEmpty:
+      result := VType+2; // not 0 (HASH_VOID) nor 1 (HASH_ONVOIDCOLISION)
+    varShortInt, varByte:
+      result := Hasher(VType,@VByte,1);
+    varSmallint, varWord, varBoolean:
+      result := Hasher(VType,@VWord,2);
+    varLongWord, varInteger, varSingle:
+      result := Hasher(VType,@VLongWord,4);
+    varInt64, varDouble, varDate, varCurrency:
+      result := Hasher(VType,@VInt64,sizeof(Int64));
+    varString:
+      if CaseInsensitive then
+        result := Hasher(0,Up,UpperCopy255Buf(Up,VString,length(RawUTF8(VString)))-Up) else
+        result := Hasher(0,VString,length(RawUTF8(VString)));
+    varOleStr {$ifdef HASVARUSTRING}, varUString{$endif}:
+      if CaseInsensitive then
+        result := Hasher(0,Up,UpperCopy255W(Up,VOleStr,StrLenW(VOleStr))-Up) else
+        result := Hasher(0,VAny,StrLenW(VOleStr)*2);
+  else
+    ComplexType;
+  end;
+end;
+
+function HashVariant(const Elem; Hasher: THasher): cardinal;
+begin
+  result := VariantHash(variant(Elem),false,Hasher);
 end;
 
 function HashVariantI(const Elem; Hasher: THasher): cardinal;
-var U: RawUTF8;
-    wasString: boolean;
 begin
-  VariantToUTF8(variant(Elem),U,wasString);
-  if pointer(U)=nil then
-    result := HASH_ONVOIDCOLISION else
-    result := Hasher(0,pointer(U),UpperCopy(pointer(U),U)-pointer(U));
+  result := VariantHash(variant(Elem),true,Hasher);
 end;
 
 {$endif NOVARIANTS}
@@ -47227,7 +47348,7 @@ end;
 { TObjectHash }
 
 const
-  COUNT_TO_START_HASHING = 32;
+  COUNT_TO_START_HASHING = 16;
 
 function TObjectHash.Find(Item: TObject): integer;
 var n: integer;
@@ -47459,15 +47580,25 @@ end;
 
 procedure TSynLocker.SetInt64(Index: integer; const Value: Int64);
 begin
-  if cardinal(Index)<=high(Padding) then
+  SetVariant(Index,Value);
+end;
+
+function TSynLocker.GetBool(Index: integer): boolean;
+begin
+  if (Index>=0) and (Index<=PaddingMaxUsedIndex) then
     try
       EnterCriticalSection(fSection);
-      if Index>PaddingMaxUsedIndex then
-        PaddingMaxUsedIndex := Index;
-      variant(Padding[Index]) := Value;
+      if not VariantToBoolean(variant(Padding[index]),result) then
+        result := false;
     finally
       LeaveCriticalSection(fSection);
-    end;
+    end else
+    result := false;
+end;
+
+procedure TSynLocker.SetBool(Index: integer; const Value: boolean);
+begin
+  SetVariant(Index,Value);
 end;
 
 function TSynLocker.GetUnLockedInt64(Index: integer): Int64;
@@ -55423,6 +55554,13 @@ begin
   result := fHash.HashFind(aHashCode,false);
 end;
 
+function TRawUTF8ListHashed.ReHash(aForceRehash: boolean): boolean;
+begin
+  if fChanged or aForceRehash then
+    fChanged := not fHash.ReHash(aForceRehash);
+  result := not fChanged;
+end;
+
 
 { TRawUTF8ListHashedLocked }
 
@@ -55544,6 +55682,16 @@ begin
   end;
 end;
 
+function TRawUTF8ListHashedLocked.ReHash(aForceRehash: boolean): boolean;
+begin
+  fSafe.Lock;
+  try
+    result := inherited Rehash(aForceRehash);
+  finally
+    fSafe.UnLock;
+  end;
+end;
+
 
 { TRawUTF8MethodList }
 
@@ -55629,6 +55777,23 @@ begin
   result := fSafe.Padding[DIC_TIMESEC].VInteger;
   if result<>0 then
     result := GetTickCount64 shr 10+result;
+end;
+
+function TSynDictionary.GetCapacity: integer;
+begin
+  fSafe.Lock;
+  result := fKeys.Capacity;
+  fSafe.UnLock;
+end;
+
+procedure TSynDictionary.SetCapacity(const Value: integer);
+begin
+  fSafe.Lock;
+  fKeys.Capacity := Value;
+  fValues.Capacity := Value;
+  if fSafe.Padding[DIC_TIMESEC].VInteger>0 then
+    fTimeOuts.Capacity := Value;
+  fSafe.UnLock;
 end;
 
 procedure TSynDictionary.SetTimeouts;
@@ -60973,7 +61138,7 @@ procedure TSynBloomFilter.Insert(aValue: pointer; aValueLen: integer);
 var h: integer;
     h1,h2: cardinal; // http://www.eecs.harvard.edu/~kirsch/pubs/bbbf/esa06.pdf
 begin
-  if (self=nil) or (aValueLen<=0) and (fBits=0) then
+  if (self=nil) or (aValueLen<=0) or (fBits=0) then
     exit;
   h1 := crc32c(0,aValue,aValueLen);
   if fHashFunctions=1 then
@@ -61011,7 +61176,7 @@ var h: integer;
     h1,h2: cardinal; // http://www.eecs.harvard.edu/~kirsch/pubs/bbbf/esa06.pdf
 begin
   result := false;
-  if (self=nil) or (aValueLen<=0) and (fBits=0) then
+  if (self=nil) or (aValueLen<=0) or (fBits=0) then
     exit;
   h1 := crc32c(0,aValue,aValueLen);
   if fHashFunctions=1 then
@@ -62574,6 +62739,7 @@ constructor TSynBackgroundTimer.Create(const aThreadName: RawUTF8;
 begin
   fTasks.Init(TypeInfo(TSynBackgroundTimerTaskDynArray),fTask);
   fTaskLock.Init;
+  fTaskLock.LockedBool[0] := false;
   inherited Create(aThreadName,EverySecond,1000,aOnBeforeExecute,aOnAfterExecute,aStats);
 end;
 
@@ -62601,32 +62767,37 @@ begin
   n := 0;
   fTaskLock.Lock;
   try
-    for i := 0 to length(fTask)-1 do begin
-      t := @fTask[i];
-      if tix>=t^.NextTix then begin
-        SetLength(todo,n+1);
-        todo[n] := t^;
-        inc(n);
-        t^.FIFO := nil; // now owned by todo[n].FIFO
-        t^.NextTix := tix+((t^.Secs*1000)-TIXPRECISION);
-      end;
-    end;
-  finally
-    fTaskLock.UnLock;
-  end;
-  for i := 0 to n-1 do
-    with todo[i] do
-      if FIFO<>nil then
-        for f := 0 to length(FIFO)-1 do
-        try
-          OnProcess(self,Event,FIFO[f]);
-        except
-        end
-      else
-        try
-          OnProcess(self,Event,'');
-        except
+    variant(fTaskLock.Padding[0]) := true;
+    try
+      for i := 0 to length(fTask)-1 do begin
+        t := @fTask[i];
+        if tix>=t^.NextTix then begin
+          SetLength(todo,n+1);
+          todo[n] := t^;
+          inc(n);
+          t^.FIFO := nil; // now owned by todo[n].FIFO
+          t^.NextTix := tix+((t^.Secs*1000)-TIXPRECISION);
         end;
+      end;
+    finally
+      fTaskLock.UnLock;
+    end;
+    for i := 0 to n-1 do
+      with todo[i] do
+        if FIFO<>nil then
+          for f := 0 to length(FIFO)-1 do
+          try
+            OnProcess(self,Event,FIFO[f]);
+          except
+          end
+        else
+          try
+            OnProcess(self,Event,'');
+          except
+          end;
+  finally
+    fTaskLock.LockedBool[0] := false;
+  end;
 end;
 
 function TSynBackgroundTimer.Find(const aProcess: TMethod): integer;
@@ -62661,6 +62832,19 @@ begin
   finally
     fTaskLock.UnLock;
   end;
+end;
+
+function TSynBackgroundTimer.Processing: boolean;
+begin
+  result := fTaskLock.LockedBool[0];
+end;
+
+procedure TSynBackgroundTimer.WaitUntilNotProcessing(timeoutsecs: integer);
+var timeout: Int64;
+begin
+  timeout := GetTickCount64+timeoutsecs*1000;
+  while Processing and (GetTickcount64<timeout) do
+    SleepHiRes(1);
 end;
 
 function TSynBackgroundTimer.ExecuteNow(aOnProcess: TOnSynBackgroundTimerProcess): boolean;

@@ -486,10 +486,6 @@ const
   {$endif Linux}
   ZLIB_VERSION = '1.2.3';
 
-type
-  gzFile = pointer;
-
-
 const
   Z_NO_FLUSH = 0;
   Z_PARTIAL_FLUSH = 1;
@@ -636,6 +632,10 @@ function get_crc_table: pointer;
 /// uncompress a .gz file content
 // - return '' if the .gz content is invalid (e.g. bad crc)
 function GZRead(gz: PAnsiChar; gzLen: integer): ZipString;
+
+/// compress a file content into a new .gz file
+// - will use TSynZipCompressor for minimal memory use during file compression
+function GZFile(const orig, destgz: TFileName; CompressionLevel: Integer=6): boolean;
 
 type
   /// a simple TStream descendant for compressing data into a stream
@@ -1610,6 +1610,32 @@ begin
     result := ''; // invalid CRC
 end;
 
+function GZFile(const orig, destgz: TFileName; CompressionLevel: Integer=6): boolean;
+var gz: TSynZipCompressor;
+    s,d: TFileStream;
+begin
+  try
+    s := TFileStream.Create(orig,fmOpenRead or fmShareDenyNone);
+    try
+      d := TFileStream.Create(destgz,fmCreate);
+      try
+        gz := TSynZipCompressor.Create(d,CompressionLevel,szcfGZ);
+        try
+          gz.CopyFrom(s,0);  // Count=0 for whole stream copy
+          result := true;
+        finally
+          gz.Free;
+        end;
+      finally
+        d.Free;
+      end;
+    finally
+      s.Free;
+    end;
+  except
+    result := false;
+  end;
+end;
 
 {$ifdef USEEXTZLIB}
 function zlibVersion: PAnsiChar; cdecl;
