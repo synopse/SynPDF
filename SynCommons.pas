@@ -1847,7 +1847,13 @@ function IsValidUTF8(source: PUTF8Char): Boolean;
 
 /// returns TRUE if the supplied buffer has valid UTF-8 encoding with no #1..#31
 // control characters
-function IsValidUTF8WithoutControlChars(source: PUTF8Char): Boolean;
+// - supplied input is a pointer to a #0 ended text buffer
+function IsValidUTF8WithoutControlChars(source: PUTF8Char): Boolean; overload;
+
+/// returns TRUE if the supplied buffer has valid UTF-8 encoding with no #0..#31
+// control characters
+// - supplied input is a RawUTF8 variable
+function IsValidUTF8WithoutControlChars(const source: RawUTF8): Boolean; overload;
 
 /// will truncate the supplied UTF-8 value if its length exceeds the specified
 // UTF-16 Unicode characters count
@@ -4311,7 +4317,10 @@ function AddSortedRawUTF8(var Values: TRawUTF8DynArray; var ValuesCount: integer
 /// delete a RawUTF8 item in a dynamic array of RawUTF8
 // - if CoValues is set, the integer item at the same index is also deleted
 function DeleteRawUTF8(var Values: TRawUTF8DynArray; var ValuesCount: integer;
-  Index: integer; CoValues: PIntegerDynArray=nil): boolean;
+  Index: integer; CoValues: PIntegerDynArray=nil): boolean; overload;
+
+/// delete a RawUTF8 item in a dynamic array of RawUTF8;
+function DeleteRawUTF8(var Values: TRawUTF8DynArray; Index: integer): boolean; overload;
 
 /// sort a dynamic array of RawUTF8 items
 // - if CoValues is set, the integer items are also synchronized
@@ -6224,6 +6233,13 @@ function PtrArrayDelete(var aPtrArray; aItem: pointer): integer;
 // - return the index of the item in the dynamic array
 function ObjArrayAdd(var aObjArray; aItem: TObject): integer;
   {$ifdef HASINLINE}inline;{$endif}
+
+/// wrapper to add an item to a T*ObjArray dynamic array storage
+// - this overloaded function will use a separated variable to store the items
+// count, so will be slightly faster: but you should call SetLength() when done,
+// to have an array as expected by TJSONSerializer.RegisterObjArrayForJSON()
+// - return the index of the item in the dynamic array
+function ObjArrayAddCount(var aObjArray; aItem: TObject; var aObjArrayCount: integer): integer;
 
 /// wrapper to add once an item to a T*ObjArray dynamic array storage
 // - as expected by TJSONSerializer.RegisterObjArrayForJSON()
@@ -11767,6 +11783,7 @@ type
     fOnAfterExecute: TNotifyThreadEvent;
     fThreadName: RawUTF8;
     fExecute: (exCreated,exRun,exFinished);
+    fExecuteLoopPause: boolean;
     /// where the main process takes place
     procedure Execute; override;
     procedure ExecuteLoop; virtual; abstract;
@@ -11778,6 +11795,10 @@ type
       OnAfterExecute: TNotifyThreadEvent=nil); reintroduce;
     /// release used resources
     destructor Destroy; override;
+    /// temporary stop the execution of ExecuteLoop, until set back to false
+    // - may be used e.g. by TSynBackgroundTimer to delay the process of
+    // background tasks
+    property Pause: boolean read fExecuteLoopPause write fExecuteLoopPause;
     /// access to the low-level associated event used to notify task execution
     // to the background thread
     // - you may call ProcessEvent.SetEvent to trigger the internal process loop
@@ -15463,6 +15484,10 @@ type
     // - returns the index of the corresponding newly added item
     function AddItemFromText(const aValue: RawUTF8;
       AllowVarDouble: boolean=false): integer;
+    /// add a RawUTF8 value to this document, handled as array
+    // - if instance's Kind is dvObject, it will raise an EDocVariant exception
+    // - returns the index of the corresponding newly added item
+    function AddItemText(const aValue: RawUTF8): integer;
     /// add one or several values to this document, handled as array
     // - if instance's Kind is dvObject, it will raise an EDocVariant exception
     procedure AddItems(const aValue: array of const);
@@ -17438,6 +17463,12 @@ type
     // - returns true on success, false if the supplied task was not registered
     function EnQueue(aOnProcess: TOnSynBackgroundTimerProcess;
       const aMsgFmt: RawUTF8; const Args: array of const; aExecuteNow: boolean=false): boolean; overload;
+    /// remove a message from the processing list 
+    // - supplied message will be searched in the internal FIFO list associated
+    // with aOnProcess, then removed from the list if found
+    // - aOnProcess should have been registered by a previous call to Enable() method
+    // - returns true on success, false if the supplied message was not registered
+    function DeQueue(aOnProcess: TOnSynBackgroundTimerProcess; const aMsg: RawUTF8): boolean; 
     /// execute a task without waiting for the next aOnProcessSecs occurence
     // - aOnProcess should have been registered by a previous call to Enable() method
     // - returns true on success, false if the supplied task was not registered
@@ -19868,13 +19899,37 @@ begin
       extra := UTF8_EXTRABYTES[c];
       if extra=0 then exit else // invalid leading byte
       for i := 1 to extra do
-        if byte(source^) and $c0<>$80 then
+        if byte(source^) and $c0<>$80 then // invalid UTF-8 encoding
           exit else
-          inc(source); // check valid UTF-8 content
+          inc(source);
     end;
   until false;
   result := true;
 end;
+
+function IsValidUTF8WithoutControlChars(const source: RawUTF8): Boolean;
+var s, extra, i, len: integer;
+    c: cardinal;
+begin
+  result := false;
+  s := 1;
+  len := length(source);
+  while s<=len do begin
+    c := byte(source[s]);
+    inc(s);
+    if c<32 then exit else // disallow #0..#31 control char
+    if c and $80<>0 then begin
+      extra := UTF8_EXTRABYTES[c];
+      if extra=0 then exit else // invalid leading byte
+      for i := 1 to extra do
+        if byte(source[s]) and $c0<>$80 then // reached #0 or invalid UTF-8
+          exit else
+          inc(s); 
+    end;
+  end;
+  result := true;
+end;
+
 
 function Utf8ToUnicodeLength(source: PUTF8Char): PtrUInt;
 var c: byte;
@@ -24743,7 +24798,7 @@ procedure FormatUTF8(const Format: RawUTF8; const Args: array of const;
 var i, blocksN, L, argN: PtrInt;
     tmpStr: TRawUTF8DynArray;
     F,FDeb: PUTF8Char;
-    blocks: array[0..49] of TTempUTF8;
+    blocks: array[0..63] of TTempUTF8;
 begin
   if (Format='') or (high(Args)<0) then begin
     result := Format; // no formatting to process
@@ -24754,8 +24809,8 @@ begin
     exit;
   end;
   result := '';
-  if length(Args)*2+1>high(blocks) then
-    raise ESynException.Create('FormatUTF8: too many args (max=25)!');
+  if length(Args)*2>=high(blocks) then
+    raise ESynException.Create('FormatUTF8: too many args (max=32)!');
   SetLength(tmpStr,length(Args));
   blocksN := 0;
   argN := 0;
@@ -25224,94 +25279,94 @@ const
 
 function StrCompSSE42(Str1, Str2: pointer): PtrInt;
 asm // warning: may read up to 15 bytes beyond the string itself
-      test      eax,edx
+      test      eax, edx
       jz        @n
-@ok:  sub       eax,edx
+@ok:  sub       eax, edx
       jz        @0
       {$ifdef HASAESNI}
-      movdqu    xmm0,dqword [edx]
-      pcmpistri xmm0,dqword [edx+eax],EQUAL_EACH+NEGATIVE_POLARITY // result in ecx
+      movdqu    xmm0, dqword [edx]
+      pcmpistri xmm0, dqword [edx + eax], EQUAL_EACH + NEGATIVE_POLARITY // result in ecx
       {$else}
       db $F3,$0F,$6F,$02
       db $66,$0F,$3A,$63,$04,$10,EQUAL_EACH+NEGATIVE_POLARITY
       {$endif}
       ja        @1
       jc        @2
-      xor       eax,eax
+      xor       eax, eax
       ret
-@1:   add       edx,16
+@1:   add       edx, 16
       {$ifdef HASAESNI}
-      movdqu    xmm0,dqword [edx]
-      pcmpistri xmm0,dqword [edx+eax],EQUAL_EACH+NEGATIVE_POLARITY // result in ecx
+      movdqu    xmm0, dqword [edx]
+      pcmpistri xmm0, dqword [edx + eax], EQUAL_EACH + NEGATIVE_POLARITY // result in ecx
       {$else}
-      db $F3,$0F,$6F,$02
+      db $F3,$0F,$6F,$02                          
       db $66,$0F,$3A,$63,$04,$10,EQUAL_EACH+NEGATIVE_POLARITY
       {$endif}
       ja        @1
       jc        @2
-@0:   xor       eax,eax // Str1=Str2
+@0:   xor       eax, eax // Str1=Str2
       ret
-@n:   cmp       eax,edx
+@n:   cmp       eax, edx
       je        @0
-      test      eax,eax  // Str1='' ?
+      test      eax, eax  // Str1='' ?
       jz        @max
-      test      edx,edx  // Str2='' ?
+      test      edx, edx  // Str2='' ?
       jnz       @ok
-      mov       eax,1
+      mov       eax, 1
       ret
 @max: dec       eax
       ret
-@2:   add       eax,edx
-      movzx     eax,byte ptr [eax+ecx]
-      movzx     edx,byte ptr [edx+ecx]
-      sub       eax,edx
+@2:   add       eax, edx
+      movzx     eax, byte ptr [eax+ecx]
+      movzx     edx, byte ptr [edx+ecx]
+      sub       eax, edx
 end;
 
 function SortDynArrayAnsiStringSSE42(const A,B): integer;
 asm // warning: may read up to 15 bytes beyond the string itself
-      mov       eax,[eax]
-      mov       edx,[edx]
-      test      eax,edx
+      mov       eax, [eax]
+      mov       edx, [edx]
+      test      eax, edx
       jz        @n
-@ok:  sub       eax,edx
+@ok:  sub       eax, edx
       jz        @0
       {$ifdef HASAESNI}
-      movdqu    xmm0,dqword [edx]
-      pcmpistri xmm0,dqword [edx+eax],EQUAL_EACH+NEGATIVE_POLARITY // result in ecx
+      movdqu    xmm0, dqword [edx] // result in ecx
+      pcmpistri xmm0, dqword [edx+eax], EQUAL_EACH + NEGATIVE_POLARITY
       {$else}
       db $F3,$0F,$6F,$02
       db $66,$0F,$3A,$63,$04,$10,EQUAL_EACH+NEGATIVE_POLARITY
       {$endif}
       ja        @1
       jc        @2
-      xor       eax,eax
+      xor       eax, eax
       ret
-@1:   add       edx,16
+@1:   add       edx, 16
       {$ifdef HASAESNI}
-      movdqu    xmm0,dqword [edx]
-      pcmpistri xmm0,dqword [edx+eax],EQUAL_EACH+NEGATIVE_POLARITY // result in ecx
+      movdqu    xmm0, dqword [edx] // result in ecx
+      pcmpistri xmm0, dqword [edx+eax], EQUAL_EACH + NEGATIVE_POLARITY
       {$else}
       db $F3,$0F,$6F,$02
       db $66,$0F,$3A,$63,$04,$10,EQUAL_EACH+NEGATIVE_POLARITY
       {$endif}
       ja        @1
       jc        @2
-@0:   xor       eax,eax // Str1=Str2
+@0:   xor       eax, eax // Str1=Str2
       ret
-@n:   cmp       eax,edx
+@n:   cmp       eax, edx
       je        @0
-      test      eax,eax  // Str1='' ?
+      test      eax, eax  // Str1='' ?
       jz        @max
-      test      edx,edx  // Str2='' ?
+      test      edx, edx  // Str2='' ?
       jnz       @ok
-      or        eax,-1
+      or        eax, -1
       ret
 @max: inc       eax
       ret
-@2:   add       eax,edx
-      movzx     eax,byte ptr [eax+ecx]
-      movzx     edx,byte ptr [edx+ecx]
-      sub       eax,edx
+@2:   add       eax, edx
+      movzx     eax, byte ptr [eax+ecx]
+      movzx     edx, byte ptr [edx+ecx]
+      sub       eax, edx
 end;
 
 {$endif PUREPASCAL}
@@ -32672,14 +32727,12 @@ end;
 
 {$endif CPUINTEL}
 
-
-
-{$ifdef CPUINTEL}
 type
  TRegisters = record
    eax,ebx,ecx,edx: cardinal;
  end;
 
+{$ifdef CPUINTEL}
 {$ifdef CPU64}
 procedure GetCPUID(Param: Cardinal; var Registers: TRegisters);
 {$ifdef FPC}nostackframe; assembler;
@@ -35914,12 +35967,29 @@ begin
   QS.Sort(0,ValuesCount-1);
 end;
 
+function DeleteRawUTF8(var Values: TRawUTF8DynArray; Index: integer): boolean;
+var n: integer;
+begin
+  n := length(Values);
+  if cardinal(Index)>=cardinal(n) then
+    result := false else begin
+    dec(n);
+    Values[Index] := ''; // avoid GPF
+    if n>Index then begin
+      MoveFast(pointer(Values[Index+1]),pointer(Values[Index]),(n-Index)*sizeof(pointer));
+      PtrUInt(Values[n]) := 0; // avoid GPF
+    end;
+    SetLength(Values,n);
+    result := true;
+  end;
+end;
+
 function DeleteRawUTF8(var Values: TRawUTF8DynArray; var ValuesCount: integer;
   Index: integer; CoValues: PIntegerDynArray=nil): boolean;
 var n: integer;
 begin
   n := ValuesCount;
-  if Cardinal(Index)>=Cardinal(n) then
+  if cardinal(Index)>=cardinal(n) then
     result := false else begin
     dec(n);
     ValuesCount := n;
@@ -42527,8 +42597,7 @@ begin
   if result<0 then
     result := InternalAdd(aName);
   VarClear(VValue[result]);
-  if not GetNumericVariantFromJSON(pointer(aValue),TVarData(VValue[result]),
-      AllowVarDouble) then
+  if not GetNumericVariantFromJSON(pointer(aValue),TVarData(VValue[result]),AllowVarDouble) then
     if dvoInternValues in VOptions then
       DocVariantType.InternValues.UniqueVariant(VValue[result],aValue) else
       RawUTF8ToVariant(aValue,VValue[result]);
@@ -42589,6 +42658,14 @@ begin
     if dvoInternValues in VOptions then
       DocVariantType.InternValues.UniqueVariant(VValue[result],aValue) else
       RawUTF8ToVariant(aValue,VValue[result]);
+end;
+
+function TDocVariantData.AddItemText(const aValue: RawUTF8): integer;
+begin
+  result := InternalAdd(''); // FPC does not allow VValue[InternalAdd(aName)]
+  if dvoInternValues in VOptions then
+    DocVariantType.InternValues.UniqueVariant(VValue[result],aValue) else
+    RawUTF8ToVariant(aValue,VValue[result]);
 end;
 
 procedure TDocVariantData.AddItems(const aValue: array of const);
@@ -47154,6 +47231,16 @@ begin
   result := length(a);
   SetLength(a,result+1);
   a[result] := aItem;
+end;
+
+function ObjArrayAddCount(var aObjArray; aItem: TObject; var aObjArrayCount: integer): integer;
+var a: TObjectDynArray absolute aObjArray;
+begin
+  result := aObjArrayCount;
+  if result=length(a) then
+    SetLength(a,result+result shr 3+16);
+  a[result] := aItem;
+  inc(aObjArrayCount);
 end;
 
 procedure ObjArrayAddOnce(var aObjArray; aItem: TObject);
@@ -62419,7 +62506,9 @@ begin
     try
       fExecute := exRun;
       while not Terminated do
-        ExecuteLoop;
+        if fExecuteLoopPause then
+          sleep(1) else
+          ExecuteLoop;
     finally
       if Assigned(fOnAfterExecute) then
         fOnAfterExecute(self);
@@ -62479,33 +62568,35 @@ begin
         exit;
       end;
       flagStarted:
-      if not Terminated then
-      try
-        fBackgroundException := nil;
-        try
-          if Assigned(fOnBeforeProcess) then
-            fOnBeforeProcess(self);
-          try
-            Process;
-          finally
-            if Assigned(fOnAfterProcess) then
-              fOnAfterProcess(self);
-          end;
-        except
-          {$ifdef DELPHI5OROLDER}
-          on E: Exception do
-            fBackgroundException := ESynException.CreateUTF8(
-              'Redirected %: "%"',[E,E.Message]);
-          {$else}
-          E := AcquireExceptionObject;
-          if E.InheritsFrom(Exception) then
-            fBackgroundException := Exception(E);
-          {$endif}
-        end;
-      finally
-        SetPendingProcess(flagFinished);
-        fCallerEvent.SetEvent;
-      end;
+        if not Terminated then
+          if fExecuteLoopPause then // pause -> try again later
+            fProcessEvent.SetEvent else
+            try
+              fBackgroundException := nil;
+              try
+                if Assigned(fOnBeforeProcess) then
+                  fOnBeforeProcess(self);
+                try
+                  Process;
+                finally
+                  if Assigned(fOnAfterProcess) then
+                    fOnAfterProcess(self);
+                end;
+              except
+                {$ifdef DELPHI5OROLDER}
+                on E: Exception do
+                  fBackgroundException := ESynException.CreateUTF8(
+                    'Redirected %: "%"',[E,E.Message]);
+                {$else}
+                E := AcquireExceptionObject;
+                if E.InheritsFrom(Exception) then
+                  fBackgroundException := Exception(E);
+                {$endif}
+              end;
+            finally
+              SetPendingProcess(flagFinished);
+              fCallerEvent.SetEvent;
+            end;
      end;
   end;
 end;
@@ -62712,20 +62803,22 @@ var wait: TWaitResult;
 begin
   wait := FixedWaitFor(fProcessEvent,fOnProcessMS);
   if not Terminated and (wait in [wrSignaled,wrTimeout]) then
-    try
-      fStats.ProcessStartTask;
+    if fExecuteLoopPause then // pause -> try again later
+      fProcessEvent.SetEvent else
       try
-        fOnProcess(self,wait);
-      finally
-        fStats.ProcessEnd;
+        fStats.ProcessStartTask;
+        try
+          fOnProcess(self,wait);
+        finally
+          fStats.ProcessEnd;
+        end;
+      except
+        on E: Exception do begin
+          fStats.ProcessError({$ifdef NOVARIANTS}E.ClassName{$else}ObjectToVariant(E){$endif});
+          if Assigned(fOnException) then
+            fOnException(E);
+        end;
       end;
-    except
-      on E: Exception do begin
-        fStats.ProcessError({$ifdef NOVARIANTS}E.ClassName{$else}ObjectToVariant(E){$endif});
-        if Assigned(fOnException) then
-          fOnException(E);
-      end;
-    end;
 end;
 
 
@@ -62739,7 +62832,9 @@ constructor TSynBackgroundTimer.Create(const aThreadName: RawUTF8;
 begin
   fTasks.Init(TypeInfo(TSynBackgroundTimerTaskDynArray),fTask);
   fTaskLock.Init;
+  {$ifndef NOVARIANTS}
   fTaskLock.LockedBool[0] := false;
+  {$endif}
   inherited Create(aThreadName,EverySecond,1000,aOnBeforeExecute,aOnAfterExecute,aStats);
 end;
 
@@ -62796,7 +62891,13 @@ begin
           except
           end;
   finally
+    {$ifdef NOVARIANTS}
+    fTaskLock.Lock;
+    variant(fTaskLock.Padding[0]) := false;
+    fTaskLock.UnLock;
+    {$else}
     fTaskLock.LockedBool[0] := false;
+    {$endif}
   end;
 end;
 
@@ -62836,7 +62937,12 @@ end;
 
 function TSynBackgroundTimer.Processing: boolean;
 begin
+  {$ifdef NOVARIANTS}
+  with fTaskLock.Padding[0] do
+    result := (VType=varBoolean) and VBoolean;
+  {$else}
   result := fTaskLock.LockedBool[0];
+  {$endif}
 end;
 
 procedure TSynBackgroundTimer.WaitUntilNotProcessing(timeoutsecs: integer);
@@ -62887,6 +62993,24 @@ begin
         ProcessEvent.SetEvent;
       result := true;
     end;
+  finally
+    fTaskLock.UnLock;
+  end;
+end;
+
+function TSynBackgroundTimer.DeQueue(aOnProcess: TOnSynBackgroundTimerProcess;
+  const aMsg: RawUTF8): boolean;
+var found: integer;
+begin
+  result := false;
+  if (self=nil) or Terminated or not Assigned(aOnProcess) then
+    exit;
+  fTaskLock.Lock;
+  try
+    found := Find(TMethod(aOnProcess));
+    if found>=0 then
+      with fTask[found] do
+        result := DeleteRawUTF8(FIFO,FindRawUTF8(FIFO,aMsg));
   finally
     fTaskLock.UnLock;
   end;
