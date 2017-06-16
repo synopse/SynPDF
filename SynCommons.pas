@@ -3106,6 +3106,12 @@ function IdemPCharU(p, up: PUTF8Char): boolean;
 // - this version expects p^ to point to an Unicode char array
 function IdemPCharW(p: PWideChar; up: PUTF8Char): boolean;
 
+/// returns the index of a matching ending of p^ in upArray[]
+// - returns -1 if no item matched
+// - ignore case - upArray^ must be already Upper
+// - chars are compared as 7 bit Ansi only (no accentuated characters)
+function EndWithArray(const text: RawUTF8; const upArray: array of RawUTF8): integer;
+
 /// returns true if the file name extension contained in p^ is the same same as extup^
 // - ignore case - extup^ must be already Upper
 // - chars are compared as WinAnsi (codepage 1252), not as UTF-8
@@ -4519,10 +4525,12 @@ procedure FillIncreasing(Values: PIntegerArray; StartValue, Count: integer);
 procedure Int64ToUInt32(Values64: PInt64Array; Values32: PCardinalArray; Count: integer);
 
 /// add the strings in the specified CSV text into a dynamic array of integer
-procedure CSVToIntegerDynArray(CSV: PUTF8Char; var Result: TIntegerDynArray);
+procedure CSVToIntegerDynArray(CSV: PUTF8Char; var Result: TIntegerDynArray;
+  Sep: AnsiChar= ',');
 
 /// add the strings in the specified CSV text into a dynamic array of integer
-procedure CSVToInt64DynArray(CSV: PUTF8Char; var Result: TInt64DynArray);
+procedure CSVToInt64DynArray(CSV: PUTF8Char; var Result: TInt64DynArray;
+  Sep: AnsiChar= ',');
 
 /// return the corresponding CSV text from a dynamic array of 32-bit integer
 // - you can set some custom Prefix and Suffix text
@@ -11006,6 +11014,8 @@ type
   /// used e.g. by PointerToHexShort/CardinalToHexShort/Int64ToHexShort
   // - such result type would avoid a string allocation on heap
   TShort16 = string[16];
+
+  TShort32 = string[32];
 
 /// fast conversion from a pointer data into hexa chars, ready to be displayed
 // - use internally BinToHexDisplay()
@@ -29175,19 +29185,19 @@ begin
     Values32[i] := Values64[i];
 end;
 
-procedure CSVToIntegerDynArray(CSV: PUTF8Char; var Result: TIntegerDynArray);
+procedure CSVToIntegerDynArray(CSV: PUTF8Char; var Result: TIntegerDynArray; Sep: AnsiChar);
 begin
   while CSV<>nil do begin
     SetLength(Result,length(Result)+1);
-    Result[high(Result)] := GetNextItemInteger(CSV);
+    Result[high(Result)] := GetNextItemInteger(CSV,Sep);
   end;
 end;
 
-procedure CSVToInt64DynArray(CSV: PUTF8Char; var Result: TInt64DynArray);
+procedure CSVToInt64DynArray(CSV: PUTF8Char; var Result: TInt64DynArray; Sep: AnsiChar);
 begin
   while CSV<>nil do begin
     SetLength(Result,length(Result)+1);
-    Result[high(Result)] := GetNextItemInt64(CSV);
+    Result[high(Result)] := GetNextItemInt64(CSV,Sep);
   end;
 end;
 
@@ -30467,6 +30477,19 @@ begin
   end;
   result := true;
 end;
+
+function EndWithArray(const text: RawUTF8; const upArray: array of RawUTF8): integer;
+var t,o: integer;
+begin
+  t := length(text);
+  if t>0 then
+    for result := 0 to high(upArray) do begin
+      o := t-length(UpArray[result]);
+      if (o>=0) and IdemPChar(PUTF8Char(pointer(text))+o,pointer(upArray[result])) then
+        exit;
+    end;
+  result := -1;
+end; 
 
 function UpperCopy255(dest: PAnsiChar; const source: RawUTF8): PAnsiChar;
 begin
@@ -33256,7 +33279,7 @@ end;
 procedure crc128c(buf: PAnsiChar; len: cardinal; out crc: THash128);
 var h: THash128Rec absolute crc;
     h1,h2: cardinal;
-begin // see http://www.eecs.harvard.edu/~kirsch/pubs/bbbf/esa06.pdf
+begin // see https://goo.gl/Pls5wi
   assert(sizeof(h)=sizeof(crc));
   h1 := crc32c(0,buf,len);
   h2 := crc32c(h1,buf,len);
@@ -33290,7 +33313,7 @@ end;
 procedure crc256c(buf: PAnsiChar; len: cardinal; out crc: THash256);
 var h: THash256Rec absolute crc;
     h1,h2: cardinal;
-begin // see http://www.eecs.harvard.edu/~kirsch/pubs/bbbf/esa06.pdf
+begin // see https://goo.gl/Pls5wi
   h1 := crc32c(0,buf,len);
   h2 := crc32c(h1,buf,len);
   h.i0 := h1; inc(h1,h2);
@@ -34816,7 +34839,7 @@ begin
     crcblock(@crc.b,@time.b);
     crcblock(@crc.b,@ExeVersion.Hash.b);
     if entropy<>nil then
-      for i := 0 to entropylen do
+      for i := 0 to entropylen-1 do
         crc.b[i and 15] := crc.b[i and 15] xor entropy^[i];
     rs1 := rs1 xor crc.c0;
     rs2 := rs2 xor crc.c1;
@@ -37947,7 +37970,7 @@ asm // faster version by AB (direct call to finalization procedures)
         dd      @err
 {$else} dd      System.@VarClr
 {$endif}
-        dd      @ARRAY
+        dd      @array
         dd      RecordClear
         dd      System.@IntfClear
         dd      @err
@@ -37987,7 +38010,7 @@ asm  // faster version of _CopyRecord{dest, source, typeInfo: Pointer} by AB
         mov     ecx, [ebx].TTypeInfo.recSize
         test    ebp, ebp
         jz      @fullcopy
-        push    ecx                        // sizeof(record) on stack
+        push    ecx                          // sizeof(record) on stack
         add     ebx, offset TTypeInfo.ManagedFields[0] // ebx = first TFieldInfo
 @next:  mov     ecx, [ebx].TFieldInfo.&Offset
         mov     edx, [ebx].TFieldInfo.TypeInfo
@@ -38010,13 +38033,13 @@ asm  // faster version of _CopyRecord{dest, source, typeInfo: Pointer} by AB
         cmp     ecx, tkUString
         je      @UString
 {$else} cmp     ecx, tkDynArray
-        je      @DynArray
+        je      @dynaray
 {$endif}        ja      @err
         jmp     dword ptr[ecx * 4 + @tab - tkWString * 4]
 
-@Tab:   dd      @WString, @Variant, @ARRAY, @RECORD, @INTERFACE, @err
+@Tab:   dd      @WString, @variant, @array, @record, @interface, @err
 {$ifdef UNICODE}
-        dd      @DynArray
+        dd      @dynaray
 {$endif}
 @errv:  mov     al, reVarInvalidOp
         jmp     @err2
@@ -38027,7 +38050,7 @@ asm  // faster version of _CopyRecord{dest, source, typeInfo: Pointer} by AB
         pop     ebp
         jmp     System.Error
         nop // all functions below have esi=source edi=dest
-@Array: movzx   ecx, byte ptr[edx].TTypeInfo.NameLen
+@array: movzx   ecx, byte ptr[edx].TTypeInfo.NameLen
         push    dword ptr[edx + ecx].TTypeInfo.recSize
         push    dword ptr[edx + ecx].TTypeInfo.ManagedCount
         mov     ecx, dword ptr[edx + ecx].TTypeInfo.ManagedFields[0] // Fields[0].TypeInfo^
@@ -38036,7 +38059,7 @@ asm  // faster version of _CopyRecord{dest, source, typeInfo: Pointer} by AB
         call    System.@CopyArray
         pop     eax // restore sizeof(Array)
         jmp     @finish
-@Record:movzx   ecx, byte ptr[edx].TTypeInfo.NameLen
+@record:movzx   ecx, byte ptr[edx].TTypeInfo.NameLen
         mov     ecx, [edx + ecx].TTypeInfo.recSize
         push    ecx
         mov     ecx, edx
@@ -38047,7 +38070,7 @@ asm  // faster version of _CopyRecord{dest, source, typeInfo: Pointer} by AB
         nop
         nop
         nop
-@Variant:
+@variant:
 {$ifdef NOVARCOPYPROC}
         mov     edx, esi
         call    System.@VarCopy
@@ -38062,14 +38085,14 @@ asm  // faster version of _CopyRecord{dest, source, typeInfo: Pointer} by AB
         nop
         nop
 {$endif}
-@Interface:
+@interface:
         mov     edx, [esi]
         call    System.@IntfCopy
         jmp     @fin4
         nop
         nop
         nop
-@DynArray:
+@dynaray:
         mov     ecx, edx // ecx=TypeInfo
         mov     edx, [esi]
         call    System.@DynArrayAsg
@@ -40541,7 +40564,8 @@ begin
             ArrayTyp := TJSONCustomParserRTTI.TypeNameToSimpleRTTIType(
               @PByteArray(TypIdent)[1],len-9,ArrayTypIdent);
             if ArrayTyp=ptCustom then
-              raise ESynException.CreatEUTF8('%.Parse: unknown %',[self,TypIdent]);
+              raise ESynException.CreateUTF8('%.Parse: % is not a T*DynArray of a simple type',
+                [self,TypIdent]);
             Typ := ptArray;
           end;
           ExpectedEnd := eeNothing;
@@ -40608,7 +40632,7 @@ begin
           [self,fRoot.CustomTypeName]);
     {$else}
     raise ESynException.CreateUTF8('%.Create with no enhanced RTTI for %',
-      [self,TypeInfoToName(aRecordTypeInfo)]);
+      [self,PShortString(@PTypeInfo(aRecordTypeInfo).NameLen)^]);
     {$endif}
   end;
   fItems.Add(fRoot);
@@ -44869,7 +44893,7 @@ begin
 end;
 
 procedure TDynArray.Reverse;
-var i, siz, n, tmp: integer;
+var siz, n, tmp: integer;
     P1, P2: PAnsiChar;
     c: AnsiChar;
     i64: Int64;
@@ -44882,7 +44906,7 @@ begin
     1: begin
       // optimized version for TByteDynArray and such
       P2 := P1+n;
-      for i := 1 to n shr 1 do begin
+      while P1<P2 do begin
         c := P1^;
         P1^ := P2^;
         P2^ := c;
@@ -44893,7 +44917,7 @@ begin
     4: begin
       // optimized version for TIntegerDynArray + TRawUTF8DynArray and such
       P2 := P1+n*sizeof(Integer);
-      for i := 1 to n shr 1 do begin
+      while P1<P2 do begin
         tmp := PInteger(P1)^;
         PInteger(P1)^ := PInteger(P2)^;
         PInteger(P2)^ := tmp;
@@ -44904,7 +44928,7 @@ begin
     8: begin
       // optimized version for TInt64DynArray + TDoubleDynArray and such
       P2 := P1+n*sizeof(Int64);
-      for i := 1 to n shr 1 do begin
+      while P1<P2 do begin
         i64 := PInt64(P1)^;
         PInt64(P1)^ := PInt64(P2)^;
         PInt64(P2)^ := i64;
@@ -44915,7 +44939,7 @@ begin
     16: begin
       // optimized version for TVariantDynArray and such
       P2 := P1+n*16;
-      for i := 1 to n shr 1 do begin
+      while P1<P2 do begin
         Exchg16(Pointer(P1),Pointer(P2));
         inc(P1,16);
         dec(P2,16);
@@ -44924,7 +44948,7 @@ begin
     else begin
       // generic version
       P2 := P1+n*siz;
-      for i := 1 to n shr 1 do begin
+      while P1<P2 do begin
         Exchg(P1,P2,siz);
         inc(P1,siz);
         dec(P2,siz);
@@ -47879,8 +47903,7 @@ begin // nothing to do by default - overridden constructor may add custom code
 end;
 
 procedure TSynPersistent.AssignError(Source: TSynPersistent);
-var
-  SourceName: string;
+var SourceName: string;
 begin
   if Source <> nil then
     SourceName := Source.ClassName else
@@ -61245,7 +61268,7 @@ end;
 
 procedure TSynBloomFilter.Insert(aValue: pointer; aValueLen: integer);
 var h: integer;
-    h1,h2: cardinal; // http://www.eecs.harvard.edu/~kirsch/pubs/bbbf/esa06.pdf
+    h1,h2: cardinal; // https://goo.gl/Pls5wi
 begin
   if (self=nil) or (aValueLen<=0) or (fBits=0) then
     exit;
@@ -61282,7 +61305,7 @@ end;
 
 function TSynBloomFilter.MayExist(aValue: pointer; aValueLen: integer): boolean;
 var h: integer;
-    h1,h2: cardinal; // http://www.eecs.harvard.edu/~kirsch/pubs/bbbf/esa06.pdf
+    h1,h2: cardinal; // https://goo.gl/Pls5wi
 begin
   result := false;
   if (self=nil) or (aValueLen<=0) or (fBits=0) then
@@ -61967,7 +61990,8 @@ begin
     intvalues := DocVariantType.InternValues else
     intvalues := nil;
   result := 0; // returns number of changed values
-  for i := 0 to Count-1 do begin
+  for i := 0 to Count-1 do
+  if List[i].Name<>'' then begin
     VarClear(v);
     if ValueAsString or not GetNumericVariantFromJSON(pointer(List[i].Value),
         TVarData(v),AllowVarDouble) then
