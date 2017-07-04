@@ -841,6 +841,7 @@ type
   {$ifdef BSD}
   TThreadID = Cardinal;
   {$endif}
+  
 {$else FPC}
 
 type
@@ -6219,8 +6220,15 @@ type
 function PtrArrayAdd(var aPtrArray; aItem: pointer): integer;
   {$ifdef HASINLINE}inline;{$endif}
 
+/// wrapper to add once an item to a array of pointer dynamic array storage
+procedure PtrArrayAddOnce(var aPtrArray; aItem: pointer);
+
 /// wrapper to delete an item from a array of pointer dynamic array storage
 function PtrArrayDelete(var aPtrArray; aItem: pointer): integer;
+
+/// wrapper to find an item to a array of pointer dynamic array storage
+function PtrArrayFind(var aPtrArray; aItem: pointer): integer;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// wrapper to add an item to a T*ObjArray dynamic array storage
 // - as expected by TJSONSerializer.RegisterObjArrayForJSON()
@@ -6356,6 +6364,14 @@ function GetEnumName(aTypeInfo: pointer; aIndex: integer): PShortString;
 // - may be used as cache for overloaded ToText() content
 procedure GetEnumNames(aTypeInfo: pointer; aDest: PPShortString);
 
+/// helper to retrieve all trimmed texts of an enumerate
+// - may be used as cache to retrieve UTF-8 text without lowercase 'a'..'z' chars
+procedure GetEnumTrimmedNames(aTypeInfo: pointer; aDest: PRawUTF8);
+
+/// helper to retrieve all (translated) caption texts of an enumerate
+// - may be used as cache for overloaded ToCaption() content
+procedure GetEnumCaptions(aTypeInfo: pointer; aDest: PString);
+
 /// helper to retrieve the index of an enumerate item from its text
 // - returns -1 if aValue was not found
 // - will search for the exact text and also trim the lowercase 'a'..'z' chars on
@@ -6377,6 +6393,8 @@ function GetEnumNameValue(aTypeInfo: pointer; const aValue: RawUTF8;
 // - if supplied P^ is a JSON integer number, will read it directly
 // - if P^ maps some ["item1","item2"] content, would fill all matching bits
 // - if P^ contains ['*'], would fill all bits
+// - returns P=nil if reached prematurly the end of content, or returns
+// the value separator (e.g. , or }) in EndOfObject (like GetJsonField)
 function GetSetNameValue(aTypeInfo: pointer; var P: PUTF8Char;
   out EndOfObject: AnsiChar): cardinal;
 
@@ -15547,7 +15565,14 @@ type
     // - returns -1 if no match is found
     // - will call VariantEquals() for value comparison
     function SearchItemByProp(const aPropName,aPropValue: RawUTF8;
-      aPropValueCaseSensitive: boolean): integer;
+      aPropValueCaseSensitive: boolean): integer; overload;
+    /// search a property match in this document, handled as array or object
+    // - {aPropName:aPropValue} will be searched within the stored array or
+    // object, and the corresponding item index will be returned, on match
+    // - returns -1 if no match is found
+    // - will call VariantEquals() for value comparison
+    function SearchItemByProp(const aPropNameFmt: RawUTF8; const aPropNameArgs: array of const;
+      const aPropValue: RawUTF8; aPropValueCaseSensitive: boolean): integer; overload;
     /// search a value in this document, handled as array
     // - aValue will be searched within the stored array
     // and the corresponding item index will be returned, on match
@@ -22421,6 +22446,17 @@ begin
 end;
 
 const
+  NULL_LOW  = ord('n')+ord('u')shl 8+ord('l')shl 16+ord('l')shl 24;
+  FALSE_LOW = ord('f')+ord('a')shl 8+ord('l')shl 16+ord('s')shl 24;
+  TRUE_LOW  = ord('t')+ord('r')shl 8+ord('u')shl 16+ord('e')shl 24;
+  NULL_UPP  = ord('N')+ord('U')shl 8+ord('L')shl 16+ord('L')shl 24;
+
+  EndOfJSONValueField = [#0,#9,#10,#13,' ',',','}',']'];
+  EndOfJSONField = [',',']','}',':'];
+  DigitChars = ['-','+','0'..'9'];
+  DigitFirstChars = ['-','1'..'9']; // 0/- excluded by JSON!
+  DigitFloatChars = ['-','+','0'..'9','.','E','e'];
+
   NULL_SHORTSTRING: string[1] = '';
 
 procedure GetEnumNames(aTypeInfo: pointer; aDest: PPShortString);
@@ -22430,6 +22466,42 @@ begin
   if GetEnumInfo(aTypeInfo,MaxValue,res) then
     for i := 0 to MaxValue do begin
       aDest^ := res;
+      inc(PByte(res),ord(res^[0])+1); // next short string
+      inc(aDest);
+    end;
+end;
+
+procedure GetEnumTrimmedNames(aTypeInfo: pointer; aDest: PRawUTF8);
+var MaxValue, i: integer;
+    res: PShortString;
+begin
+  if GetEnumInfo(aTypeInfo,MaxValue,res) then
+    for i := 0 to MaxValue do begin
+      aDest^ := TrimLeftLowerCaseShort(res);
+      inc(PByte(res),ord(res^[0])+1); // next short string
+      inc(aDest);
+    end;
+end;
+
+procedure GetCaptionFromTrimmed(PS: PAnsiChar; var result: string);
+var tmp: array[byte] of AnsiChar;
+    L: integer;
+begin
+  L := ord(PS^);
+  inc(PS);
+  while (L>0) and (PS^ in ['a'..'z']) do begin inc(PS); dec(L); end;
+  tmp[L] := #0; // as expected by GetCaptionFromPCharLen/UnCamelCase
+  MoveFast(PS^,tmp,L);
+  GetCaptionFromPCharLen(tmp,result);
+end;
+
+procedure GetEnumCaptions(aTypeInfo: pointer; aDest: PString);
+var MaxValue, i: integer;
+    res: PShortString;
+begin
+  if GetEnumInfo(aTypeInfo,MaxValue,res) then
+    for i := 0 to MaxValue do begin
+      GetCaptionFromTrimmed(pointer(res),aDest^);
       inc(PByte(res),ord(res^[0])+1); // next short string
       inc(aDest);
     end;
@@ -22579,31 +22651,38 @@ begin
     P := GotoNextNotSpace(P);
     if P^='[' then begin
       P := GotoNextNotSpace(P+1);
-      if P^=']' then begin
-        EndOfObject := ']';
-        P := GotoNextNotSpace(P+1);
-      end else
-      repeat
-        Text := GetJSONField(P,P,@wasString,@EndOfObject,@TextLen);
-        if (Text=nil) or not wasString then begin
+      if P^=']' then 
+        inc(P) else
+        repeat
+          Text := GetJSONField(P,P,@wasString,@EndOfObject,@TextLen);
+          if (Text=nil) or not wasString then begin
+            P := nil; // invalid input (expects a JSON array of strings)
+            exit;
+          end;
+          if Text^='*' then begin
+            if MaxValue<32 then
+              result := ALLBITS_CARDINAL[MaxValue+1] else
+              result := cardinal(-1);
+            break;
+          end;
+          if Text^ in ['a'..'z'] then
+            i := FindShortStringListExact(names,MaxValue,Text,TextLen) else
+            i := -1;
+          if i<0 then
+            i := FindShortStringListTrimLowerCase(names,MaxValue,Text,TextLen);
+          if i>=0 then
+            SetBit(result,i);
+          // unknown enum names (i=-1) would just be ignored
+        until EndOfObject=']';
+      while not (P^ in EndOfJSONField) do begin // mimics GetJSONField()
+        if P^=#0 then begin
           P := nil;
-          break;
+          exit; // unexpected end
         end;
-        if Text^='*' then begin
-          if MaxValue<32 then
-            result := ALLBITS_CARDINAL[MaxValue+1] else
-            result := cardinal(-1);
-          exit;
-        end;
-        if Text^ in ['a'..'z'] then
-          i := FindShortStringListExact(names,MaxValue,Text,TextLen) else
-          i := -1;
-        if i<0 then
-          i := FindShortStringListTrimLowerCase(names,MaxValue,Text,TextLen);
-        if i>=0 then
-          SetBit(result,i);
-        // unknown enum names (i=-1) would just be ignored
-      until EndOfObject=']';
+        inc(P);
+      end;
+      EndOfObject := P^;
+      P := GotoNextNotSpace(P+1);
     end else
       result := GetCardinal(GetJSONField(P,P,nil,@EndOfObject));
   end;
@@ -24455,19 +24534,6 @@ begin // '\uFFF0base64encodedbinary' checked and decode into binary
     result := true;
   end;
 end;
-
-const
-  NULL_LOW  = ord('n')+ord('u')shl 8+ord('l')shl 16+ord('l')shl 24;
-  FALSE_LOW = ord('f')+ord('a')shl 8+ord('l')shl 16+ord('s')shl 24;
-  TRUE_LOW  = ord('t')+ord('r')shl 8+ord('u')shl 16+ord('e')shl 24;
-  NULL_UPP  = ord('N')+ord('U')shl 8+ord('L')shl 16+ord('L')shl 24;
-
-  EndOfJSONValueField = [#0,#9,#10,#13,' ',',','}',']'];
-  EndOfJSONField = [',',']','}',':'];
-  DigitChars = ['-','+','0'..'9'];
-  DigitFirstChars = ['-','1'..'9']; // 0/- excluded by JSON!
-  DigitFloatChars = ['-','+','0'..'9','.','E','e'];
-
 
 function SQLParamContent(P: PUTF8Char; out ParamType: TSQLParamType; out ParamValue: RawUTF8;
   out wasNull: boolean): PUTF8Char;
@@ -28694,16 +28760,14 @@ var
   TemporaryFileNameRandom: integer;
 
 function TemporaryFileName: TFileName;
-var random: string[8];
-    rnd: cardinal;
+var folder: TFileName;
 begin // fast cross-platform implementation
+  folder := GetSystemPath(spTempFolder);
   if TemporaryFileNameRandom=0 then
     TemporaryFileNameRandom := Random32;
-  random[0] := #8;
-  repeat
-    rnd := InterlockedIncrement(TemporaryFileNameRandom); // thread-safe :)
-    SynCommons.BinToHex(@rnd,@random[1],sizeof(rnd));
-    result := format('%s%s_%s.tmp',[GetSystemPath(spTempFolder),ExeVersion.ProgramName,random]);
+  repeat // thread-safe unique file name generation 
+    result := format('%s%s_%s.tmp',[folder,ExeVersion.ProgramName,
+      CardinalToHexShort(InterlockedIncrement(TemporaryFileNameRandom))]);
   until not FileExists(result);
 end;
 
@@ -35399,17 +35463,8 @@ begin
 end;
 
 function GetCaptionFromEnum(aTypeInfo: pointer; aIndex: integer): string;
-var PS: PUTF8Char;
-    tmp: array[byte] of AnsiChar;
-    L: integer;
 begin
-  PS := pointer(GetEnumName(aTypeInfo,aIndex));
-  L := ord(PS^);
-  inc(PS);
-  while (L>0) and (PS^ in ['a'..'z']) do begin inc(PS); dec(L); end;
-  tmp[L] := #0; // as expected by GetCaptionFromPCharLen/UnCamelCase
-  MoveFast(PS^,tmp,L);
-  GetCaptionFromPCharLen(tmp,result);
+  GetCaptionFromTrimmed(pointer(GetEnumName(aTypeInfo,aIndex)),result);
 end;
 
 function CharSetToCodePage(CharSet: integer): cardinal;
@@ -42731,6 +42786,15 @@ begin
   result := -1;
 end;
 
+function TDocVariantData.SearchItemByProp(const aPropNameFmt: RawUTF8;
+  const aPropNameArgs: array of const; const aPropValue: RawUTF8;
+  aPropValueCaseSensitive: boolean): integer;
+var name: RawUTF8;
+begin
+  FormatUTF8(aPropNameFmt,aPropNameArgs,name);
+  result := SearchItemByProp(name,aPropValue,aPropValueCaseSensitive);
+end;
+
 function TDocVariantData.SearchItemByValue(const aValue: Variant;
   CaseInsensitive: boolean; StartIndex: integer): integer;
 begin
@@ -47241,6 +47305,17 @@ begin
   a[result] := aItem;
 end;
 
+procedure PtrArrayAddOnce(var aPtrArray; aItem: pointer);
+var a: TPointerDynArray absolute aPtrArray;
+    n: integer;
+begin
+  n := length(a);
+  if not PtrUIntScanExists(pointer(a),n,PtrUInt(aItem)) then begin
+    SetLength(a,n+1);
+    a[n] := aItem;
+  end;
+end;
+
 function PtrArrayDelete(var aPtrArray; aItem: pointer): integer;
 var a: TPointerDynArray absolute aPtrArray;
     n: integer;
@@ -47253,6 +47328,12 @@ begin
   if n>result then
     MoveFast(a[result+1],a[result],(n-result)*sizeof(pointer));
   SetLength(a,n);
+end;
+
+function PtrArrayFind(var aPtrArray; aItem: pointer): integer;
+var a: TPointerDynArray absolute aPtrArray;
+begin
+  result := PtrUIntScanIndex(pointer(a),length(a),PtrUInt(aItem));
 end;
 
 { wrapper functions to T*ObjArr types }
@@ -47276,10 +47357,14 @@ begin
 end;
 
 procedure ObjArrayAddOnce(var aObjArray; aItem: TObject);
+var a: TObjectDynArray absolute aObjArray;
+    n: integer;
 begin
-  if not PtrUIntScanExists(pointer(aObjArray),
-     length(TObjectDynArray(aObjArray)),PtrUInt(aItem)) then
-    ObjArrayAdd(aObjArray,aItem);
+  n := length(a);
+  if not PtrUIntScanExists(pointer(a),n,PtrUInt(aItem)) then begin
+    SetLength(a,n+1);
+    a[n] := aItem;
+  end;
 end;
 
 procedure ObjArraySetLength(var aObjArray; aLength: integer);
@@ -51418,7 +51503,6 @@ begin
 end;
 
 function GotoEndJSONItem(P: PUTF8Char): PUTF8Char;
-label next;
 begin
   result := nil; // to notify unexpected end
   if P=nil then
@@ -51437,14 +51521,15 @@ begin
     if P=nil then
       exit;
     if P^ in [#1..' '] then repeat inc(P) until not(P^ in [#1..' ']);
-    goto next;
+    if P^<>#0 then
+      result := P;
+    exit;
   end;
   end;
   repeat // numeric or true/false/null or MongoDB extended {age:{$gt:18}}
     inc(P);
     if P^=#0 then exit; // unexpected end
   until P^ in [':',',',']','}'];
-next:
   if P^=#0 then
     exit;
   result := P;
@@ -64007,6 +64092,11 @@ initialization
   Assert(sizeof(THash128Rec)=sizeof(THash128));
   Assert(sizeof(THash256Rec)=sizeof(THash256));
   Assert(sizeof(TBlock128)=sizeof(THash128));
+  {$ifdef MSWINDOWS}
+  {$ifndef CPU64}
+  Assert(sizeof(TFileTime)=sizeof(Int64)); // see e.g. FileTimeToInt64
+  {$endif}
+  {$endif}
 {  TypeInfoSaveRegisterKnown([
     TypeInfo(boolean),TypeInfo(byte),TypeInfo(word),TypeInfo(cardinal),TypeInfo(Int64),
     TypeInfo(single),TypeInfo(double),TypeInfo(currency),TypeInfo(extended),TypeInfo(TDateTime),
