@@ -1325,13 +1325,15 @@ constructor TZipRead.Create(Instance: THandle; const ResName: string; ResType: P
 var HResInfo: THandle;
     HGlobal: THandle;
 begin
+  if Instance=0 then
+    Instance := HInstance;
   HResInfo := FindResource(Instance,PChar(ResName),ResType);
   if HResInfo=0 then
     exit;
-  HGlobal := LoadResource(HInstance, HResInfo);
+  HGlobal := LoadResource(Instance, HResInfo);
   if HGlobal<>0 then
     // warning: resources size may be rounded up to alignment -> handled in Create()
-    Create(LockResource(HGlobal),SizeofResource(HInstance, HResInfo));
+    Create(LockResource(HGlobal),SizeofResource(Instance, HResInfo));
 end;
 
 constructor TZipRead.Create(aFile: THandle; ZipStartOffset,Size: cardinal);
@@ -4823,7 +4825,7 @@ asm
   not eax
   ret
 @tail:
-  movzx ebx, byte [edx + ecx]
+  movzx ebx,byte ptr [edx + ecx]
   xor bl,al
   shr eax,8
   xor eax,dword ptr [ebx*4 + crc32tab]
@@ -4834,7 +4836,7 @@ asm
 {$else}
   sub edx,ecx
 @next:
-  movzx ebx, byte [edx + ecx]
+  movzx ebx,byte ptr [edx + ecx]
   xor bl, al
   shr eax, 8
   xor eax, [ebx*4 + crc32tab]
