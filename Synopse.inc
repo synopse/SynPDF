@@ -20,7 +20,7 @@
 
   The Initial Developer of the Original Code is Arnaud Bouchez.
 
-  Portions created by the Initial Developer are Copyright (C) 2017
+  Portions created by the Initial Developer are Copyright (C) 2018
   the Initial Developer. All Rights Reserved.
 
   Contributor(s):
@@ -211,6 +211,7 @@
   {$define DELPHI5ORFPC}
   {$define USETYPEINFO}  // will use SynFPCTypInfo.pas wrapper
   {$define HASINLINE}
+  {$define HASUINT64}
   {$define HASINLINENOTX86}
   {$define NODELPHIASM}   // ignore low-level System.@LStrFromPCharLen calls
   {$define HASAESNI}
@@ -310,12 +311,14 @@
   {$endif}
   {$ifdef VER3_0}
     {$define ISFPC27}
+    {$define ISFPC30}
     {$define HASDIRECTTYPEINFO}
     // PTypeInfo would be stored with no pointer de-reference
     // => Delphi and newer FPC uses a pointer reference to ease exe linking
   {$endif}
   {$ifdef VER3_1}
     {$define ISFPC27}
+    {$define ISFPC30}
     {.$define HASDIRECTTYPEINFO}
     // define this for trunk revisions older than June 2016 - see
     // http://wiki.freepascal.org/User_Changes_Trunk#RTTI_Binary_format_change
@@ -340,6 +343,16 @@
   {$ifdef FPC_HAS_MANAGEMENT_OPERATORS}
     {$define ISDELPHI2006ANDUP}
   {$endif FPC_HAS_MANAGEMENT_OPERATORS}
+
+  {$ifdef ISFPC30}
+    {$ifndef MSWINDOWS}
+    // define FPCUSEVERSIONINFO to link low-level executable file information
+    // units in SynCommons.pas
+    // => disabled by default, to reduce the executable overhead
+    {.$define FPCUSEVERSIONINFO}
+    {$endif MSWINDOWS}
+  {$endif ISFPC30}
+
 
 {$else FPC}
 
@@ -386,6 +399,7 @@
       {$else}
         {$define ISDELPHI7ANDUP} // Delphi 7 or newer
         {$define WITHUXTHEME}   // VCL handle UI theming
+        {$define HASUINT64}
         {$warn UNSAFE_CODE OFF} // Delphi for .Net does not exist any more!
         {$warn UNSAFE_TYPE OFF}
         {$warn UNSAFE_CAST OFF}
@@ -402,6 +416,7 @@
       {$define ISDELPHI2006ANDUP} // Delphi 2006 or newer
       {$define HASNEWFILEAGE}
       {$define HASINLINE}
+      {$define HASINLINEDELPHI}
       {$define HASINLINENOTX86}
       {$define HASREGION}
       {$define HASFASTMM4}
@@ -426,7 +441,6 @@
       {$define ISDELPHI2010_OR_FPC_NEWRTTI}
       {$define FPC_OR_UNICODE}
       {$define HASTTHREADSTART}
-      {$define HASTTHREADTERMINATESET}
       {$define HASINTERFACEASTOBJECT}
       {$ifdef NEWRTTINOTUSED}
         {$WEAKLINKRTTI ON}
@@ -441,6 +455,7 @@
       // e.g. {$ifdef ISDELPHIXE2}VCL.Graphics{$else}Graphics{$endif}
       {$define ISDELPHIXE2}
       {$define HASVARUSTRARG}
+      {$define HASTTHREADTERMINATESET} // introduced TThread.TerminateSet
     {$ifend}
     {$if CompilerVersion >= 24.0}
       {$define ISDELPHIXE3}
@@ -503,6 +518,7 @@
 {$else}
 {$endif PUREPASCAL}
 
+{$H+} // we use long strings
 {$R-} // disable Range checking in our code
 {$S-} // disable Stack checking in our code
 {$X+} // expect extended syntax
@@ -593,6 +609,8 @@
   {$ifndef ANDROID}
     // cross-platform libcurl for https -> TCurlHttp and TSQLHttpClientCurl
     {$define USELIBCURL}
+    // for Android, consider using https://github.com/gcesarmza/curl-android-ios
+    // static libraries and force USELIBCURL in the project conditionals
   {$endif}
 {$endif}
 

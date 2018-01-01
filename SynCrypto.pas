@@ -8,7 +8,7 @@ unit SynCrypto;
 (*
     This file is part of Synopse framework.
 
-    Synopse framework. Copyright (C) 2017 Arnaud Bouchez
+    Synopse framework. Copyright (C) 2018 Arnaud Bouchez
       Synopse Informatique - https://synopse.info
 
   *** BEGIN LICENSE BLOCK *****
@@ -27,7 +27,7 @@ unit SynCrypto;
 
   The Initial Developer of the Original Code is Arnaud Bouchez.
 
-  Portions created by the Initial Developer are Copyright (C) 2017
+  Portions created by the Initial Developer are Copyright (C) 2018
   the Initial Developer. All Rights Reserved.
 
   Contributor(s):
@@ -463,26 +463,26 @@ type
     function DecryptPKCS7Len(var InputLen,ivsize: integer; Input: pointer;
       IVAtBeginning, RaiseESynCryptoOnError: boolean): boolean;
   public
-    /// Initialize AES contexts for cypher
+    /// Initialize AES context for cypher
     // - first method to call before using this class
     // - KeySize is in bits, i.e. 128,192,256
     constructor Create(const aKey; aKeySize: cardinal); reintroduce; overload; virtual;
-    /// Initialize AES contexts for AES-128 cypher
+    /// Initialize AES context for AES-128 cypher
     // - first method to call before using this class
     // - just a wrapper around Create(aKey,128);
     constructor Create(const aKey: THash128); reintroduce; overload;
-    /// Initialize AES contexts for AES-256 cypher
+    /// Initialize AES context for AES-256 cypher
     // - first method to call before using this class
     // - just a wrapper around Create(aKey,256);
     constructor Create(const aKey: THash256); reintroduce; overload;
-    /// Initialize AES contexts for cypher, from some TAESPRNG random bytes
+    /// Initialize AES context for cypher, from some TAESPRNG random bytes
     // - may be used to hide some sensitive information from memory, like
     // CryptDataForCurrentUser but with a temporary key
     constructor CreateTemp(aKeySize: cardinal);
-    /// Initialize AES contexts for cypher, from SHA-256 hash
+    /// Initialize AES context for cypher, from SHA-256 hash
     // - here the Key is supplied as a string, and will be hashed using SHA-256
     constructor CreateFromSha256(const aKey: RawUTF8);
-    /// Initialize AES contexts for cypher, from PBKDF2_HMAC_SHA256 derivation
+    /// Initialize AES context for cypher, from PBKDF2_HMAC_SHA256 derivation
     // - here the Key is supplied as a string, and will be hashed using
     // PBKDF2_HMAC_SHA256 with the specified salt and rounds
     constructor CreateFromPBKDF2(const aKey: RawUTF8; const aSalt: RawByteString;
@@ -759,7 +759,7 @@ type
   /// abstract parent class for chaining modes using only AES encryption 
   TAESAbstractEncryptOnly = class(TAESAbstractSyn)
   public
-    /// Initialize AES contexts for cypher
+    /// Initialize AES context for cypher
     // - will pre-generate the encryption key
     constructor Create(const aKey; aKeySize: cardinal); override;
     /// compute a class instance similar to this one, for performing the
@@ -785,6 +785,7 @@ type
   // - this class will use AES-NI hardware instructions, if available, e.g.
   // ! OFB256: 27.69ms in x86 optimized code, 9.94ms with AES-NI
   // - expect IV to be set before process, or IVAtBeginning=true
+  // - TAESOFB 128-bit has its own optimized asm version under x86_64 + AES_NI
   TAESOFB = class(TAESAbstractEncryptOnly)
   public
     /// perform the AES cypher in the OFB mode
@@ -808,10 +809,12 @@ type
   /// internal 256-bit structure used for TAESAbstractAEAD MAC storage
   TAESMAC256 = record
     /// the AES-encrypted MAC of the plain content
-    // - encrypt the plain text crc, to perform message authentication and integrity
+    // - plain text digital signature, to perform message authentication
+    // and integrity
     plain: THash128;
     /// the plain MAC of the encrypted content
-    // - store the encrypted text crc, to check for errors, with no compromission
+    // - encrypted text digital signature, to check for errors,
+    // with no compromission of the plain content
     encrypted: THash128;
   end;
   
@@ -1085,6 +1088,10 @@ type
     // - this method is thread-safe, but you may use your own TAESPRNG instance
     // if you need some custom entropy level
     class procedure Fill(out Block: TAESBlock); overload;
+    /// just a wrapper around TAESPRNG.Main.FillRandom() function
+    // - this method is thread-safe, but you may use your own TAESPRNG instance
+    // if you need some custom entropy level
+    class procedure Fill(out Block: THash256); overload;
       {$ifdef HASINLINE}inline;{$endif}
     /// just a wrapper around TAESPRNG.Main.FillRandom() function
     // - this method is thread-safe, but you may use your own TAESPRNG instance
@@ -1189,9 +1196,10 @@ type
   /// handle SHA-1 hashing
   // - we defined a record instead of a class, to allow stack allocation and
   // thread-safe reuse of one initialized instance, e.g. for THMAC_SHA1
+  // - see TSynHasher if you expect to support more than one algorithm at runtime
   TSHA1 = {$ifndef UNICODE}object{$else}record{$endif}
   private
-    Context: packed array[1..SHAContextSize div 4] of cardinal;
+    Context: packed array[1..SHAContextSize] of byte;
   public
     /// initialize SHA-1 context for hashing
     procedure Init;
@@ -1202,7 +1210,11 @@ type
     /// finalize and compute the resulting SHA-1 hash Digest of all data
     // affected to Update() method
     // - will also call Init to reset all internal temporary context, for safety
-    procedure Final(out Digest: TSHA1Digest; NoInit: boolean=false);
+    procedure Final(out Digest: TSHA1Digest; NoInit: boolean=false); overload;
+    /// finalize and compute the resulting SHA-1 hash Digest of all data
+    // affected to Update() method
+    // - will also call Init to reset all internal temporary context, for safety
+    function Final(NoInit: boolean=false): TSHA1Digest; overload; {$ifdef HASINLINE}inline;{$endif}
     /// one method to rule them all
     // - call Init, then Update(), then Final()
     // - only Full() is Padlock-implemented - use this rather than Update()
@@ -1217,6 +1229,7 @@ type
   /// handle SHA-256 hashing
   // - we defined a record instead of a class, to allow stack allocation and
   // thread-safe reuse of one initialized instance, e.g. for THMAC_SHA256
+  // - see TSynHasher if you expect to support more than one algorithm at runtime
   TSHA256 = {$ifndef UNICODE}object{$else}record{$endif}
   private
     Context: packed array[1..SHAContextSize] of byte;
@@ -1229,7 +1242,10 @@ type
     procedure Update(const Buffer: RawByteString); overload;
     /// finalize and compute the resulting SHA-256 hash Digest of all data
     // affected to Update() method
-    procedure Final(out Digest: TSHA256Digest; NoInit: boolean=false);
+    procedure Final(out Digest: TSHA256Digest; NoInit: boolean=false); overload;
+    /// finalize and compute the resulting SHA-256 hash Digest of all data
+    // affected to Update() method
+    function Final(NoInit: boolean=false): TSHA256Digest; overload; {$ifdef HASINLINE}inline;{$endif}
     /// one method to rule them all
     // - call Init, then Update(), then Final()
     // - only Full() is Padlock-implemented - use this rather than Update()
@@ -1246,6 +1262,7 @@ type
   // - it is in fact a TSHA512 truncated hash, with other initial hash values
   // - we defined a record instead of a class, to allow stack allocation and
   // thread-safe reuse of one initialized instance, e.g. for THMAC_SHA384
+  // - see TSynHasher if you expect to support more than one algorithm at runtime
   TSHA384 = {$ifndef UNICODE}object{$else}record{$endif}
   private
     Hash: TSHA512Hash;
@@ -1262,7 +1279,10 @@ type
     /// finalize and compute the resulting SHA-384 hash Digest of all data
     // affected to Update() method
     // - will also call Init to reset all internal temporary context, for safety
-    procedure Final(out Digest: TSHA384Digest; NoInit: boolean=false);
+    procedure Final(out Digest: TSHA384Digest; NoInit: boolean=false); overload;
+    /// finalize and compute the resulting SHA-384 hash Digest of all data
+    // affected to Update() method
+    function Final(NoInit: boolean=false): TSHA384Digest; overload; {$ifdef HASINLINE}inline;{$endif}
     /// one method to rule them all
     // - call Init, then Update(), then Final()
     procedure Full(Buffer: pointer; Len: integer; out Digest: TSHA384Digest);
@@ -1286,6 +1306,7 @@ type
   // which outperforms other cryptographic hashes to more than 380MB/s
   // - we defined a record instead of a class, to allow stack allocation and
   // thread-safe reuse of one initialized instance, e.g. for THMAC_SHA512
+  // - see TSynHasher if you expect to support more than one algorithm at runtime
   TSHA512 = {$ifndef UNICODE}object{$else}record{$endif}
   private
     Hash: TSHA512Hash;
@@ -1302,7 +1323,10 @@ type
     /// finalize and compute the resulting SHA-512 hash Digest of all data
     // affected to Update() method
     // - will also call Init to reset all internal temporary context, for safety
-    procedure Final(out Digest: TSHA512Digest; NoInit: boolean=false);
+    procedure Final(out Digest: TSHA512Digest; NoInit: boolean=false); overload;
+    /// finalize and compute the resulting SHA-512 hash Digest of all data
+    // affected to Update() method
+    function Final(NoInit: boolean=false): TSHA512Digest; overload; {$ifdef HASINLINE}inline;{$endif}
     /// one method to rule them all
     // - call Init, then Update(), then Final()
     procedure Full(Buffer: pointer; Len: integer; out Digest: TSHA512Digest);
@@ -1321,10 +1345,11 @@ type
   // named by NIST a FIPS 180-4, then FIPS 202 hashing standard in 2015
   // - by design, SHA-3 doesn't need to be encapsulated into a HMAC algorithm,
   // since it already includes proper padding, so keys could be concatenated
-  // - this version is based on Wolfgang Ehrhardt's and Eric Grange's code,
+  // - this implementation is based on Wolfgang Ehrhardt's and Eric Grange's,
   // with our own manually optimized x64 assembly
   // - we defined a record instead of a class, to allow stack allocation and
   // thread-safe reuse of one initialized instance, e.g. after InitCypher
+  // - see TSynHasher if you expect to support more than one algorithm at runtime
   TSHA3 = {$ifndef UNICODE}object{$else}record{$endif}
   private
     Context: packed array[1..SHA3ContextSize] of byte;
@@ -1341,6 +1366,10 @@ type
     procedure Final(out Digest: THash256; NoInit: boolean=false); overload;
     /// finalize and compute the resulting SHA-3 hash 512-bit Digest
     procedure Final(out Digest: THash512; NoInit: boolean=false); overload;
+    /// finalize and compute the resulting SHA-3 hash 256-bit Digest
+    function Final256(NoInit: boolean=false): THash256;
+    /// finalize and compute the resulting SHA-3 hash 512-bit Digest
+    function Final512(NoInit: boolean=false): THash512; 
     /// finalize and compute the resulting SHA-3 hash Digest
     // - Digest destination buffer must contain enough bytes
     // - default DigestBits=0 will write the default number of bits to Digest
@@ -1436,6 +1465,7 @@ type
   /// handle MD5 hashing
   // - we defined a record instead of a class, to allow stack allocation and
   // thread-safe reuse of one initialized instance
+  // - see TSynHasher if you expect to support more than one algorithm at runtime
   TMD5 = {$ifndef UNICODE}object{$else}record{$endif}
   private
     in_: TMD5In;
@@ -1462,30 +1492,44 @@ type
     procedure Full(Buffer: pointer; Len: integer; out Digest: TMD5Digest);
   end;
 
-  /// internal key permutation buffer, as used by TRC4
-  TRC4InternalKey = array[byte] of byte;
-
   /// handle RC4 encryption/decryption
   // - we defined a record instead of a class, to allow stack allocation and
   // thread-safe reuse of one initialized instance
+  // - you can also restore and backup any previous state of the RC4 encryption
+  // by copying the whole TRC4 variable into another (stack-allocated) variable
   TRC4 = {$ifndef UNICODE}object{$else}record{$endif}
   private
-    key: TRC4InternalKey;
+    {$ifdef CPUINTEL}
+    state: array[byte] of PtrInt; // PtrInt=270MB/s  byte=240MB/s on x86
+    {$else}
+    state: array[byte] of byte; // on ARM, keep the CPU cache usage low
+    {$endif}
+    currI, currJ: PtrInt;
   public
     /// initialize the RC4 encryption/decryption
     // - KeyLen is in bytes, and should be within 1..255 range
     procedure Init(const aKey; aKeyLen: integer);
+    /// initialize RC4-drop[3072] encryption/decryption after SHA-3 hashing
+    // - will use SHAKE-128 generator in XOF mode to generate a 256 bytes key,
+    // then drop the first 3072 bytes from the RC4 stream
+    // - this initializer is much safer than plain Init, so should be considered
+    // for any use on RC4 for new projects - even if AES-NI is 2 times faster,
+    // and safer SHAKE-128 operates in XOF mode at a similar speed range
+    procedure InitSHA3(const aKey; aKeyLen: integer);
+    /// drop the next Count bytes from the RC4 cypher state
+    // - may be used in Stream mode, or to initialize in RC4-drop[n] mode
+    procedure Drop(Count: cardinal);
     /// perform the RC4 cypher encryption/decryption on a buffer
-    // - each call to this method shall be preceded with an Init() call,
-    // or a RestoreKey() from a previous SaveKey(), since it will change
-    // the internal key[] during its process
-    // - RC4 is a symmetrical algorithm: use this Encrypt() method for both
-    // encryption and decryption of any buffer
+    // - each call to this method shall be preceeded with an Init() call
+    // - RC4 is a symmetrical algorithm: use this Encrypt() method
+    // for both encryption and decryption of any buffer
     procedure Encrypt(const BufIn; var BufOut; Count: cardinal);
-    /// save the internal key computed by Init()
-    procedure SaveKey(out Backup: TRC4InternalKey);
-    /// restore the internal key as computed by Init()
-    procedure RestoreKey(const Backup: TRC4InternalKey);
+      {$ifdef HASINLINE}inline;{$endif}
+    /// perform the RC4 cypher encryption/decryption on a buffer
+    // - each call to this method shall be preceeded with an Init() call
+    // - RC4 is a symmetrical algorithm: use this EncryptBuffer() method
+    // for both encryption and decryption of any buffer
+    procedure EncryptBuffer(BufIn, BufOut: PByte; Count: cardinal);
   end;
 
 {$A-} { packed memory structure }
@@ -1601,8 +1645,8 @@ type
   // thread-safe reuse of one initialized instance via Compute(), e.g. for fast PBKDF2
   THMAC_SHA1 = {$ifndef UNICODE}object{$else}record{$endif}
   private
-    step7data: TByte64;
     sha: TSHA1;
+    step7data: TByte64;
   public
     /// prepare the HMAC authentication with the supplied key
     // - content of this record is stateless, so you can prepare a HMAC for a
@@ -1648,8 +1692,8 @@ type
   // thread-safe reuse of one initialized instance via Compute(), e.g. for fast PBKDF2
   THMAC_SHA384 = {$ifndef UNICODE}object{$else}record{$endif}
   private
-    step7data: array[0..31] of cardinal;
     sha: TSHA384;
+    step7data: array[0..31] of cardinal;
   public
     /// prepare the HMAC authentication with the supplied key
     // - content of this record is stateless, so you can prepare a HMAC for a
@@ -1695,8 +1739,8 @@ type
   // thread-safe reuse of one initialized instance via Compute(), e.g. for fast PBKDF2
   THMAC_SHA512 = {$ifndef UNICODE}object{$else}record{$endif}
   private
-    step7data: array[0..31] of cardinal;
     sha: TSHA512;
+    step7data: array[0..31] of cardinal;
   public
     /// prepare the HMAC authentication with the supplied key
     // - content of this record is stateless, so you can prepare a HMAC for a
@@ -1772,8 +1816,8 @@ type
   // thread-safe reuse of one initialized instance via Compute(), e.g. for fast PBKDF2
   THMAC_SHA256 = {$ifndef UNICODE}object{$else}record{$endif}
   private
-    step7data: TByte64;
     sha: TSha256;
+    step7data: TByte64;
   public
     /// prepare the HMAC authentication with the supplied key
     // - content of this record is stateless, so you can prepare a HMAC for a
@@ -1835,13 +1879,109 @@ procedure PBKDF2_HMAC_SHA256(const password,salt: RawByteString; count: Integer;
 function SHA3(Algo: TSHA3Algo; const s: RawByteString;
   DigestBits: integer=0): RawUTF8; overload;
 
-/// direct SHA-3 hash calculation of some binary buffer 
+/// direct SHA-3 hash calculation of some binary buffer
 // - result is returned in hexadecimal format
 // - default DigestBits=0 will write the default number of bits to Digest
 // output memory buffer, according to the specified TSHA3Algo
 function SHA3(Algo: TSHA3Algo; Buffer: pointer; Len: integer;
   DigestBits: integer=0): RawUTF8; overload;
 
+/// safe key derivation using iterated SHA-3 hashing
+// - you can use SHA3_224, SHA3_256, SHA3_384, SHA3_512 algorithm to fill
+// the result buffer with the default sized derivated key of 224,256,384 or 512
+// bytes (leaving resultbytes = 0)
+// - or you may select SHAKE_128 or SHAKE_256, and specify any custom key size
+// in resultbytes (used e.g. by PBKDF2_SHA3_Crypt)
+procedure PBKDF2_SHA3(algo: TSHA3Algo; const password,salt: RawByteString;
+  count: Integer; result: PByte; resultbytes: integer=0);
+
+/// encryption/decryption of any data using iterated SHA-3 hashing key derivation
+// - specified algo is expected to be SHAKE_128 or SHAKE_256
+// - expected the supplied data buffer to be small - for bigger content, consider
+// using TSHA.Cypher after 256-bit PBKDF2_SHA3 key derivation
+procedure PBKDF2_SHA3_Crypt(algo: TSHA3Algo; const password,salt: RawByteString;
+  count: Integer; var data: RawByteString);
+
+
+type
+  /// the HMAC/SHA-3 algorithms known by TSynSigner
+  TSignAlgo = (
+    saSha1, saSha256, saSha384, saSha512,
+    saSha3224, saSha3256, saSha3384, saSha3512, saSha3S128, saSha3S256);
+
+  /// a generic wrapper object to handle digital HMAC-SHA-2/SHA-3 signatures
+  // - used e.g. to implement TJWTSynSignerAbstract
+  TSynSigner = object
+  private
+    ctxt: packed array[1..SHA3ContextSize] of byte; // enough space for all
+    fSignatureSize: integer;
+    fAlgo: TSignAlgo;
+  public
+    /// initialize the digital HMAC/SHA-3 signing context with some secret text
+    procedure Init(aAlgo: TSignAlgo; const aSecret: RawUTF8); overload;
+    /// initialize the digital HMAC/SHA-3 signing context with some secret binary
+    procedure Init(aAlgo: TSignAlgo; aSecret: pointer; aSecretLen: integer); overload;
+    /// initialize the digital HMAC/SHA-3 signing context with PBKDF2 safe
+    // iterative key derivation of a secret salted text
+    procedure Init(aAlgo: TSignAlgo; const aSecret, aSalt: RawUTF8;
+      aSecretPBKDF2Rounds: integer; aPBKDF2Secret: PHash512Rec=nil); overload;
+    /// process some message content supplied as memory buffer
+    procedure Update(aBuffer: pointer; aLen: integer); overload;
+    /// process some message content supplied as string
+    procedure Update(const aBuffer: RawByteString); overload; {$ifdef HASINLINE}inline;{$endif}
+    /// returns the computed digital signature as lowercase hexadecimal text
+    function Final: RawUTF8; overload;
+    /// returns the raw computed digital signature
+    // - SignatureSize bytes will be written: use Signature.Lo/h0/b3/b accessors
+    procedure Final(out aSignature: THash512Rec; aNoInit: boolean=false); overload;
+    /// one-step digital signature of a buffer as lowercase hexadecimal string
+    function Full(aAlgo: TSignAlgo; const aSecret: RawUTF8;
+      aBuffer: Pointer; aLen: integer): RawUTF8; overload;
+    /// one-step digital signature of a buffer with PBKDF2 derivation
+    function Full(aAlgo: TSignAlgo; const aSecret, aSalt: RawUTF8;
+      aSecretPBKDF2Rounds: integer; aBuffer: Pointer; aLen: integer): RawUTF8; overload;
+    /// convenient wrapper to perform PBKDF2 safe iterative key derivation
+    procedure PBKDF2(aAlgo: TSignAlgo; const aSecret, aSalt: RawUTF8;
+      aSecretPBKDF2Rounds: integer; out aDerivatedKey: THash512Rec);
+    /// the algorithm used for digitial signature
+    property Algo: TSignAlgo read fAlgo;
+    /// the size, in bytes, of the digital signature of this algorithm
+    property SignatureSize: integer read fSignatureSize;
+  end;
+
+  /// hash algorithms available for HashFile/HashFull functions and TSynHasher object
+  THashAlgo = (hfMD5, hfSHA1, hfSHA256, hfSHA384, hfSHA512, hfSHA3_256, hfSHA3_512);
+
+  /// convenient multi-algorithm hashing wrapper
+  // - as used e.g. by HashFile/HashFull functions
+  // - we defined a record instead of a class, to allow stack allocation and
+  // thread-safe reuse of one initialized instance
+  TSynHasher = object
+  private
+    fAlgo: THashAlgo;
+    ctxt: array[1..SHA3ContextSize] of byte; // enough space for all algorithms
+  public
+    /// initialize the internal hashing structure for a specific algorithm
+    // - returns false on unknown/unsupported algorithm
+    function Init(aAlgo: THashAlgo): boolean;
+    /// hash the supplied memory buffer
+    procedure Update(aBuffer: Pointer; aLen: integer); overload;
+    /// hash the supplied string content
+    procedure Update(const aBuffer: RawByteString); overload; {$ifdef HASINLINE}inline;{$endif}
+    /// returns the resulting hash as lowercase hexadecimal string
+    function Final: RawUTF8;
+    /// one-step hash computation of a buffer as lowercase hexadecimal string
+    function Full(aAlgo: THashAlgo; aBuffer: Pointer; aLen: integer): RawUTF8;
+    /// the hash algorithm used by this instance
+    property Algo: THashAlgo read fAlgo;
+  end;
+
+/// compute the hexadecimal hash of any (big) file
+// - using a temporary buffer of 1MB for the sequential reading
+function HashFile(const aFileName: TFileName; aAlgo: THashAlgo): RawUTF8;
+
+/// one-step hash computation of a buffer as lowercase hexadecimal string
+function HashFull(aAlgo: THashAlgo; aBuffer: Pointer; aLen: integer): RawUTF8;
 
 
 /// compute the HMAC message authentication code using crc256c as hash function
@@ -2037,38 +2177,47 @@ type
 /// compute the hexadecial representation of an AES 16-byte block
 // - returns a stack-allocated short string
 function AESBlockToShortString(const block: TAESBlock): short32; overload;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// compute the hexadecial representation of an AES 16-byte block
 // - fill a stack-allocated short string
 procedure AESBlockToShortString(const block: TAESBlock; out result: short32); overload;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// compute the hexadecial representation of an AES 16-byte block
 function AESBlockToString(const block: TAESBlock): RawUTF8;
 
 /// compute the hexadecimal representation of a SHA-1 digest
 function SHA1DigestToString(const D: TSHA1Digest): RawUTF8;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// compute the SHA-1 digest from its hexadecimal representation
 // - returns true on success (i.e. Source has the expected size and characters)
 // - just a wrapper around SynCommons.HexToBin()
 function SHA1StringToDigest(const Source: RawUTF8; out Dest: TSHA1Digest): boolean;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// compute the hexadecimal representation of a SHA-256 digest
 function SHA256DigestToString(const D: TSHA256Digest): RawUTF8;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// compute the SHA-256 digest from its hexadecimal representation
 // - returns true on success (i.e. Source has the expected size and characters)
 // - just a wrapper around SynCommons.HexToBin()
 function SHA256StringToDigest(const Source: RawUTF8; out Dest: TSHA256Digest): boolean;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// compute the hexadecimal representation of a SHA-384 digest
 function SHA384DigestToString(const D: TSHA384Digest): RawUTF8;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// compute the hexadecimal representation of a SHA-512 digest
 function SHA512DigestToString(const D: TSHA512Digest): RawUTF8;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// compute the hexadecimal representation of a MD5 digest
 function MD5DigestToString(const D: TMD5Digest): RawUTF8;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// compute the MD5 digest from its hexadecimal representation
 // - returns true on success (i.e. Source has the expected size and characters)
@@ -2313,6 +2462,7 @@ type
     // - registered claims will be available from reg[], not in this field
     // - e.g. data.U['name']='John Doe' and data.B['admin']=true for
     // $ {"sub": "1234567890","name": "John Doe","admin": true}
+    // but data.U['sub'] if not defined, and reg[jrcSubject]='1234567890'
     data: TDocVariantData;
   end;
   /// pointer to a JWT decoded content, as processed by TJWTAbstract
@@ -2357,12 +2507,12 @@ type
       const Issuer, Subject, Audience: RawUTF8; NotBefore: TDateTime;
       ExpirationMinutes: cardinal): RawUTF8; virtual;
     procedure Parse(const Token: RawUTF8; var JWT: TJWTContent;
-      out payload64: RawUTF8; out signature: RawByteString); virtual;
+      out headpayload: RawUTF8; out signature: RawByteString); virtual;
     function CheckAgainstActualTimestamp(var JWT: TJWTContent): boolean;
     // abstract methods which should be overriden by inherited classes
-    function ComputeSignature(const payload64: RawUTF8): RawUTF8; virtual; abstract;
-    procedure CheckSignature(var JWT: TJWTContent; const payload64: RawUTF8;
-      const signature: RawByteString); virtual; abstract;
+    function ComputeSignature(const headpayload: RawUTF8): RawUTF8; virtual; abstract;
+    procedure CheckSignature(const headpayload: RawUTF8; const signature: RawByteString;
+      var JWT: TJWTContent); virtual; abstract;
   public
     /// initialize the JWT processing instance
     // - the supplied set of claims are expected to be defined in the JWT payload
@@ -2469,9 +2619,9 @@ type
   // communication is already secured by other means, and use JWT as cookies
   TJWTNone = class(TJWTAbstract)
   protected
-    function ComputeSignature(const payload64: RawUTF8): RawUTF8; override;
-    procedure CheckSignature(var JWT: TJWTContent; const payload64: RawUTF8;
-      const signature: RawByteString); override;
+    function ComputeSignature(const headpayload: RawUTF8): RawUTF8; override;
+    procedure CheckSignature(const headpayload: RawUTF8; const signature: RawByteString;
+      var JWT: TJWTContent); override;
   public
     /// initialize the JWT processing using the 'none' algorithm
     // - the supplied set of claims are expected to be defined in the JWT payload
@@ -2484,110 +2634,128 @@ type
       aIDObfuscationKey: RawUTF8=''); reintroduce;
   end;
 
-  /// matches TJWTHS256, TJWTHS385 and TJWTHS512 algoritms
-  TJWTHSAlgo = (hs256, hs384, hs512);
+  /// abstract parent of JSON Web Tokens using HMAC-SHA2 or SHA-3 algorithms
+  // - SHA-3 is not yet officially defined in @http://tools.ietf.org/html/rfc7518
+  // but could be used as a safer (and sometimes faster) alternative to HMAC-SHA2
+  // - digital signature will be processed by an internal TSynSigner instance
+  // - never use this abstract class, but any inherited class, or
+  // JWT_CLASS[].Create to instantiate a JWT process from a given algorithm
+  TJWTSynSignerAbstract = class(TJWTAbstract)
+  protected
+    fSignPrepared: TSynSigner;
+    function GetAlgo: TSignAlgo; virtual; abstract;
+    function ComputeSignature(const headpayload: RawUTF8): RawUTF8; override;
+    procedure CheckSignature(const headpayload: RawUTF8; const signature: RawByteString;
+      var JWT: TJWTContent); override;
+  public
+    /// initialize the JWT processing using SHA3 algorithm
+    // - the supplied set of claims are expected to be defined in the JWT payload
+    // - the supplied secret text will be used to compute the digital signature,
+    // directly if aSecretPBKDF2Rounds=0, or via PBKDF2 iterative key derivation
+    // if some number of rounds were specified
+    // - aAudience are the allowed values for the jrcAudience claim
+    // - aExpirationMinutes is the deprecation time for the jrcExpirationTime claim
+    // - aIDIdentifier and aIDObfuscationKey are passed to a
+    // TSynUniqueIdentifierGenerator instance used for jrcJwtID claim
+    // - optionally return the PBKDF2 derivated key for aSecretPBKDF2Rounds>0
+    constructor Create(const aSecret: RawUTF8; aSecretPBKDF2Rounds: integer;
+      aClaims: TJWTClaims; const aAudience: array of RawUTF8; aExpirationMinutes: integer=0;
+      aIDIdentifier: TSynUniqueIdentifierProcess=0; aIDObfuscationKey: RawUTF8='';
+      aPBKDF2Secret: PHash512Rec=nil); reintroduce;
+    /// finalize the instance
+    destructor Destroy; override;
+    /// the digital signature size, in byte
+    property SignatureSize: integer read fSignPrepared.fSignatureSize;
+    /// the TSynSigner raw algorithm used for digital signature
+    property SignatureAlgo: TSignAlgo read fSignPrepared.fAlgo;
+  end;
+  /// meta-class for TJWTSynSignerAbstract creations
+  TJWTSynSignerAbstractClass = class of TJWTSynSignerAbstract;
 
   /// implements JSON Web Tokens using 'HS256' (HMAC SHA-256) algorithm
   // - as defined in @http://tools.ietf.org/html/rfc7518 paragraph 3.2
   // - our HMAC SHA-256 implementation used is thread safe, and very fast
   // (x86: 3us, x64: 2.5us) so cache is not needed
-  TJWTHS256 = class(TJWTAbstract)
+  // - resulting signature size will be of 256 bits
+  TJWTHS256 = class(TJWTSynSignerAbstract)
   protected
-    fHmacPrepared: THMAC_SHA256;
-    function ComputeSignature(const payload64: RawUTF8): RawUTF8; override;
-    procedure CheckSignature(var JWT: TJWTContent; const payload64: RawUTF8;
-      const signature: RawByteString); override;
-  public
-    /// initialize the JWT processing using 'HS256' (HMAC SHA-256) algorithm
-    // - the supplied set of claims are expected to be defined in the JWT payload
-    // - the supplied secret text will be used to compute HMAC authentication,
-    // directly if aSecretPBKDF2Rounds=0, or via PBKDF2_HMAC_SHA256 if some
-    // number of rounds are specified
-    // - aAudience are the allowed values for the jrcAudience claim
-    // - aExpirationMinutes is the deprecation time for the jrcExpirationTime claim
-    // - aIDIdentifier and aIDObfuscationKey are passed to a
-    // TSynUniqueIdentifierGenerator instance used for jrcJwtID claim
-    constructor Create(const aSecret: RawUTF8; aSecretPBKDF2Rounds: integer;
-      aClaims: TJWTClaims; const aAudience: array of RawUTF8; aExpirationMinutes: integer=0;
-      aIDIdentifier: TSynUniqueIdentifierProcess=0; aIDObfuscationKey: RawUTF8=''); reintroduce;
-    /// finalize the instance
-    destructor Destroy; override;
-    /// low-level helper to re-compute the internal HMAC shared secret
-    // - by definition, expects aSecretPBKDF2Rounds>0 (otherwise aSecret is
-    // expected to be passed directly to the HMAC function)
-    // - may be used to provide any non Delphi client with the expected secret
-    // - caller should call FillZero(aHMACSecret) as soon as it consummed it
-    procedure ComputeHMACSecret(const aSecret: RawUTF8; aSecretPBKDF2Rounds: integer;
-      out aHMACSecret: THash256);
+    function GetAlgo: TSignAlgo; override;
   end;
 
   /// implements JSON Web Tokens using 'HS384' (HMAC SHA-384) algorithm
   // - as defined in @http://tools.ietf.org/html/rfc7518 paragraph 3.2
   // - our HMAC SHA-384 implementation used is thread safe, and very fast
   // even on x86 (if the CPU supports SSE3 opcodes)
-  TJWTHS384 = class(TJWTAbstract)
+  // - resulting signature size will be of 384 bits
+  TJWTHS384 = class(TJWTSynSignerAbstract)
   protected
-    fHmacPrepared: THMAC_SHA384;
-    function ComputeSignature(const payload64: RawUTF8): RawUTF8; override;
-    procedure CheckSignature(var JWT: TJWTContent; const payload64: RawUTF8;
-      const signature: RawByteString); override;
-  public
-    /// initialize the JWT processing using 'HS384' (HMAC SHA-384) algorithm
-    // - the supplied set of claims are expected to be defined in the JWT payload
-    // - the supplied secret text will be used to compute HMAC authentication,
-    // directly if aSecretPBKDF2Rounds=0, or via PBKDF2_HMAC_SHA384 if some
-    // number of rounds are specified
-    // - aAudience are the allowed values for the jrcAudience claim
-    // - aExpirationMinutes is the deprecation time for the jrcExpirationTime claim
-    // - aIDIdentifier and aIDObfuscationKey are passed to a
-    // TSynUniqueIdentifierGenerator instance used for jrcJwtID claim
-    constructor Create(const aSecret: RawUTF8; aSecretPBKDF2Rounds: integer;
-      aClaims: TJWTClaims; const aAudience: array of RawUTF8; aExpirationMinutes: integer=0;
-      aIDIdentifier: TSynUniqueIdentifierProcess=0; aIDObfuscationKey: RawUTF8=''); reintroduce;
-    /// finalize the instance
-    destructor Destroy; override;
-    /// low-level helper to re-compute the internal HMAC shared secret
-    // - by definition, expects aSecretPBKDF2Rounds>0 (otherwise aSecret is
-    // expected to be passed directly to the HMAC function)
-    // - may be used to provide any non Delphi client with the expected secret
-    // - caller should call FillZero(aHMACSecret) as soon as it consummed it
-    procedure ComputeHMACSecret(const aSecret: RawUTF8; aSecretPBKDF2Rounds: integer;
-      out aHMACSecret: THash384);
+    function GetAlgo: TSignAlgo; override;
   end;
 
   /// implements JSON Web Tokens using 'HS512' (HMAC SHA-512) algorithm
   // - as defined in @http://tools.ietf.org/html/rfc7518 paragraph 3.2
   // - our HMAC SHA-512 implementation used is thread safe, and very fast
   // even on x86 (if the CPU supports SSE3 opcodes)
-  TJWTHS512 = class(TJWTAbstract)
+  // - resulting signature size will be of 512 bits
+  TJWTHS512 = class(TJWTSynSignerAbstract)
   protected
-    fHmacPrepared: THMAC_SHA512;
-    function ComputeSignature(const payload64: RawUTF8): RawUTF8; override;
-    procedure CheckSignature(var JWT: TJWTContent; const payload64: RawUTF8;
-      const signature: RawByteString); override;
-  public
-    /// initialize the JWT processing using 'HS512' (HMAC SHA-512) algorithm
-    // - the supplied set of claims are expected to be defined in the JWT payload
-    // - the supplied secret text will be used to compute HMAC authentication,
-    // directly if aSecretPBKDF2Rounds=0, or via PBKDF2_HMAC_SHA512 if some
-    // number of rounds are specified
-    // - aAudience are the allowed values for the jrcAudience claim
-    // - aExpirationMinutes is the deprecation time for the jrcExpirationTime claim
-    // - aIDIdentifier and aIDObfuscationKey are passed to a
-    // TSynUniqueIdentifierGenerator instance used for jrcJwtID claim
-    constructor Create(const aSecret: RawUTF8; aSecretPBKDF2Rounds: integer;
-      aClaims: TJWTClaims; const aAudience: array of RawUTF8; aExpirationMinutes: integer=0;
-      aIDIdentifier: TSynUniqueIdentifierProcess=0; aIDObfuscationKey: RawUTF8=''); reintroduce;
-    /// finalize the instance
-    destructor Destroy; override;
-    /// low-level helper to re-compute the internal HMAC shared secret
-    // - by definition, expects aSecretPBKDF2Rounds>0 (otherwise aSecret is
-    // expected to be passed directly to the HMAC function)
-    // - may be used to provide any non Delphi client with the expected secret
-    // - caller should call FillZero(aHMACSecret) as soon as it consummed it
-    procedure ComputeHMACSecret(const aSecret: RawUTF8; aSecretPBKDF2Rounds: integer;
-      out aHMACSecret: THash512);
+    function GetAlgo: TSignAlgo; override;
   end;
+
+  /// experimental JSON Web Tokens using SHA3-224 algorithm
+  // - SHA-3 is not yet officially defined in @http://tools.ietf.org/html/rfc7518
+  // but could be used as a safer (and sometimes faster) alternative to HMAC-SHA2
+  // - resulting signature size will be of 224 bits
+  TJWTS3224 = class(TJWTSynSignerAbstract)
+  protected
+    function GetAlgo: TSignAlgo; override;
+  end;
+
+  /// experimental JSON Web Tokens using SHA3-256 algorithm
+  // - SHA-3 is not yet officially defined in @http://tools.ietf.org/html/rfc7518
+  // but could be used as a safer (and sometimes faster) alternative to HMAC-SHA2
+  // - resulting signature size will be of 256 bits
+  TJWTS3256 = class(TJWTSynSignerAbstract)
+  protected
+    function GetAlgo: TSignAlgo; override;
+  end;
+
+  /// experimental JSON Web Tokens using SHA3-384 algorithm
+  // - SHA-3 is not yet officially defined in @http://tools.ietf.org/html/rfc7518
+  // but could be used as a safer (and sometimes faster) alternative to HMAC-SHA2
+  // - resulting signature size will be of 384 bits
+  TJWTS3384 = class(TJWTSynSignerAbstract)
+  protected
+    function GetAlgo: TSignAlgo; override;
+  end;
+
+  /// experimental JSON Web Tokens using SHA3-512 algorithm
+  // - SHA-3 is not yet officially defined in @http://tools.ietf.org/html/rfc7518
+  // but could be used as a safer (and sometimes faster) alternative to HMAC-SHA2
+  // - resulting signature size will be of 512 bits
+  TJWTS3512 = class(TJWTSynSignerAbstract)
+  protected
+    function GetAlgo: TSignAlgo; override;
+  end;
+
+  /// experimental JSON Web Tokens using SHA3-SHAKE128 algorithm
+  // - SHA-3 is not yet officially defined in @http://tools.ietf.org/html/rfc7518
+  // but could be used as a safer (and sometimes faster) alternative to HMAC-SHA2
+  // - resulting signature size will be of 256 bits
+  TJWTS3S128 = class(TJWTSynSignerAbstract)
+  protected
+    function GetAlgo: TSignAlgo; override;
+  end;
+
+  /// experimental JSON Web Tokens using SHA3-SHAKE256 algorithm
+  // - SHA-3 is not yet officially defined in @http://tools.ietf.org/html/rfc7518
+  // but could be used as a safer (and sometimes faster) alternative to HMAC-SHA2
+  // - resulting signature size will be of 512 bits
+  TJWTS3S256 = class(TJWTSynSignerAbstract)
+  protected
+    function GetAlgo: TSignAlgo; override;
+  end;
+
 
 const
   /// the text field names of the registerd claims, as defined by RFC 7519
@@ -2596,15 +2764,21 @@ const
   JWT_CLAIMS_TEXT: array[TJWTClaim] of RawUTF8 = (
     'iss','sub','aud','exp','nbf','iat','jti');
 
-  /// able to instantiate any of the TJWAbstract instance expected
-  JWT_HS_TEXT: array[TJWTHSAlgo] of RawUTF8 = (
-    'HS256', 'HS384', 'HS512');
+  /// how TJWTSynSignerAbstract algorithms are identified in the JWT 
+  // - SHA-1 will fallback to HS256 (since there will never be SHA-1 support)
+  // - SHA-3 is not yet officially defined in @http://tools.ietf.org/html/rfc7518
+  JWT_TEXT: array[TSignAlgo] of RawUTF8 = (
+    'HS256','HS256','HS384','HS512','S3224','S3256','S3384','S3512','S3S128','S3S256');
 
-/// will create an instance of TJWTHS256/TJWTHS384/TJWTHS512
-function JWTHS(algo: TJWTHSAlgo; const aSecret: RawUTF8; aSecretPBKDF2Rounds: integer;
-  aClaims: TJWTClaims; const aAudience: array of RawUTF8; aExpirationMinutes: integer=0;
-  aIDIdentifier: TSynUniqueIdentifierProcess=0; aIDObfuscationKey: RawUTF8='';
-  aHmacSecretHexa: PRawUTF8=nil): TJWTAbstract;
+  /// able to instantiate any of the TJWTSynSignerAbstract instance expected
+  // - SHA-1 will fallback to TJWTHS256 (since there will never be SHA-1 support)
+  // - SHA-3 is not yet officially defined in @http://tools.ietf.org/html/rfc7518
+  // - typical use is the following:
+  // ! result := JWT_CLASS[algo].Create(master, round, claims, [], expirationMinutes);
+  JWT_CLASS: array[TSignAlgo] of TJWTSynSignerAbstractClass = (
+    TJWTHS256, TJWTHS256, TJWTHS384, TJWTHS512,
+    TJWTS3224, TJWTS3256, TJWTS3384, TJWTS3512, TJWTS3S128, TJWTS3S256);
+
 
 function ToText(res: TJWTResult): PShortString; overload;
 function ToCaption(res: TJWTResult): string; overload;
@@ -2816,7 +2990,7 @@ type
     ViaCtx: pointer; // padlock_*() context
     {$endif}
     AesNi: procedure{$ifdef CPU64}(const ctxt, source, dest){$endif};
-      // set if the CPU supports AES-NI new asm instructions
+      // AesNi set if the CPU supports AES-NI new asm instructions
     Initialized: boolean;
     Rounds: byte;    // Number of rounds
     KeyBits: byte;   // Number of bits in key
@@ -4362,7 +4536,6 @@ begin
     end;
   end;
   inc(PtrUInt(pK), (ctx.rounds shl 4));
-
   TWA4(BO)[0] := ((SBox[t0        and $ff])        xor
                   (SBox[t1 shr  8 and $ff]) shl  8 xor
                   (SBox[t2 shr 16 and $ff]) shl 16 xor
@@ -5642,9 +5815,9 @@ procedure TAES.Done;
 var ctx: TAESContext absolute Context;
 begin
   {$ifdef USEPADLOCK}
-  if initialized and padlock_available and (ctx.ViaCtx<>nil) then begin
+  if Initialized and padlock_available and (ctx.ViaCtx<>nil) then begin
     padlock_aes_close(ctx.ViaCtx);
-    ctx.initialized := false;
+    ctx.Initialized := false;
     ctx.ViaCtx := nil;
   end;
   {$endif USEPADLOCK}
@@ -6854,11 +7027,9 @@ begin
     end; // if K256Aligned[] is not properly aligned -> fallback to pascal
   end;
   {$endif CPUX64}
-
-  // Calculate "expanded message blocks"
+  // calculate "expanded message blocks"
   Sha256ExpandMessageBlocks(@W,Data);
-
-  // Assign old working hash to local variables A..H
+  // assign old working hash to local variables A..H
   H.A := Hash.A;
   H.B := Hash.B;
   H.C := Hash.C;
@@ -6867,11 +7038,10 @@ begin
   H.F := Hash.F;
   H.G := Hash.G;
   H.H := Hash.H;
-
 {$ifdef PUREPASCAL}
   // SHA-256 compression function
   for i := 0 to high(W) do begin
-    {$ifdef FPC} // uses faster built-in right rotate intrinsic
+    {$ifdef FPC} // uses built-in right rotate intrinsic
     t1 := H.H+(RorDWord(H.E,6) xor RorDWord(H.E,11) xor RorDWord(H.E,25))+
       ((H.E and H.F)xor(not H.E and H.G))+K256[i]+W[i];
     t2 := (RorDWord(H.A,2) xor RorDWord(H.A,13) xor RorDWord(H.A,22))+
@@ -6951,8 +7121,7 @@ begin
     pop  ebx
   end;
 {$endif PUREPASCAL}
-
-  // Calculate new working hash
+  // calculate new working hash
   inc(Hash.A,H.A);
   inc(Hash.B,H.B);
   inc(Hash.C,H.C);
@@ -6985,6 +7154,11 @@ begin
   // clear Data and internally stored Digest
   if not NoInit then
     Init;
+end;
+
+function TSHA256.Final(NoInit: boolean): TSHA256Digest;
+begin
+  Final(result,NoInit);
 end;
 
 procedure TSHA256.Full(Buffer: pointer; Len: integer; out Digest: TSHA256Digest);
@@ -7190,7 +7364,7 @@ procedure sha512_compress(state: PQWord; block: PByteArray); cdecl; external;
   {$L sha512-x64sse4.obj}
 {$endif}
 
-procedure sha512_sse4(data, hash: pointer; blocks: Int64); {$ifdef FPC}{$ifndef MSWINDOWS}cdecl;{$endif}{$endif} external;
+procedure sha512_sse4(data, hash: pointer; blocks: Int64); {$ifdef FPC}cdecl;{$endif} external;
 {$endif SHA512_X64}
 
 
@@ -7226,6 +7400,11 @@ begin
   bswap64array(@Hash,@Digest,6);
   if not NoInit then
     Init;
+end;
+
+function TSHA384.Final(NoInit: boolean): TSHA384Digest;
+begin
+  Final(result,NoInit);
 end;
 
 procedure TSHA384.Full(Buffer: pointer; Len: integer; out Digest: TSHA384Digest);
@@ -7328,6 +7507,11 @@ begin
   bswap64array(@Hash,@Digest,8);
   if not NoInit then
     Init;
+end;
+
+function TSHA512.Final(NoInit: boolean): TSHA512Digest;
+begin
+  Final(result,NoInit);
 end;
 
 procedure TSHA512.Full(Buffer: pointer; Len: integer; out Digest: TSHA512Digest);
@@ -8437,6 +8621,16 @@ begin
     FillCharFast(Context, sizeof(Context), 0);
 end;
 
+function TSHA3.Final256(NoInit: boolean): THash256;
+begin
+  Final(result,NoInit);
+end;
+
+function TSHA3.Final512(NoInit: boolean): THash512;
+begin
+  Final(result,NoInit);
+end;
+
 procedure TSHA3.Full(Buffer: pointer; Len: integer; out Digest: THash256);
 begin
   Full(SHA3_256, Buffer, Len, @Digest, 256);
@@ -8531,6 +8725,255 @@ var
   instance: TSHA3;
 begin
   result := instance.FullStr(algo, Buffer, Len, DigestBits);
+end;
+
+procedure PBKDF2_SHA3(algo: TSHA3Algo; const password,salt: RawByteString;
+  count: Integer; result: PByte; resultbytes: Integer);
+var i: integer;
+    tmp: RawByteString;
+    mac: TSHA3;
+    first: TSHA3;
+begin
+  if resultbytes<=0 then
+    resultbytes := SHA3_DEF_LEN[algo] shr 3;
+  SetLength(tmp,resultbytes);
+  first.Init(algo);
+  first.Update(password);
+  mac := first;
+  mac.Update(salt);
+  mac.Final(pointer(tmp),resultbytes shl 3,true);
+  MoveFast(pointer(tmp)^,result^,resultbytes);
+  for i := 2 to count do begin
+    mac := first;
+    mac.Update(pointer(tmp),resultbytes);
+    mac.Final(pointer(tmp),resultbytes shl 3,true);
+    XorMemory(pointer(result),pointer(tmp),resultbytes);
+  end;
+  FillcharFast(mac,sizeof(mac),0);
+  FillcharFast(first,sizeof(first),0);
+  FillZero(tmp);
+end;
+
+procedure PBKDF2_SHA3_Crypt(algo: TSHA3Algo; const password,salt: RawByteString;
+  count: Integer; var data: RawByteString);
+var key: RawByteString;
+    len: integer;
+begin
+  len := length(data);
+  SetLength(key,len);
+  PBKDF2_SHA3(algo,password,salt,count,pointer(key),len);
+  XorMemory(pointer(data),pointer(key),len);
+  FillZero(key);
+end;
+
+
+{ TSynHasher }
+
+function TSynHasher.Init(aAlgo: THashAlgo): boolean;
+begin
+  fAlgo := aAlgo;
+  result := true;
+  case aAlgo of
+  hfMD5:      PMD5(@ctxt)^.Init;
+  hfSHA1:     PSHA1(@ctxt)^.Init;
+  hfSHA256:   PSHA256(@ctxt)^.Init;
+  hfSHA384:   PSHA384(@ctxt)^.Init;
+  hfSHA512:   PSHA512(@ctxt)^.Init;
+  hfSHA3_256: PSHA3(@ctxt)^.Init(SHA3_256);
+  hfSHA3_512: PSHA3(@ctxt)^.Init(SHA3_512);
+  else result := false;
+  end;
+end;
+
+procedure TSynHasher.Update(aBuffer: Pointer; aLen: integer);
+begin
+  case fAlgo of
+  hfMD5:      PMD5(@ctxt)^.Update(aBuffer^,aLen);
+  hfSHA1:     PSHA1(@ctxt)^.Update(aBuffer,aLen);
+  hfSHA256:   PSHA256(@ctxt)^.Update(aBuffer,aLen);
+  hfSHA384:   PSHA384(@ctxt)^.Update(aBuffer,aLen);
+  hfSHA512:   PSHA512(@ctxt)^.Update(aBuffer,aLen);
+  hfSHA3_256: PSHA3(@ctxt)^.Update(aBuffer,aLen);
+  hfSHA3_512: PSHA3(@ctxt)^.Update(aBuffer,aLen);
+  end;
+end;
+
+procedure TSynHasher.Update(const aBuffer: RawByteString);
+begin
+  Update(pointer(aBuffer),length(aBuffer));
+end;
+
+function TSynHasher.Final: RawUTF8;
+begin
+  case fAlgo of
+  hfMD5:      result := MD5DigestToString(PMD5(@ctxt)^.Final);
+  hfSHA1:     result := SHA1DigestToString(PSHA1(@ctxt)^.Final);
+  hfSHA256:   result := SHA256DigestToString(PSHA256(@ctxt)^.Final);
+  hfSHA384:   result := SHA384DigestToString(PSHA384(@ctxt)^.Final);
+  hfSHA512:   result := SHA512DigestToString(PSHA512(@ctxt)^.Final);
+  hfSHA3_256: result := SHA256DigestToString(PSHA3(@ctxt)^.Final256);
+  hfSHA3_512: result := SHA512DigestToString(PSHA3(@ctxt)^.Final512);
+  end;
+end;
+
+function TSynHasher.Full(aAlgo: THashAlgo; aBuffer: Pointer; aLen: integer): RawUTF8;
+begin
+  Init(aAlgo);
+  Update(aBuffer,aLen);
+  result := Final;
+end;
+
+function HashFull(aAlgo: THashAlgo; aBuffer: Pointer; aLen: integer): RawUTF8;
+var hasher: TSynHasher;
+begin
+  result := hasher.Full(aAlgo,aBuffer,aLen);
+end;
+
+function HashFile(const aFileName: TFileName; aAlgo: THashAlgo): RawUTF8;
+var
+  hasher: TSynHasher;
+  temp: RawByteString;
+  F: THandle;
+  size: TQWordRec;
+  read: cardinal;
+begin
+  result := '';
+  if (aFileName='') or not hasher.Init(aAlgo) then
+    exit;
+  F := FileOpenSequentialRead(aFileName);
+  if PtrInt(F)>=0 then
+    try
+      size.L := GetFileSize(F,@size.H);
+      SetLength(temp,1 shl 20);
+      while size.V>0 do begin
+        read := FileRead(F,pointer(temp)^,1 shl 20);
+        if read<=0 then
+          exit;
+        hasher.Update(pointer(temp),read);
+        dec(size.V,read);
+      end;
+      result := hasher.Final;
+    finally
+      FileClose(F);
+    end;
+end;
+
+{ TSynSigner }
+
+procedure TSynSigner.Init(aAlgo: TSignAlgo; aSecret: pointer; aSecretLen: integer);
+const
+  SIGN_SIZE: array[TSignAlgo] of byte = (
+    20, 32, 48, 64, 28, 32, 48, 64, 32, 64);
+  SHA3_ALGO: array[saSha3224..saSha3S256] of TSHA3Algo = (
+    SHA3_224, SHA3_256, SHA3_384, SHA3_512, SHAKE_128, SHAKE_256);
+begin
+  fAlgo := aAlgo;
+  fSignatureSize := SIGN_SIZE[fAlgo];
+  case fAlgo of
+  saSha1:   PHMAC_SHA1(@ctxt)^.Init(aSecret,aSecretLen);
+  saSha256: PHMAC_SHA256(@ctxt)^.Init(aSecret,aSecretLen);
+  saSha384: PHMAC_SHA384(@ctxt)^.Init(aSecret,aSecretLen);
+  saSha512: PHMAC_SHA512(@ctxt)^.Init(aSecret,aSecretLen);
+  saSha3224..saSha3S256: begin
+    PSHA3(@ctxt)^.Init(SHA3_ALGO[fAlgo]);
+    PSHA3(@ctxt)^.Update(aSecret,aSecretLen); // HMAC pattern included in SHA-3
+  end;
+  end;
+end;
+
+procedure TSynSigner.Init(aAlgo: TSignAlgo; const aSecret: RawUTF8);
+begin
+  Init(aAlgo,pointer(aSecret),length(aSecret));
+end;
+
+procedure TSynSigner.Init(aAlgo: TSignAlgo; const aSecret, aSalt: RawUTF8;
+  aSecretPBKDF2Rounds: integer; aPBKDF2Secret: PHash512Rec);
+var temp: THash512Rec;
+begin
+  if aSecretPBKDF2Rounds>1 then begin
+    PBKDF2(aAlgo,aSecret,aSalt,aSecretPBKDF2Rounds,temp);
+    Init(aAlgo,@temp,fSignatureSize);
+    if aPBKDF2Secret<>nil then
+      aPBKDF2Secret^ := temp;
+    FillZero(temp.b);
+  end else
+    Init(aAlgo,aSecret);
+end;
+
+procedure TSynSigner.Update(const aBuffer: RawByteString);
+begin
+  Update(pointer(aBuffer),length(aBuffer));
+end;
+
+procedure TSynSigner.Update(aBuffer: pointer; aLen: integer);
+begin
+  case fAlgo of
+  saSha1:   PHMAC_SHA1(@ctxt)^.Update(aBuffer,aLen);
+  saSha256: PHMAC_SHA256(@ctxt)^.Update(aBuffer,aLen);
+  saSha384: PHMAC_SHA384(@ctxt)^.Update(aBuffer,aLen);
+  saSha512: PHMAC_SHA512(@ctxt)^.Update(aBuffer,aLen);
+  saSha3224..saSha3S256: PSHA3(@ctxt)^.Update(aBuffer,aLen);
+  end;
+end;
+
+procedure TSynSigner.Final(out aSignature: THash512Rec; aNoInit: boolean);
+begin
+  case fAlgo of
+  saSha1:   PHMAC_SHA1(@ctxt)^.Done(PSHA1Digest(@aSignature)^,aNoInit);
+  saSha256: PHMAC_SHA256(@ctxt)^.Done(aSignature.Lo,aNoInit);
+  saSha384: PHMAC_SHA384(@ctxt)^.Done(aSignature.b3,aNoInit);
+  saSha512: PHMAC_SHA512(@ctxt)^.Done(aSignature.b,aNoInit);
+  saSha3224..saSha3S256: PSHA3(@ctxt)^.Final(@aSignature,fSignatureSize shl 3,aNoInit);
+  end;
+end;
+
+function TSynSigner.Final: RawUTF8;
+var sig: THash512Rec;
+begin
+  Final(sig);
+  result := BinToHexLower(@sig,fSignatureSize);
+end;
+
+function TSynSigner.Full(aAlgo: TSignAlgo; const aSecret: RawUTF8;
+  aBuffer: Pointer; aLen: integer): RawUTF8;
+begin
+  Init(aAlgo,aSecret);
+  Update(aBuffer,aLen);
+  result := Final;
+end;
+
+function TSynSigner.Full(aAlgo: TSignAlgo; const aSecret, aSalt: RawUTF8;
+  aSecretPBKDF2Rounds: integer; aBuffer: Pointer; aLen: integer): RawUTF8;
+begin
+  Init(aAlgo,aSecret,aSalt,aSecretPBKDF2Rounds);
+  Update(aBuffer,aLen);
+  result := Final;
+end;
+
+procedure TSynSigner.PBKDF2(aAlgo: TSignAlgo; const aSecret, aSalt: RawUTF8;
+  aSecretPBKDF2Rounds: integer; out aDerivatedKey: THash512Rec);
+var iter: TSynSigner;
+    temp: THash512Rec;
+    i: integer;
+begin
+  Init(aAlgo,aSecret);
+  iter := self;
+  iter.Update(aSalt);
+  if fAlgo<saSha3224 then
+    iter.Update(#0#0#0#1); // padding and XoF mode already part of SHA-3 process
+  iter.Final(aDerivatedKey,true);
+  if aSecretPBKDF2Rounds<2 then
+    exit;
+  temp := aDerivatedKey;
+  for i := 2 to aSecretPBKDF2Rounds do begin
+    iter := self;
+    iter.Update(@temp,fSignatureSize);
+    iter.Final(temp,true);
+    XorMemory(@aDerivatedKey,@temp,fSignatureSize);
+  end;
+  FillZero(temp.b);
+  FillCharFast(iter.ctxt,SizeOf(iter.ctxt),0);
+  FillCharFast(ctxt,SizeOf(ctxt),0);
 end;
 
 
@@ -9983,7 +10426,7 @@ end;
 
 procedure TMD5.Update(const Buffer: RawByteString);
 begin
-  Update(pointer(Buffer),length(Buffer));
+  Update(pointer(Buffer)^,length(Buffer));
 end;
 
 function MD5Buf(const Buffer; Len: Cardinal): TMD5Digest;
@@ -10009,23 +10452,9 @@ begin
   SynCommons.BinToHex(@block,pointer(result),16);
 end;
 
-procedure HexLowerCase(digest: PByteArray; bytes: integer; var result: RawUTF8);
-const LOWHEX: array[0..15] of AnsiChar = '0123456789abcdef';
-var P: PAnsiChar;
-    i: Integer;
-begin
-  SetString(result,nil,bytes*2);
-  P := pointer(result);
-  for i := 0 to bytes-1 do begin
-    P[0] := LOWHEX[digest[i] shr 4];
-    P[1] := LOWHEX[digest[i] and 15];
-    inc(P,2);
-  end;
-end;
-
 function MD5DigestToString(const D: TMD5Digest): RawUTF8;
 begin
-  HexLowerCase(@D,sizeof(D),result);
+  BinToHexLower(@D,sizeof(D),result);
 end;
 
 function MD5StringToDigest(const Source: RawUTF8; out Dest: TMD5Digest): boolean;
@@ -10035,7 +10464,7 @@ end;
 
 function SHA1DigestToString(const D: TSHA1Digest): RawUTF8;
 begin
-  HexLowerCase(@D,sizeof(D),result);
+  BinToHexLower(@D,sizeof(D),result);
 end;
 
 function SHA1StringToDigest(const Source: RawUTF8; out Dest: TSHA1Digest): boolean;
@@ -10045,7 +10474,7 @@ end;
 
 function SHA256DigestToString(const D: TSHA256Digest): RawUTF8;
 begin
-  HexLowerCase(@D,sizeof(D),result);
+  BinToHexLower(@D,sizeof(D),result);
 end;
 
 function SHA256StringToDigest(const Source: RawUTF8; out Dest: TSHA256Digest): boolean;
@@ -10055,12 +10484,12 @@ end;
 
 function SHA512DigestToString(const D: TSHA512Digest): RawUTF8;
 begin
-  HexLowerCase(@D, sizeof(D), result);
+  BinToHexLower(@D, sizeof(D), result);
 end;
 
 function SHA384DigestToString(const D: TSHA384Digest): RawUTF8;
 begin
-  HexLowerCase(@D, sizeof(D), result);
+  BinToHexLower(@D, sizeof(D), result);
 end;
 
 function htdigest(const user, realm, pass: RawByteString): RawUTF8;
@@ -10079,7 +10508,8 @@ begin
     'agent007:download area:8364d0044ef57b3defcfa141e8f77b65') and
     (MD5('')='d41d8cd98f00b204e9800998ecf8427e') and
     (MD5('a')='0cc175b9c0f1b6a831c399e269772661') and
-    (MD5('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789')='d174ab98d277d9f5a5611c2c9f419d9f');
+    (MD5('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789')=
+     'd174ab98d277d9f5a5611c2c9f419d9f');
 end;
 
 
@@ -10214,6 +10644,11 @@ begin
   // Clear Data
   if not NoInit then
     Init;
+end;
+
+function TSHA1.Final(NoInit: boolean): TSHA1Digest;
+begin
+  Final(result,NoInit);
 end;
 
 procedure TSHA1.Full(Buffer: pointer; Len: integer; out Digest: TSHA1Digest);
@@ -10758,17 +11193,14 @@ end;
 
 procedure TAESAbstractSyn.TrailerBytes;
 begin
-  fCount := fCount and AESBlockMod;
-  if fCount<>0 then begin
-    if fAESInit<>initEncrypt then
-      EncryptInit;
-    {$ifdef USEAESNI64}
-    if Assigned(TAESContext(AES.Context).AesNi) then
-      TAESContext(AES.Context).AesNi(AES.Context,fCV,fCV) else
-    {$endif USEAESNI64}
-      AES.Encrypt(fCV,fCV);
-    XorMemory(pointer(fOut),pointer(fIn),@fCV,fCount);
-  end;
+  if fAESInit<>initEncrypt then
+    EncryptInit;
+  {$ifdef USEAESNI64}
+  if Assigned(TAESContext(AES.Context).AesNi) then
+    TAESContext(AES.Context).AesNi(AES.Context,fCV,fCV) else
+  {$endif USEAESNI64}
+    AES.Encrypt(fCV,fCV);
+  XorMemory(pointer(fOut),pointer(fIn),@fCV,fCount);
 end;
 
 
@@ -10785,7 +11217,9 @@ begin
     inc(fIn);
     inc(fOut);
   end;
-  TrailerBytes;
+  fCount := fCount and AESBlockMod;
+  if fCount<>0 then
+    TrailerBytes;
 end;
 
 procedure TAESECB.Encrypt(BufIn, BufOut: pointer; Count: cardinal);
@@ -10803,7 +11237,9 @@ begin
     inc(fIn);
     inc(fOut);
   end;
-  TrailerBytes;
+  fCount := fCount and AESBlockMod;
+  if fCount<>0 then
+    TrailerBytes;
 end;
 
 
@@ -10826,7 +11262,9 @@ begin
       inc(fOut);
     end;
   end;
-  TrailerBytes;
+  fCount := fCount and AESBlockMod;
+  if fCount<>0 then
+    TrailerBytes;
 end;
 
 procedure TAESCBC.Encrypt(BufIn, BufOut: pointer; Count: cardinal);
@@ -10846,7 +11284,9 @@ begin
     inc(fIn);
     inc(fOut);
   end;
-  TrailerBytes;
+  fCount := fCount and AESBlockMod;
+  if fCount<>0 then
+    TrailerBytes;
 end;
 
 { TAESAbstractEncryptOnly }
@@ -10929,7 +11369,9 @@ begin
       inc(fIn);
       inc(fOut);
     end;
-    TrailerBytes;
+    fCount := fCount and AESBlockMod;
+    if fCount<>0 then
+      TrailerBytes;
   end;
 end;
 
@@ -10978,7 +11420,9 @@ begin
       inc(fIn);
       inc(fOut);
     end;
-    TrailerBytes;
+    fCount := fCount and AESBlockMod;
+    if fCount<>0 then
+      TrailerBytes;
   end;
 end;
 
@@ -11085,9 +11529,12 @@ begin
       inc(fIn);
       inc(fOut);
     end;
-    TrailerBytes;
-    with fMAC do // includes trailing bytes to the plain crc
-      PCardinal(@plain)^ := crc32c(PCardinal(@plain)^,pointer(fOut),fCount);
+    fCount := fCount and AESBlockMod;
+    if fCount<>0 then begin
+      TrailerBytes;
+      with fMAC do // includes trailing bytes to the plain crc
+        PCardinal(@plain)^ := crc32c(PCardinal(@plain)^,pointer(fOut),fCount);
+    end;
   end;
 end;
 
@@ -11141,9 +11588,12 @@ begin
       inc(fIn);
       inc(fOut);
     end;
-    TrailerBytes;
-    with fMAC do // includes trailing bytes to the plain crc
-      PCardinal(@plain)^ := crc32c(PCardinal(@plain)^,pointer(fIn),fCount);
+    fCount := fCount and AESBlockMod;
+    if fCount<>0 then begin
+      TrailerBytes;
+      with fMAC do // includes trailing bytes to the plain crc
+        PCardinal(@plain)^ := crc32c(PCardinal(@plain)^,pointer(fIn),fCount);
+    end;
   end;
 end;
 
@@ -11199,9 +11649,12 @@ begin
       inc(fIn);
       inc(fOut);
     end;
-    TrailerBytes;
-    with fMAC do // includes trailing bytes to the plain crc
-      PCardinal(@plain)^ := crc32c(PCardinal(@plain)^,pointer(fOut),fCount);
+    fCount := fCount and AESBlockMod;
+    if fCount<>0 then begin
+      TrailerBytes;
+      with fMAC do // includes trailing bytes to the plain crc
+        PCardinal(@plain)^ := crc32c(PCardinal(@plain)^,pointer(fOut),fCount);
+    end;
   end;
 end;
 
@@ -11254,14 +11707,68 @@ begin
       inc(fIn);
       inc(fOut);
     end;
-    TrailerBytes;
-    with fMAC do // includes trailing bytes to the plain crc
-      PCardinal(@plain)^ := crc32c(PCardinal(@plain)^,pointer(fIn),fCount);
+    fCount := fCount and AESBlockMod;
+    if fCount<>0 then begin
+      TrailerBytes;
+      with fMAC do // includes trailing bytes to the plain crc
+        PCardinal(@plain)^ := crc32c(PCardinal(@plain)^,pointer(fIn),fCount);
+    end;
   end;
 end;
 
 
 { TAESOFB }
+
+{$ifdef USEAESNI64}
+procedure AesNiEncryptOFB_128(self: TAESOFB; source, dest: pointer; blockcount: PtrUInt);
+{$ifdef FPC}nostackframe; assembler;
+asm
+{$else}
+asm // rcx=TAESOFB,rdx=source,r8=dest,r9=blockcount Linux:rdi,rsi,rdx,rcx
+  .noframe
+{$endif}
+    {$ifndef win64}
+    mov    r9,rcx
+    mov    r8,rdx
+    mov    rdx,rsi
+    mov    rcx,rdi
+    {$endif}
+    test   r9,r9
+    jz     @z
+    movdqu xmm7,dqword ptr [rcx].TAESOFB.fIV  // xmm7 = fCV
+    lea    rcx,[rcx].TAESOFB.AES
+    movdqu xmm0,[rcx+16*0]
+    movdqu xmm1,[rcx+16*1]
+    movdqu xmm2,[rcx+16*2]
+    movdqu xmm3,[rcx+16*3]
+    movdqu xmm4,[rcx+16*4]
+    movdqu xmm5,[rcx+16*5]
+    movdqu xmm6,[rcx+16*6]
+    movdqu xmm8,[rcx+16*7]
+    movdqu xmm9,[rcx+16*8]
+    movdqu xmm10,[rcx+16*9]
+    movdqu xmm11,[rcx+16*10]
+@s: movdqu xmm15,dqword ptr [rdx]
+    pxor xmm7,xmm0
+    aesenc xmm7,xmm1
+    aesenc xmm7,xmm2
+    aesenc xmm7,xmm3
+    aesenc xmm7,xmm4
+    aesenc xmm7,xmm5
+    aesenc xmm7,xmm6
+    aesenc xmm7,xmm8
+    aesenc xmm7,xmm9
+    aesenc xmm7,xmm10
+    aesenclast xmm7,xmm11         // AES.Encrypt(fCV,fCV)
+    pxor   xmm15,xmm7
+    movdqu dqword ptr [r8],xmm15  // fOut := fIn xor fCV
+    add    rdx,16
+    add    r8,16
+    dec    r9
+    jnz    @s
+@z:
+end;
+{$endif USEAESNI64}
 
 procedure TAESOFB.Decrypt(BufIn, BufOut: pointer; Count: cardinal);
 begin
@@ -11271,6 +11778,11 @@ end;
 procedure TAESOFB.Encrypt(BufIn, BufOut: pointer; Count: cardinal);
 var i: integer;
 begin
+  {$ifdef USEAESNI64}
+  with TAESContext(AES.Context) do
+  if (Count and AESBlockMod=0) and Assigned(AesNi) and (KeyBits=128) then
+    AesNiEncryptOFB_128(self,BufIn,BufOut,Count shr 4) else
+  {$endif USEAESNI64}
   {$ifdef USEAESNI32}
   if Assigned(TAESContext(AES.Context).AesNi) then
   asm
@@ -11280,8 +11792,8 @@ begin
     mov    ecx,Count
     mov    esi,BufIn
     mov    edi,BufOut
-    movdqu xmm7,dqword ptr [eax].TAESCFB.fIV  // xmm7 = fCV
-    lea    eax,[eax].TAESCFB.AES
+    movdqu xmm7,dqword ptr [eax].TAESOFB.fIV  // xmm7 = fCV
+    lea    eax,[eax].TAESOFB.AES
     push   ecx
     shr    ecx,4
     jz     @z
@@ -11312,7 +11824,9 @@ begin
       inc(fIn);
       inc(fOut);
     end;
-    TrailerBytes;
+    fCount := fCount and AESBlockMod;
+    if fCount<>0 then 
+      TrailerBytes;
   end;
 end;
 
@@ -11851,22 +12365,25 @@ begin
 end;
 
 function TAESPRNG.RandomPassword(Len: integer): RawUTF8;
-const CHARS: array[0..137] of AnsiChar =
+const CHARS: array[0..127] of AnsiChar =
   'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'+
-  'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789$.:()?%!-+*/@#';
-var i,j: integer;
+  ':bcd.fgh(jklmn)pqrst?vwxyz+BCD%FGH!JKLMN/PQRST@VWX#Z$.:()?%!-+*/@#';
+var i: integer;
     haspunct: boolean;
+    P: PAnsiChar;
 begin
   repeat
     result := FillRandom(Len);
     haspunct := false;
+    P := pointer(result);
     for i := 1 to Len do begin
-      j := ord(result[i]) mod sizeof(CHARS);
-      if j>=124 then
+      P^ := CHARS[ord(P^) mod sizeof(CHARS)];
+      if not haspunct and
+         not (ord(P^) in [ord('A')..ord('Z'),ord('a')..ord('z'),ord('0')..ord('9')]) then
         haspunct := true;
-      result[i] := CHARS[j];
+      inc(P);
     end;
-  until (Len<=2) or (haspunct and (LowerCase(result)<>result));
+  until (Len<=4) or (haspunct and (LowerCase(result)<>result));
 end;
 
 procedure SetMainAESPRNG;
@@ -11979,6 +12496,11 @@ begin
   Main.FillRandom(Block);
 end;
 
+class procedure TAESPRNG.Fill(out Block: THash256);
+begin
+  Main.FillRandom(Block);
+end;
+
 class function TAESPRNG.Fill(Len: integer): RawByteString;
 begin
   result := Main.FillRandom(Len);
@@ -12016,52 +12538,114 @@ end;
 
 procedure TRC4.Init(const aKey; aKeyLen: integer);
 var i,k: integer;
-    j,tmp: byte;
+    j,tmp: PtrInt;
 begin
   if aKeyLen<=0 then
     raise ESynCrypto.CreateUTF8('TRC4.Init(invalid aKeyLen=%)',[aKeyLen]);
   dec(aKeyLen);
-  for i := 0 to high(key) do
-    key[i] := i;
+  for i := 0 to high(state) do
+    state[i] := i;
   j := 0;
   k := 0;
-  for i := 0 to high(key) do begin
-    inc(j,key[i]+TByteArray(aKey)[k]);
-    tmp := key[i];
-    key[i] := key[j];
-    key[j] := tmp;
+  for i := 0 to high(state) do begin
+    j := (j+state[i]+TByteArray(aKey)[k]) and $ff;
+    tmp := state[i];
+    state[i] := state[j];
+    state[j] := tmp;
     if k>=aKeyLen then // avoid slow mod operation within loop
       k := 0 else
       inc(k);
   end;
+  currI := 0;
+  currJ := 0;
+end;
+
+procedure TRC4.InitSHA3(const aKey; aKeyLen: integer);
+var sha: TSHA3;
+    dig: array[byte] of byte; // max RC4 state size is 256 bytes
+begin
+  sha.Full(SHAKE_128,@aKey,aKeyLen,@dig,SizeOf(dig)shl 3); // XOF mode
+  Init(dig,SizeOf(dig));
+  FillCharFast(dig,SizeOf(dig),0);
+  Drop(3072);
+end;
+
+procedure TRC4.EncryptBuffer(BufIn, BufOut: PByte; Count: cardinal);
+var i,j,ki,kj: PtrInt;
+    by4: array[0..3] of byte;
+begin
+  i := currI;
+  j := currJ;
+  while Count>3 do begin
+    dec(Count,4);
+    i := (i+1) and $ff;
+    ki := State[i];
+    j := (j+ki) and $ff;
+    kj := (ki+State[j]) and $ff;
+    State[i] := State[j];
+    i := (i+1) and $ff;
+    State[j] := ki;
+    ki := State[i];
+    by4[0] := State[kj];
+    j := (j+ki) and $ff;
+    kj := (ki+State[j]) and $ff;
+    State[i] := State[j];
+    i := (i+1) and $ff;
+    State[j] := ki;
+    by4[1] := State[kj];
+    ki := State[i];
+    j := (j+ki) and $ff;
+    kj := (ki+State[j]) and $ff;
+    State[i] := State[j];
+    i := (i+1) and $ff;
+    State[j] := ki;
+    by4[2] := State[kj];
+    ki := State[i];
+    j := (j+ki) and $ff;
+    kj := (ki+State[j]) and $ff;
+    State[i] := State[j];
+    State[j] := ki;
+    by4[3] := State[kj];
+    PCardinal(BufOut)^ := PCardinal(BufIn)^ xor cardinal(by4);
+    inc(BufIn,4);
+    inc(BufOut,4);
+  end;
+  while Count>0 do begin
+    dec(Count);
+    i := (i+1) and $ff;
+    ki := State[i];
+    j := (j+ki) and $ff;
+    kj := (ki+State[j]) and $ff;
+    State[i] := State[j];
+    State[j] := ki;
+    BufOut^ := BufIn^ xor State[kj];
+    inc(BufIn);
+    inc(BufOut);
+  end;
+  currI := i;
+  currJ := j;
 end;
 
 procedure TRC4.Encrypt(const BufIn; var BufOut; Count: cardinal);
-var ndx: cardinal;
-    i,j,ki,kj: byte;
 begin
-  i := 0;
-  j := 0;
-  for ndx := 0 to Count-1 do begin
-    inc(i);
-    ki := key[i];
-    inc(j,ki);
-    kj := key[j];
-    key[i] := kj;
-    inc(kj,ki);
-    key[j] := ki;
-    TByteArray(BufOut)[ndx] := TByteArray(BufIn)[ndx] xor key[kj];
+  EncryptBuffer(@BufIn,@BufOut,Count);
+end;
+
+procedure TRC4.Drop(Count: cardinal);
+var i,j,ki: PtrInt;
+begin
+  i := currI;
+  j := currJ;
+  while Count>0 do begin
+    dec(Count);
+    i := (i+1) and $ff;
+    ki := state[i];
+    j := (j+ki) and $ff;
+    state[i] := state[j];
+    state[j] := ki;
   end;
-end;
-
-procedure TRC4.RestoreKey(const Backup: TRC4InternalKey);
-begin
-  MoveFast(Backup,key,sizeof(key));
-end;
-
-procedure TRC4.SaveKey(out Backup: TRC4InternalKey);
-begin
-  MoveFast(key,Backup,sizeof(key));
+  currI := i;
+  currJ := j;
 end;
 
 function RC4SelfTest: boolean;
@@ -12076,7 +12660,7 @@ const
   Res2: array[0..9] of byte = ($d6,$a1,$41,$a7,$ec,$3c,$38,$df,$bd,$61);
 var RC4: TRC4;
     Dat: array[0..9] of byte;
-    Backup: TRC4InternalKey;
+    Backup: TRC4;
 begin
   RC4.Init(Test1,8);
   RC4.Encrypt(Test1,Dat,8);
@@ -12088,13 +12672,13 @@ begin
   RC4.Encrypt(InDat,Dat,sizeof(InDat));
   result := result and CompareMem(@Dat,@OutDat,sizeof(OutDat));
   RC4.Init(Key,sizeof(Key));
-  RC4.SaveKey(Backup);
+  Backup := RC4;
   RC4.Encrypt(InDat,Dat,sizeof(InDat));
   result := result and CompareMem(@Dat,@OutDat,sizeof(OutDat));
-  RC4.RestoreKey(Backup);
+  RC4 := Backup;
   RC4.Encrypt(InDat,Dat,sizeof(InDat));
   result := result and CompareMem(@Dat,@OutDat,sizeof(OutDat));
-  RC4.RestoreKey(Backup);
+  RC4 := Backup;
   RC4.Encrypt(OutDat,Dat,sizeof(InDat));
   result := result and CompareMem(@Dat,@InDat,sizeof(OutDat));
 end;
@@ -12453,16 +13037,16 @@ const
 function TJWTAbstract.Compute(const DataNameValue: array of const;
   const Issuer, Subject, Audience: RawUTF8; NotBefore: TDateTime;
   ExpirationMinutes: integer; Signature: PRawUTF8): RawUTF8;
-var payload, signat: RawUTF8;
+var payload, headpayload, signat: RawUTF8;
 begin
   if self=nil then begin
     result := '';
     exit;
   end;
   payload := PayloadToJSON(DataNameValue,Issuer,Subject,Audience,NotBefore,ExpirationMinutes);
-  payload := BinToBase64URI(payload);
-  signat := ComputeSignature(payload);
-  result := fHeaderB64+payload+'.'+signat;
+  headpayload := fHeaderB64+BinToBase64URI(payload);
+  signat := ComputeSignature(headpayload);
+  result := headpayload+'.'+signat;
   if length(result)>JWT_MAXSIZE then
     raise EJWTException.CreateUTF8('%.Compute oversize: len=%',[self,length(result)]);
   if Signature<>nil then
@@ -12531,7 +13115,7 @@ begin
 end;
 
 procedure TJWTAbstract.Verify(const Token: RawUTF8; out JWT: TJWTContent);
-var payload64: RawUTF8;
+var headpayload: RawUTF8;
     signature: RawByteString;
     fromcache: boolean;
 begin
@@ -12541,10 +13125,10 @@ begin
     fCache.DeleteDeprecated;
   end;
   if not fromcache then
-    Parse(Token,JWT,payload64,signature);
+    Parse(Token,JWT,headpayload,signature);
   if JWT.result in [jwtValid,jwtNotBeforeFailed] then
     if CheckAgainstActualTimestamp(JWT) and not fromcache then
-      CheckSignature(JWT,payload64,signature); // depending on the algorithm used
+      CheckSignature(headpayload,signature,JWT); // depending on the algorithm used
   if not fromcache and (self<>nil) and (fCache<>nil) and (JWT.result in fCacheResults) then
     fCache.Add(Token,JWT);
 end;
@@ -12583,8 +13167,8 @@ begin
 end;
 
 procedure TJWTAbstract.Parse(const Token: RawUTF8; var JWT: TJWTContent;
-  out payload64: RawUTF8; out signature: RawByteString);
-var i,j,c,len,a: integer;
+  out headpayload: RawUTF8; out signature: RawByteString);
+var payloadend,j,toklen,c,cap,headerlen,len,a: integer;
     P: PUTF8Char;
     N,V: PUTF8Char;
     wasString: boolean;
@@ -12592,59 +13176,54 @@ var i,j,c,len,a: integer;
     claim: TJWTClaim;
     id: TSynUniqueIdentifierBits;
     value: variant;
-    payload, signature64: RawUTF8;
-    head,aud: TDocVariantData;
+    payload: RawUTF8;
+    head: TPUtf8CharDynArray;
+    aud: TDocVariantData;
+    tok: PAnsiChar absolute Token;
 begin
   JWT.data.InitFast(0,dvObject);
   byte(JWT.claims) := 0;
   word(JWT.audience) := 0;
-  c := length(Token);
-  if (c=0) or (self=nil) then begin
+  toklen := length(Token);
+  if (toklen=0) or (self=nil) then begin
     JWT.result := jwtNoToken;
     exit;
   end;
   JWT.result := jwtInvalidAlgorithm;
   if joHeaderParse in fOptions then begin
-    len := PosEx('.',Token);
-    if (len=0) or (len>512) then
+    headerlen := PosEx('.',Token);
+    if (headerlen=0) or (headerlen>512) then
       exit;
-    signature64 := copy(Token,1,len-1);
-    signature := Base64URIToBin(signature64);
-    if (head.InitJSONInPlace(pointer(signature),JSON_OPTIONS_FAST)=nil) or
-       (head.U['alg']<>fAlgorithm) or
-       (head.GetAsRawUTF8('typ',payload) and (payload<>'JWT')) then
+    Base64URIToBin(tok,headerlen-1,signature);
+    JSONDecode(pointer(signature),['alg','typ'],head);
+    if not IdemPropNameU(fAlgorithm,head[0],StrLen(head[0])) or
+       ((head[1]<>nil) and not IdemPropNameU('JWT',head[1],StrLen(head[1]))) then
       exit;
   end else begin
-    len := length(fHeaderB64); // fast direct compare of fHeaderB64 (including "alg")
-    if (c<=len) or not CompareMem(pointer(fHeaderB64),pointer(Token),len) then
+    headerlen := length(fHeaderB64); // fast direct compare of fHeaderB64 (including "alg")
+    if (toklen<=headerlen) or not CompareMem(pointer(fHeaderB64),tok,headerlen) then
       exit;
   end;
   JWT.result := jwtWrongFormat;
-  if c>JWT_MAXSIZE Then
+  if toklen>JWT_MAXSIZE Then
     exit;
-  i := PosEx('.',Token,len+1);
-  if (i=0) or (i-len>2700) then
+  payloadend := PosEx('.',Token,headerlen+1);
+  if (payloadend=0) or (payloadend-headerlen>2700) then
     exit;
-  payload64 := copy(Token,len+1,i-len-1);
-  signature64 := copy(Token,i+1,maxInt);
-  Base64FromURI(signature64);
-  signature := Base64ToBin(signature64);
-  if (signature='') and (signature64<>'') then
+  Base64URIToBin(tok+payloadend,toklen-payloadend,signature);
+  if (signature='') and (payloadend<>toklen) then
     exit;
   JWT.result := jwtInvalidPayload;
-  payload := payload64;
-  Base64FromURI(payload);
-  payload := Base64ToBin(payload);
+  Base64URIToBin(tok+headerlen,payloadend-headerlen-1,RawByteString(payload));
   if payload='' then
     exit;
   P := GotoNextNotSpace(pointer(payload));
   if P^<>'{' then
     exit;
   P := GotoNextNotSpace(P+1);
-  c := JSONObjectPropCount(P);
-  if c<=0 then
+  cap := JSONObjectPropCount(P);
+  if cap<=0 then
     exit;
-  JWT.data.Capacity := c;
   repeat
     N := GetJSONPropName(P);
     if N=nil then
@@ -12678,16 +13257,17 @@ begin
             if JWT.reg[jrcAudience][1]='[' then begin
               aud.InitJSON(JWT.reg[jrcAudience],JSON_OPTIONS_FAST);
               if aud.Count=0 then
-                exit else
-                for j := 0 to aud.Count-1 do begin
-                  a := FindRawUTF8(fAudience,VariantToUTF8(aud.Values[j]));
-                  if a<0 then begin
-                    JWT.result := jwtUnknownAudience;
-                    if not (joAllowUnexpectedAudience in fOptions) then
-                      exit;
-                  end else
-                    include(JWT.audience,a);
-                end;
+                exit;
+              for j := 0 to aud.Count-1 do begin
+                a := FindRawUTF8(fAudience,VariantToUTF8(aud.Values[j]));
+                if a<0 then begin
+                  JWT.result := jwtUnknownAudience;
+                  if not (joAllowUnexpectedAudience in fOptions) then
+                    exit;
+                end else
+                  include(JWT.audience,a);
+              end;
+              aud.Clear;
             end else begin
               a := FindRawUTF8(fAudience,JWT.reg[jrcAudience]);
               if a<0 then begin
@@ -12699,24 +13279,30 @@ begin
             end;
           end;
           len := 0; // don't add to JWT.data
+          dec(cap);
           break;
         end;
       if len=0 then
         continue;
     end;
     GetVariantFromJSON(V,wasString,value,@JSON_OPTIONS[true],joDoubleInData in fOptions);
+    if JWT.data.Count=0 then
+      JWT.data.Capacity := cap;
     JWT.data.AddValue(N,len,value)
   until EndOfObject='}';
-  JWT.data.Capacity := JWT.data.Count;
+  if JWT.data.Count>0 then
+    JWT.data.Capacity := JWT.data.Count;
   if fClaims-JWT.claims<>[] then
-    JWT.result := jwtMissingClaim else
+    JWT.result := jwtMissingClaim else begin
+    SetString(headpayload,tok,payloadend-1);
     JWT.result := jwtValid;
+  end;
 end;
 
 function TJWTAbstract.VerifyAuthorizationHeader(const HttpAuthorizationHeader: RawUTF8;
   out JWT: TJWTContent): boolean;
 begin
-  if (cardinal(length(HttpAuthorizationHeader)-10)<4096) and
+  if (cardinal(length(HttpAuthorizationHeader)-10)>4096) or
      not IdemPChar(pointer(HttpAuthorizationHeader), 'BEARER ') then
     JWT.result := jwtWrongFormat else
     Verify(copy(HttpAuthorizationHeader,8,maxInt),JWT);
@@ -12725,24 +13311,28 @@ end;
 
 class function TJWTAbstract.VerifyPayload(const Token, ExpectedSubject, ExpectedIssuer,
   ExpectedAudience: RawUTF8; Expiration: PUnixTime; Signature: PRawUTF8): TJWTResult;
-var text: RawUTF8;
-    P: PUTF8Char;
+var P,B: PUTF8Char;
     V: TPUtf8CharDynArray;
-    now, time: cardinal;
+    now, time: PtrUInt;
+    text: RawUTF8;
 begin
   result := jwtInvalidAlgorithm;
-  P := pointer(Token);
+  B := pointer(Token);
+  P := PosChar(B,'.');
   if P=nil then
     exit;
-  GetNextItem(P,'.',text);
   if self<>TJWTAbstract then begin
-    text := Base64URIToBin(text);
+    text := Base64URIToBin(PAnsiChar(B),P-B);
     if not IdemPropNameU(copy(ToText(self),5,10),JSONDecode(text,'alg')) then
       exit;
   end;
+  B := P+1;
+  P := PosChar(B,'.');
+  result := jwtInvalidSignature;
+  if P=nil then
+    exit;
   result := jwtInvalidPayload;
-  GetNextItem(P,'.',text);
-  text := Base64URIToBin(text);
+  text := Base64URIToBin(PAnsiChar(B),P-B);
   if text='' then
     exit;
   JSONDecode(pointer(text),['iss','aud','exp','nbf','sub'],V,true);
@@ -12773,9 +13363,7 @@ begin
         exit;
     end;
   end;
-  result := jwtInvalidSignature;
-  if P=nil then
-    exit;
+  inc(P);
   if Signature<>nil then
     SetRawUTF8(Signature^,P,StrLen(P));
   result := jwtValid;
@@ -12793,231 +13381,130 @@ begin
     aIDIdentifier,aIDObfuscationKey);
 end;
 
-procedure TJWTNone.CheckSignature(var JWT: TJWTContent; const payload64: RawUTF8;
-  const signature: RawByteString);
+procedure TJWTNone.CheckSignature(const headpayload: RawUTF8; const signature: RawByteString;
+  var JWT: TJWTContent);
 begin
   if signature='' then // JWA defined empty string for "none" JWS
     JWT.result := jwtValid else
     JWT.result := jwtInvalidSignature;
 end;
 
-function TJWTNone.ComputeSignature(const payload64: RawUTF8): RawUTF8;
+function TJWTNone.ComputeSignature(const headpayload: RawUTF8): RawUTF8;
 begin
   result := '';
 end;
 
 
-{ TJWTHS256 }
+{ TJWTSynSignerAbstract }
 
-constructor TJWTHS256.Create(const aSecret: RawUTF8; aSecretPBKDF2Rounds: integer;
-  aClaims: TJWTClaims; const aAudience: array of RawUTF8;
+constructor TJWTSynSignerAbstract.Create(const aSecret: RawUTF8;
+  aSecretPBKDF2Rounds: integer; aClaims: TJWTClaims; const aAudience: array of RawUTF8;
   aExpirationMinutes: integer; aIDIdentifier: TSynUniqueIdentifierProcess;
-  aIDObfuscationKey: RawUTF8);
-var secret: THash256;
+  aIDObfuscationKey: RawUTF8; aPBKDF2Secret: PHash512Rec);
+var algo: TSignAlgo;
 begin
-  inherited Create('HS256',aClaims,aAudience,aExpirationMinutes,aIDIdentifier,aIDObfuscationKey);
-  if (aSecret<>'') and (aSecretPBKDF2Rounds>0) then begin
-    ComputeHMACSecret(aSecret,aSecretPBKDF2Rounds,secret);
-    fHmacPrepared.Init(@secret,sizeof(secret));
-    FillZero(secret);
-  end else
-    fHmacPrepared.Init(pointer(aSecret),length(aSecret));
-  fHmacPrepared.Update(pointer(fHeaderB64),length(fHeaderB64));
+  algo := GetAlgo;
+  inherited Create(JWT_TEXT[algo],aClaims,aAudience,
+    aExpirationMinutes,aIDIdentifier,aIDObfuscationKey);
+  if (aSecret<>'') and (aSecretPBKDF2Rounds>0) then
+    fSignPrepared.Init(algo,aSecret,fHeaderB64,aSecretPBKDF2Rounds,aPBKDF2Secret) else
+    fSignPrepared.Init(algo,aSecret);
 end;
 
-procedure TJWTHS256.ComputeHMACSecret(const aSecret: RawUTF8; aSecretPBKDF2Rounds: integer;
-  out aHMACSecret: THash256);
-begin
-  if (self<>nil) and (aSecret<>'') and (aSecretPBKDF2Rounds>0) then
-    PBKDF2_HMAC_SHA256(aSecret,fHeaderB64,aSecretPBKDF2Rounds,aHMACSecret) else
-    FillZero(aHMACSecret);
-end;
-
-function TJWTHS256.ComputeSignature(const payload64: RawUTF8): RawUTF8;
-var hmac: THMAC_SHA256;
-    res: TSHA256Digest;
-begin
-  hmac := fHmacPrepared; // thread-safe re-use of prepared HMAC(header+'.')
-  hmac.Update(pointer(payload64),length(payload64));
-  hmac.Done(res);
-  result := BinToBase64URI(@res,sizeof(res));
-end;
-
-procedure TJWTHS256.CheckSignature(var JWT: TJWTContent; const payload64: RawUTF8;
-  const signature: RawByteString);
-var hmac: THMAC_SHA256;
-    res: TSHA256Digest;
+procedure TJWTSynSignerAbstract.CheckSignature(const headpayload: RawUTF8;
+  const signature: RawByteString; var JWT: TJWTContent);
+var signer: TSynSigner;
+    temp: THash512Rec;
 begin
   JWT.result := jwtInvalidSignature;
-  if length(signature)<>sizeof(res) then
+  if length(signature)<>SignatureSize then
     exit;
-  hmac := fHmacPrepared; // thread-safe re-use of prepared HMAC(header+'.')
-  hmac.Update(pointer(payload64),length(payload64));
-  hmac.Done(res);
-  if IsEqual(res,PSHA256Digest(signature)^) then
+  signer := fSignPrepared; // thread-safe re-use of prepared TSynSigner
+  signer.Update(pointer(headpayload),length(headpayload));
+  signer.Final(temp);
+  if CompareMem(@temp,pointer(signature),SignatureSize) then
     JWT.result := jwtValid;
 end;
 
-destructor TJWTHS256.Destroy;
+function TJWTSynSignerAbstract.ComputeSignature(const headpayload: RawUTF8): RawUTF8;
+var signer: TSynSigner;
+    temp: THash512Rec;
 begin
+  signer := fSignPrepared;
+  signer.Update(pointer(headpayload),length(headpayload));
+  signer.Final(temp);
+  result := BinToBase64URI(@temp,SignatureSize);
+end;
+
+destructor TJWTSynSignerAbstract.Destroy;
+begin
+  FillCharFast(fSignPrepared,SizeOf(fSignPrepared),0);
   inherited Destroy;
-  FillcharFast(fHmacPrepared,sizeof(fHmacPrepared),0); // erase secret on heap
+end;
+
+{ TJWTHS256 }
+
+function TJWTHS256.GetAlgo: TSignAlgo;
+begin
+  result := saSha256;
 end;
 
 { TJWTHS384 }
 
-constructor TJWTHS384.Create(const aSecret: RawUTF8; aSecretPBKDF2Rounds: integer;
-  aClaims: TJWTClaims; const aAudience: array of RawUTF8;
-  aExpirationMinutes: integer; aIDIdentifier: TSynUniqueIdentifierProcess;
-  aIDObfuscationKey: RawUTF8);
-var secret: THash384;
+function TJWTHS384.GetAlgo: TSignAlgo;
 begin
-  inherited Create('HS384',aClaims,aAudience,aExpirationMinutes,aIDIdentifier,aIDObfuscationKey);
-  if (aSecret<>'') and (aSecretPBKDF2Rounds>0) then begin
-    ComputeHMACSecret(aSecret,aSecretPBKDF2Rounds,secret);
-    fHmacPrepared.Init(@secret,sizeof(secret));
-    FillZero(secret);
-  end else
-    fHmacPrepared.Init(pointer(aSecret),length(aSecret));
-  fHmacPrepared.Update(pointer(fHeaderB64),length(fHeaderB64));
-end;
-
-procedure TJWTHS384.ComputeHMACSecret(const aSecret: RawUTF8; aSecretPBKDF2Rounds: integer;
-  out aHMACSecret: THash384);
-begin
-  if (self<>nil) and (aSecret<>'') and (aSecretPBKDF2Rounds>0) then
-    PBKDF2_HMAC_SHA384(aSecret,fHeaderB64,aSecretPBKDF2Rounds,aHMACSecret) else
-    FillZero(aHMACSecret);
-end;
-
-function TJWTHS384.ComputeSignature(const payload64: RawUTF8): RawUTF8;
-var hmac: THMAC_SHA384;
-    res: TSHA384Digest;
-begin
-  hmac := fHmacPrepared; // thread-safe re-use of prepared HMAC(header+'.')
-  hmac.Update(pointer(payload64),length(payload64));
-  hmac.Done(res);
-  result := BinToBase64URI(@res,sizeof(res));
-end;
-
-procedure TJWTHS384.CheckSignature(var JWT: TJWTContent; const payload64: RawUTF8;
-  const signature: RawByteString);
-var hmac: THMAC_SHA384;
-    res: TSHA384Digest;
-begin
-  JWT.result := jwtInvalidSignature;
-  if length(signature)<>sizeof(res) then
-    exit;
-  hmac := fHmacPrepared; // thread-safe re-use of prepared HMAC(header+'.')
-  hmac.Update(pointer(payload64),length(payload64));
-  hmac.Done(res);
-  if IsEqual(res,PSHA384Digest(signature)^) then
-    JWT.result := jwtValid;
-end;
-
-destructor TJWTHS384.Destroy;
-begin
-  inherited Destroy;
-  FillcharFast(fHmacPrepared,sizeof(fHmacPrepared),0); // erase secret on heap
+  result := saSha384;
 end;
 
 { TJWTHS512 }
 
-constructor TJWTHS512.Create(const aSecret: RawUTF8; aSecretPBKDF2Rounds: integer;
-  aClaims: TJWTClaims; const aAudience: array of RawUTF8;
-  aExpirationMinutes: integer; aIDIdentifier: TSynUniqueIdentifierProcess;
-  aIDObfuscationKey: RawUTF8);
-var secret: THash512;
+function TJWTHS512.GetAlgo: TSignAlgo;
 begin
-  inherited Create('HS512',aClaims,aAudience,aExpirationMinutes,aIDIdentifier,aIDObfuscationKey);
-  if (aSecret<>'') and (aSecretPBKDF2Rounds>0) then begin
-    ComputeHMACSecret(aSecret,aSecretPBKDF2Rounds,secret);
-    fHmacPrepared.Init(@secret,sizeof(secret));
-    FillZero(secret);
-  end else
-    fHmacPrepared.Init(pointer(aSecret),length(aSecret));
-  fHmacPrepared.Update(pointer(fHeaderB64),length(fHeaderB64));
+  result := saSha512;
 end;
 
-procedure TJWTHS512.ComputeHMACSecret(const aSecret: RawUTF8; aSecretPBKDF2Rounds: integer;
-  out aHMACSecret: THash512);
+{ TJWTS3224 }
+
+function TJWTS3224.GetAlgo: TSignAlgo;
 begin
-  if (self<>nil) and (aSecret<>'') and (aSecretPBKDF2Rounds>0) then
-    PBKDF2_HMAC_SHA512(aSecret,fHeaderB64,aSecretPBKDF2Rounds,aHMACSecret) else
-    FillZero(aHMACSecret);
+  result := saSha3224;
 end;
 
-function TJWTHS512.ComputeSignature(const payload64: RawUTF8): RawUTF8;
-var hmac: THMAC_SHA512;
-    res: TSHA512Digest;
+{ TJWTS3256 }
+
+function TJWTS3256.GetAlgo: TSignAlgo;
 begin
-  hmac := fHmacPrepared; // thread-safe re-use of prepared HMAC(header+'.')
-  hmac.Update(pointer(payload64),length(payload64));
-  hmac.Done(res);
-  result := BinToBase64URI(@res,sizeof(res));
+  result := saSha3256;
 end;
 
-procedure TJWTHS512.CheckSignature(var JWT: TJWTContent; const payload64: RawUTF8;
-  const signature: RawByteString);
-var hmac: THMAC_SHA512;
-    res: TSHA512Digest;
+{ TJWTS3384 }
+
+function TJWTS3384.GetAlgo: TSignAlgo;
 begin
-  JWT.result := jwtInvalidSignature;
-  if length(signature)<>sizeof(res) then
-    exit;
-  hmac := fHmacPrepared; // thread-safe re-use of prepared HMAC(header+'.')
-  hmac.Update(pointer(payload64),length(payload64));
-  hmac.Done(res);
-  if IsEqual(res,PSHA512Digest(signature)^) then
-    JWT.result := jwtValid;
+  result := saSha3384;
 end;
 
-destructor TJWTHS512.Destroy;
+{ TJWTS3512 }
+
+function TJWTS3512.GetAlgo: TSignAlgo;
 begin
-  inherited Destroy;
-  FillcharFast(fHmacPrepared,sizeof(fHmacPrepared),0); // erase secret on heap
+  result := saSha3512;
 end;
 
-function JWTHS(algo: TJWTHSAlgo; const aSecret: RawUTF8; aSecretPBKDF2Rounds: integer;
-  aClaims: TJWTClaims; const aAudience: array of RawUTF8; aExpirationMinutes: integer=0;
-  aIDIdentifier: TSynUniqueIdentifierProcess=0; aIDObfuscationKey: RawUTF8='';
-  aHmacSecretHexa: PRawUTF8=nil): TJWTAbstract;
-var
-  sec256: THash256;
-  sec384: THash384;
-  sec512: THash512;
+{ TJWTS3S128 }
+
+function TJWTS3S128.GetAlgo: TSignAlgo;
 begin
-  case algo of
-  HS256: begin
-    result := TJWTHS256.Create(aSecret,aSecretPBKDF2Rounds,aClaims,aAudience,
-      aExpirationMinutes,aIDIdentifier,aIDObfuscationKey);
-    if aHmacSecretHexa<>nil then begin
-      TJWTHS256(result).ComputeHMACSecret(aSecret,aSecretPBKDF2Rounds,sec256);
-      aHmacSecretHexa^ := SHA256DigestToString(sec256);
-      FillZero(sec256);
-    end;
-  end;
-  HS384: begin
-    result := TJWTHS384.Create(aSecret,aSecretPBKDF2Rounds,aClaims,aAudience,
-      aExpirationMinutes,aIDIdentifier,aIDObfuscationKey);
-    if aHmacSecretHexa<>nil then begin
-      TJWTHS384(result).ComputeHMACSecret(aSecret,aSecretPBKDF2Rounds,sec384);
-      aHmacSecretHexa^ := SHA384DigestToString(sec384);
-      FillZero(sec384);
-    end;
-  end;
-  HS512: begin
-    result := TJWTHS512.Create(aSecret,aSecretPBKDF2Rounds,aClaims,aAudience,
-      aExpirationMinutes,aIDIdentifier,aIDObfuscationKey);
-    if aHmacSecretHexa<>nil then begin
-      TJWTHS512(result).ComputeHMACSecret(aSecret,aSecretPBKDF2Rounds,sec512);
-      aHmacSecretHexa^ := SHA512DigestToString(sec512);
-      FillZero(sec512);
-    end;
-  end;
-  else result := nil;
-  end;
+  result := saSha3S128;
 end;
+
+{ TJWTS3S256 }
+
+function TJWTS3S256.GetAlgo: TSignAlgo;
+begin
+  result := saSha3S256;
+end;
+
 
 function ToText(res: TJWTResult): PShortString;
 begin
@@ -13070,7 +13557,7 @@ end;
 {$endif}
 // defined in SynCrypto.pas, not in SynCommons.pas, to avoid .o/.obj dependencies
 
-function crc32_iscsi_01(buf: PAnsiChar; len: PtrUInt; crc: cardinal): cardinal; {$ifdef FPC}{$ifndef MSWINDOWS}cdecl;{$endif}{$endif} external;
+function crc32_iscsi_01(buf: PAnsiChar; len: PtrUInt; crc: cardinal): cardinal; {$ifdef FPC}cdecl;{$endif} external;
 
 function crc32c_sse42_aesni(crc: cardinal; buf: PAnsiChar; len: cardinal): cardinal;
 {$ifdef MSWINDOWS} {$ifdef FPC}nostackframe; assembler;{$endif}
@@ -13144,6 +13631,10 @@ initialization
   assert(1 shl AESBlockShift=sizeof(TAESBlock));
   assert(sizeof(TAESFullHeader)=sizeof(TAESBlock));
   assert(sizeof(TAESIVCTR)=sizeof(TAESBlock));
+  assert(sizeof(TSHA256)=sizeof(TSHA1));
+  assert(sizeof(TSHA512)>sizeof(TSHA256));
+  assert(sizeof(TSHA3)>sizeof(TSHA512));
+  assert(sizeof(TSHA3)>sizeof(THMAC_SHA512));
 
 finalization
 {$ifdef USEPADLOCKDLL}
