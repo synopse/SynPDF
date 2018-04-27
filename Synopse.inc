@@ -66,7 +66,6 @@
   - added DOPATCHTRTL conditional (not set by default, for compatibility)
 
   Version 1.18
-  - added SQLITE3_FASTCALL conditional (shared by SQLite3 related units)
   - added NEWRTTINOTUSED conditional (unset by default, for compatibility) - see
     https://synopse.info/forum/viewtopic.php?id=1394
   - enhanced FPC compatibility
@@ -122,9 +121,12 @@
 // be affected (unless you use the enhanced RTTI for record/dynamic array JSON
 // serialization) - left undefined by default to ensure minimal impact
 
-{.$define NOSETTHREADNAME}
+{$define NOSETTHREADNAME}
 // if defined, SetThreadName() would not raise the exception used to set the
 // thread name: to be defined if you have issues when debugging your application
+
+{.$define NOEXCEPTIONINTERCEPT}
+// if defined, exceptions shall not be intercepted and logged
 
 {.$define USELOCKERDEBUG}
 // by default, some IAutoLocker instances would use TAutoLocker, unless this
@@ -162,20 +164,6 @@
   {$define UNDIRECTDYNARRAY}
 {$endif}
 
-{$define INCLUDE_FTS3}
-// define this if you want to include the FTS3/FTS4 feature into the library
-// - FTS3 is an SQLite module implementing full-text search
-// - will include also FTS4 extension module since 3.7.4
-// - see http://www.sqlite.org/fts3.html for documentation
-// - is defined by default, but can be unset by defining EXCLUDE_FTS3 conditional
-//   to save about 50 KB of code size (is it worth it nowdays?)
-// - should be defined for SynSQLite3, SynSQLite3Static and mORMotSQLite3 units,
-//   so a global condition in this Synopse.inc does make sense
-
-{$ifdef EXCLUDE_FTS3}
-  {$undef INCLUDE_FTS3}
-{$endif}
-
 { Free Pascal adaptation notes:
   - we use the Delphi compatibility mode
   - from system.pp use these constants (Win32/64 values listed):
@@ -190,8 +178,8 @@
       PtrInt is a signed integer type of same size as a pointer / register
         -> must be used for pointer arithmetic
         -> may be used in loops
-      all 32 bits x86 asm code can be replaced by a pascal only version, with
-      if the conditional define PUREPASCAL is set (defined below e.g. for CPUX64)
+      all 32 bits x86 asm code is replaced by a pascal only version, if the
+      conditional PUREPASCAL is defined (e.g. for CPUX64)
 }
 
 {$ifdef FPC}
@@ -220,7 +208,7 @@
   {$define FPC_OR_UNICODE}
   {$define FPC_ENUMHASINNER}
   {$ifdef VER3_1_1} // if FPC_FULLVERSION>30100 ... ifend is not Delphi 5 compatible :(
-    {$define FPC_NEWRTTI} // RTTI has been enhanced in latest trunk 
+    {$define FPC_NEWRTTI} // RTTI has been enhanced in latest trunk
   {$endif}
   {$ifdef FPC_NEWRTTI}
     {$define ISDELPHI2010_OR_FPC_NEWRTTI}
@@ -234,21 +222,22 @@
   // -> could be disabled to force external .so/.dll linking
   {$ifdef MSWINDOWS}
   {$ifdef CPUX86}
-    {$define FPCSQLITE3STATIC} // we supply Win32 .obj
+    {$define FPCSQLITE3STATIC} // use static\i386-win32\sqlite3.o
   {$else}
-    {$define FPCSQLITE3STATIC} // we supply Win64 .o (compiled with -O1)
+    {$define FPCSQLITE3STATIC} // use static\x86_64-win64\sqlite3.o
   {$endif}
   {$endif}
   {$ifdef LINUX}
     {$ifdef CPUX86}
-      {$define FPCSQLITE3STATIC} // we supply Linux 32-bit x86 .o
+      {$define FPCSQLITE3STATIC} // use static/i386-linux\sqlite3.o
     {$endif}
     {$ifdef CPUX64}
-      {$define FPCSQLITE3STATIC} // we supply Linux 64-bit x86_64 .o
+      {$define FPCSQLITE3STATIC} // use static/x86_64-linux\sqlite3.o
     {$endif}
     {$ifdef CPUARM}
-      {$define FPCSQLITE3STATIC} // we supply Linux 32-bit ARM .o
+      {$define FPCSQLITE3STATIC} // use static/arm-linux\sqlite3.o
     {$endif}
+    // note: problems with current static/aarch64-linux\sqlite3.o
   {$endif}
 
   {$ifdef ANDROID}
@@ -258,9 +247,9 @@
   {$ifdef BSD}
     // this includes Darwin and BSD family like FreeBSD
     {$define LINUX} // not true, but a POSIX/BSD system
-    {$define PUREPASCAL} // e.g. low-level stack layout differs
     {$ifdef DARWIN}
       {$define FPCSQLITE3STATIC} // we supply Darwin static libs
+      {$define FPC_PIC} // may have not be defined by the compiler options
     {$else}
       {$define BSDNOTDARWIN}
     {$endif}
@@ -268,6 +257,10 @@
     {$ifdef LINUX}
       {$define LINUXNOTBSD} // e.g. to disable epoll API
     {$endif}
+  {$endif}
+
+  {$ifdef FPC_PIC}
+    {$define PUREPASCAL} // most asm code is not PIC-safe with global constants
   {$endif}
 
   {$ifdef CPU64}
@@ -302,8 +295,6 @@
 
   {$define FPC_OR_PUREPASCAL}
   {$define FPC_OR_KYLIX}
-  // exceptions interception code in FPC differs from Delphi
-  {$define NOEXCEPTIONINTERCEPT}
 
   // $if FPC_FULLVERSION>20700 breaks Delphi 6-7 and SynProject :(
   {$ifdef VER2_7}
@@ -371,9 +362,6 @@
     {$undef CPU64}
     {$define CPUX86} // for compatibility with older versions of Delphi
   {$endif CPUX64}
-
-  // defines if exceptions shall not be intercepted
-  {.$define NOEXCEPTIONINTERCEPT}
 
   {$IFDEF CONDITIONALEXPRESSIONS}  // Delphi 6 or newer
     {$define HASINTERFACERTTI} // interface RTTI (not FPC)
@@ -528,21 +516,20 @@
 {$V-} // disable Var-String Checking
 {$T-} // Typed @ operator
 {$Z1} // enumerators stored as byte by default
-{$IFNDEF FPC}
+{$ifndef FPC}
   {$P+} // Open string params
-{$ENDIF FPC}
+  {$ifdef VER150}
+    {$WARN SYMBOL_DEPRECATED OFF}
+    {$WARN UNSAFE_TYPE OFF}
+    {$WARN UNSAFE_CODE OFF}
+    {$WARN UNSAFE_CAST OFF}
+  {$ENDIF}
 
-{$ifdef VER150}
-  {$WARN SYMBOL_DEPRECATED OFF}
-  {$WARN UNSAFE_TYPE OFF}
-  {$WARN UNSAFE_CODE OFF}
-  {$WARN UNSAFE_CAST OFF}
-{$ENDIF}
-
-{$ifdef CONDITIONALEXPRESSIONS}  // Delphi 6 or newer
-  {$WARN SYMBOL_PLATFORM OFF}
-  {$WARN UNIT_PLATFORM OFF}
-{$endif}
+  {$ifdef CONDITIONALEXPRESSIONS}  // Delphi 6 or newer
+    {$WARN SYMBOL_PLATFORM OFF}
+    {$WARN UNIT_PLATFORM OFF}
+  {$endif}
+{$endif FPC}
 
 // see https://synopse.info/fossil/tktview?name=6593f0fbd1
 {$ifndef WITHUXTHEME}
@@ -558,27 +545,17 @@
   {$define EXTENDEDTOSTRING_USESTR} // FloatToText() much slower in x64 mode
 {$endif}
 
-// global conditional to use SQLite3 with fastcall calling convention
-// used by SynSQLite3, SynSQLite3Static, SynSQlite3RegEx and mORMotSQLite3 units
-{$ifdef CPU64}
-  // only one calling convention in the Win64 world
-  {$ifndef FPC}
-  {$define SQLITE3_FASTCALL}
+{$ifdef CPUINTEL}
+  {$ifdef CPUX86} // safest to reset x87 exceptions
+    {$ifndef PUREPASCAL}
+      {$ifndef DELPHI5OROLDER}
+        {$define RESETFPUEXCEPTION}
+      {$endif}
+    {$endif}
   {$endif}
 {$else}
-  {.$define SQLITE3_FASTCALL}
-  // undefined by default: BCC32 -pr fastcall (=Delphi resgister) is broken
-  // because of issues with BCC32 itself, or some obfuscated calls in source?
-  // -> allow to use external SQlite3 libraries in addition to static version
-{$endif}
-
-{$ifdef CPUX86} // safest to reset x87 exceptions
-{$ifndef PUREPASCAL}
-{$ifndef DELPHI5OROLDER}
-  {$define RESETFPUEXCEPTION}
-{$endif}
-{$endif}
-{$endif}
+  {$undef HASAESNI} // AES-NI is an Intel-specific feature
+{$endif CPUINTEL}
 
 {$ifdef FPC}
   {$ifndef FPCSQLITE3STATIC} // see above about this FPC-specific conditional
@@ -592,7 +569,7 @@
 {$endif}
 
 {$ifdef NOSQLITE3STATIC}
-  // our proprietary crypto expects a patched SQlite3.c statically linked
+  // our proprietary crypto expects a statically linked custom sqlite3.c 
   {$define NOSQLITE3ENCRYPT}
 {$endif}
 

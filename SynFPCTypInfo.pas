@@ -81,8 +81,26 @@ function GetFPCPropInfo(AClass: TClass; const PropName: string): PPropInfo; inli
 function GetFPCRecInitData(TypeData: Pointer): Pointer; inline;
 {$endif}
 
+procedure FPCDynArrayClear(var a: Pointer; typeInfo: Pointer);
+procedure FPCFinalizeArray(p: Pointer; typeInfo: Pointer; elemCount: PtrUInt);
+procedure FPCFinalize(Data: Pointer; TypeInfo: Pointer);
+procedure FPCRecordCopy(var Dest; const Source; TypeInfo: pointer);
+procedure FPCRecordAddRef(var Data; TypeInfo : pointer);
+
 
 implementation
+
+procedure FPCDynArrayClear(var a: Pointer; typeInfo: Pointer);
+  [external name 'FPC_DYNARRAY_CLEAR'];
+procedure FPCFinalizeArray(p: Pointer; typeInfo: Pointer; elemCount: PtrUInt);
+  [external name 'FPC_FINALIZE_ARRAY'];
+procedure FPCFinalize(Data: Pointer; TypeInfo: Pointer);
+  [external name 'FPC_FINALIZE'];
+procedure FPCRecordCopy(var Dest; const Source; TypeInfo: pointer);
+  [external name 'FPC_COPY'];
+procedure FPCRecordAddRef(var Data; TypeInfo : pointer);
+  [external name 'FPC_ADDREF'];
+
 
 {$ifdef FPC_REQUIRES_PROPER_ALIGNMENT}
 function AlignToPtr(p : pointer): pointer; inline;
