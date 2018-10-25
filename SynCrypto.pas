@@ -436,7 +436,7 @@ type
     {$endif}
   public
     /// Initialize AES contexts for cypher
-    // - first method to call before using this class
+    // - first method to call before using this object for encryption
     // - KeySize is in bits, i.e. 128,192,256
     function EncryptInit(const Key; KeySize: cardinal): boolean;
     /// encrypt an AES data block into another data block
@@ -447,7 +447,12 @@ type
       {$ifdef FPC}inline;{$endif}
 
     /// Initialize AES contexts for uncypher
+    // - first method to call before using this object for decryption
+    // - KeySize is in bits, i.e. 128,192,256
     function DecryptInit(const Key; KeySize: cardinal): boolean;
+    /// Initialize AES contexts for uncypher, from another TAES.EncryptInit
+    function DecryptInitFrom(const Encryption{$ifndef DELPHI5OROLDER}: TAES{$endif};
+      const Key; KeySize: cardinal): boolean;
     /// decrypt an AES data block
     procedure Decrypt(var B: TAESBlock); overload;
       {$ifdef FPC}inline;{$endif}
@@ -476,7 +481,7 @@ type
     procedure DoBlocksThread(var bIn, bOut: PAESBlock; Count: integer; doEncrypt: boolean);
     {$endif}
     /// performs AES-OFB encryption and decryption on whole blocks
-    // - may be used instead of TAESOFB when a raw TAES is used
+    // - may be called instead of TAESOFB when only a raw TAES is available
     // - this method is thread-safe (except if padlock is used)
     procedure DoBlocksOFB(const iv: TAESBlock; src, dst: pointer; blockcount: PtrUInt);
     /// TRUE if the context was initialized via EncryptInit/DecryptInit
@@ -743,6 +748,8 @@ type
     class function SimpleEncryptFile(const InputFile, Outputfile: TFileName; const Key;
       KeySize: integer; Encrypt: boolean; IVAtBeginning: boolean=false;
       RaiseESynCryptoOnError: boolean=true): boolean; overload;
+    //// returns e.g. 'aes128cfb' or '' if nil
+    function AlgoName: TShort16;
 
     /// associated Key Size, in bits (i.e. 128,192,256)
     property KeySize: cardinal read fKeySize;
@@ -1980,7 +1987,7 @@ function SHA3(Algo: TSHA3Algo; Buffer: pointer; Len: integer;
 /// safe key derivation using iterated SHA-3 hashing
 // - you can use SHA3_224, SHA3_256, SHA3_384, SHA3_512 algorithm to fill
 // the result buffer with the default sized derivated key of 224,256,384 or 512
-// bytes (leaving resultbytes = 0)
+// bits (leaving resultbytes = 0)
 // - or you may select SHAKE_128 or SHAKE_256, and specify any custom key size
 // in resultbytes (used e.g. by PBKDF2_SHA3_Crypt)
 procedure PBKDF2_SHA3(algo: TSHA3Algo; const password,salt: RawByteString;
@@ -2057,6 +2064,8 @@ type
     /// prepare a TAES object with the key derivated via a PBKDF2() call
     // - aDerivatedKey is defined as "var", since it will be zeroed after use
     procedure AssignTo(var aDerivatedKey: THash512Rec; out aAES: TAES; aEncrypt: boolean);
+    /// fill the intenral context with zeros, for security
+    procedure Done;
     /// the algorithm used for digitial signature
     property Algo: TSignAlgo read fAlgo;
     /// the size, in bytes, of the digital signature of this algorithm
@@ -2376,6 +2385,18 @@ function AESSelfTest(onlytables: Boolean): boolean;
 
 /// self test of RC4 routines
 function RC4SelfTest: boolean;
+
+/// entry point of the MD5 transform function - may be used from outside
+procedure RawMd5Compress(var Hash; Data: pointer);
+
+/// entry point of the SHA-1 transform function - may be used from outside
+procedure RawSha1Compress(var Hash; Data: pointer);
+
+/// entry point of the SHA-256 transform function - may be used from outside
+procedure RawSha256Compress(var Hash; Data: pointer);
+
+/// entry point of the SHA-512 transform function - may be used from outside
+procedure RawSha512Compress(var Hash; Data: pointer);
 
 // little endian fast conversion
 // - 160 bits = 5 integers
@@ -2704,11 +2725,12 @@ type
     // - it will decode the JWT payload and check for its expiration, and some
     // mandatory fied values - you can optionally retrieve the Expiration time,
     // the ending Signature, and/or the Payload decoded as TDocVariant
+    // - NotBeforeDelta allows to define some time frame for the "nbf" field
     // - may be used on client side to quickly validate a JWT received from
     // server, without knowing the exact algorithm or secret keys
     class function VerifyPayload(const Token, ExpectedSubject, ExpectedIssuer,
       ExpectedAudience: RawUTF8; Expiration: PUnixTime=nil; Signature: PRawUTF8=nil;
-      Payload: PVariant=nil; IgnoreTime: boolean=false): TJWTResult;
+      Payload: PVariant=nil; IgnoreTime: boolean=false; NotBeforeDelta: TUnixTime=15): TJWTResult;
   published
     /// the name of the algorithm used by this instance (e.g. 'HS256')
     property Algorithm: RawUTF8 read fAlgorithm;
@@ -2795,6 +2817,8 @@ type
     property SignatureSize: integer read fSignPrepared.fSignatureSize;
     /// the TSynSigner raw algorithm used for digital signature
     property SignatureAlgo: TSignAlgo read fSignPrepared.fAlgo;
+    /// low-level read access to the internal signature structure
+    property SignPrepared: TSynSigner read fSignPrepared;
   end;
   /// meta-class for TJWTSynSignerAbstract creations
   TJWTSynSignerAbstractClass = class of TJWTSynSignerAbstract;
@@ -2909,6 +2933,7 @@ const
 function ToText(res: TJWTResult): PShortString; overload;
 function ToCaption(res: TJWTResult): string; overload;
 function ToText(claim: TJWTClaim): PShortString; overload;
+function ToText(claims: TJWTClaims): ShortString; overload;
 
 {$endif NOVARIANTS}
 
@@ -4788,10 +4813,10 @@ asm // input: rcx/rdi=TAESContext, rdx/rsi=source, r8/rdx=dest
         push    r13
         push    r12
         push    rbx
-        push    rdi
-        push    rsi
         push    rbp
         {$ifdef win64}
+        push    rdi
+        push    rsi
         mov     r15, r8
         mov     r12, rcx
         {$else}
@@ -4939,9 +4964,11 @@ asm // input: rcx/rdi=TAESContext, rdx/rsi=source, r8/rdx=dest
         xor     r14d, r8d
         xor     r14d, dword ptr [r12+0CH]
         mov     dword ptr [r15+0CH], r14d
-        pop     rbp
+        {$ifdef win64}
         pop     rsi
         pop     rdi
+        {$endif win64}
+        pop     rbp
         pop     rbx
         pop     r12
         pop     r13
@@ -6095,7 +6122,8 @@ begin
   until rounds=1;
 end;
 
-function TAES.DecryptInit(const Key; KeySize: cardinal): boolean;
+function TAES.DecryptInitFrom(const Encryption{$ifndef DELPHI5OROLDER}: TAES{$endif};
+  const Key; KeySize: cardinal): boolean;
 var ctx: TAESContext absolute Context;
 begin
   {$ifdef USEPADLOCK}
@@ -6106,7 +6134,12 @@ begin
     exit; // Init OK
   end;
   {$endif}
-  result := EncryptInit(Key, KeySize); // contains Initialized := true
+  ctx.Initialized := false;
+  if not {$ifdef DELPHI5OROLDER}TAES{$endif}(Encryption).Initialized then
+    // e.g. called from DecryptInit()
+    EncryptInit(Key, KeySize) else // contains Initialized := true
+    self := {$ifdef DELPHI5OROLDER}TAES{$endif}(Encryption);
+  result := ctx.Initialized;
   if not result then
     exit;
   {$ifdef CPUX86_NOTPIC}
@@ -6125,6 +6158,11 @@ begin
   end else
   {$endif}
     MakeDecrKey(ctx.Rounds,@ctx.RK);
+end;
+
+function TAES.DecryptInit(const Key; KeySize: cardinal): boolean;
+begin
+  result := DecryptInitFrom(self, Key, KeySize);
 end;
 
 procedure TAES.Decrypt(var B: TAESBlock);
@@ -7523,6 +7561,11 @@ begin
   inc(Hash.H,H.H);
 end;
 
+procedure RawSha256Compress(var Hash; Data: pointer);
+begin
+  sha256Compress(TSHAHash(Hash), Data);
+end;
+
 procedure TSHA256.Final(out Digest: TSHA256Digest; NoInit: boolean);
 // finalize SHA-256 calculation, clear context
 var Data: TSHAContext absolute Context;
@@ -7965,6 +8008,19 @@ begin
       break;
     end;
   until Len<=0;
+end;
+
+procedure RawSha512Compress(var Hash; Data: pointer);
+begin
+  {$ifdef SHA512_X86}
+  if cfSSSE3 in CpuFeatures then
+    sha512_compress(@Hash,Data) else
+  {$endif}
+  {$ifdef SHA512_X64}
+  if cfSSE41 in CpuFeatures then
+    sha512_sse4(Data,@Hash,1) else
+  {$endif}
+    sha512_compresspas(TSHA512Hash(Hash), Data);
 end;
 
 procedure TSHA512.Update(const Buffer: RawByteString);
@@ -9250,8 +9306,8 @@ begin
 end;
 
 procedure HashFile(const aFileName: TFileName; aAlgos: THashAlgos);
-var data: RawByteString;
-    efn: TFileName;
+var data, hash: RawUTF8;
+    efn, fn: string;
     a: THashAlgo;
 begin
   if aAlgos=[] then
@@ -9260,10 +9316,11 @@ begin
   data := StringFromFile(aFileName);
   if data<>'' then
     for a := low(a) to high(a) do
-      if a in aAlgos then
-        FileFromString(
-          FormatUTF8('% *%'#13#10,[HashFull(a,pointer(data),length(data)),aFileName]),
-          format('%s.%s',[efn,LowerCase(TrimLeftLowerCaseShort(ToText(a)))]));
+      if a in aAlgos then begin
+        FormatUTF8('% *%',[HashFull(a,pointer(data),length(data)),efn],hash);
+        FormatString('%.%',[efn,LowerCase(TrimLeftLowerCaseShort(ToText(a)))],fn);
+        FileFromString(hash,fn);
+      end;
 end;
 
 
@@ -9407,13 +9464,13 @@ begin
   if (aParamsJSON=nil) or (aParamsJSONLen<=0) then
     k.secret := aDefaultSalt else
     if aParamsJSON[1]<>'{' then
-      SetString(k.secret,PAnsiChar(aParamsJSON),aParamsJSONLen) else begin
+      FastSetString(k.secret,aParamsJSON,aParamsJSONLen) else begin
     tmp.Init(aParamsJSON,aParamsJSONLen);
     try
       if (RecordLoadJSON(k,tmp.buf,TypeInfo(TSynSignerParams))=nil) or
          (k.secret='') or (k.salt='') then begin
         SetDefault;
-        SetString(k.secret,PAnsiChar(aParamsJSON),aParamsJSONLen);
+        FastSetString(k.secret,aParamsJSON,aParamsJSONLen);
       end;
     finally
       FillCharFast(tmp.buf^,tmp.len,0);
@@ -9461,6 +9518,11 @@ begin
   end;
   aAES.DoInit(aDerivatedKey,ks,aEncrypt);
   FillZero(aDerivatedKey.b);
+end;
+
+procedure TSynSigner.Done;
+begin
+  FillCharFast(self, SizeOf(self), 0);
 end;
 
 procedure AES(const Key; KeySize: cardinal; buffer: pointer; Len: Integer; Encrypt: boolean);
@@ -11642,6 +11704,11 @@ end;
 {$endif PUREPASCAL}
 {$endif CPUX64}
 
+procedure RawMd5Compress(var Hash; Data: pointer);
+begin
+  MD5Transform(TMD5Buf(Hash), PMD5In(Data)^);
+end;
+
 function TMD5.Final: TMD5Digest;
 begin
   Finalize;
@@ -11773,7 +11840,7 @@ end;
 
 function AESBlockToString(const block: TAESBlock): RawUTF8;
 begin
-  SetString(result,nil,32);
+  FastSetString(result,nil,32);
   SynCommons.BinToHex(@block,pointer(result),16);
 end;
 
@@ -11948,6 +12015,11 @@ begin
   inc(Hash.E,E);
 end;
 
+procedure RawSha1Compress(var Hash; Data: pointer);
+begin
+  sha1Compress(TSHAHash(Hash), Data);
+end;
+
 procedure TSHA1.Final(out Digest: TSHA1Digest; NoInit: boolean);
 var Data: TSHAContext absolute Context;
 begin
@@ -12118,6 +12190,23 @@ destructor TAESAbstract.Destroy;
 begin
   inherited Destroy;
   FillZero(fKey);
+end;
+
+function TAESAbstract.AlgoName: TShort16;
+const TXT: array[2..4] of array[0..7] of AnsiChar = (#9'aes128',#9'aes192',#9'aes256');
+var s: PShortString;
+begin
+  if (self=nil) or (KeySize=0) then
+    result[0] := #0 else begin
+    PInt64(@result)^ := PInt64(@TXT[KeySize shr 6])^;
+    s := ClassNameShort(self);
+    if s^[0]<#7 then
+      result[0] := #6 else begin
+      result[7] := NormToLower[s^[5]]; // TAESCBC -> 'aes128cbc'
+      result[8] := NormToLower[s^[6]];
+      result[9] := NormToLower[s^[7]];
+    end;
+  end;
 end;
 
 procedure TAESAbstract.SetIVHistory(aDepth: integer);
@@ -13694,7 +13783,7 @@ end;
 function TAESPRNG.FillRandomHex(Len: integer): RawUTF8;
 var bin: pointer;
 begin
-  SetString(result,nil,Len*2);
+  FastSetString(result,nil,Len*2);
   if Len=0 then
     exit;
   bin := @PByteArray(result)[Len]; // temporary store random bytes at the end
@@ -14195,8 +14284,8 @@ begin
   PBKDF2_HMAC_SHA256(appsec,ExeVersion.User,100,instance);
   FillZero(appsec);
   appsec := BinToBase64URI(@instance,15); // local file has 21 chars length
-  keyfile := format({$ifdef MSWINDOWS}'%s_%s'{$else}'%s.syn-%s'{$endif},
-    [GetSystemPath(spUserData),appsec]); // .* files are hidden under Linux
+  FormatString({$ifdef MSWINDOWS}'%_%'{$else}'%.syn-%'{$endif},
+    [GetSystemPath(spUserData),appsec], string(keyfile)); // .* files are hidden under Linux
   SetString(appsec,PAnsiChar(@instance[15]),17); // use remaining bytes as key
   try
     key := StringFromFile(keyfile);
@@ -14544,11 +14633,11 @@ var payloadend,j,toklen,c,cap,headerlen,len,a: integer;
     wasString: boolean;
     EndOfObject: AnsiChar;
     claim: TJWTClaim;
-    claims: TJWTClaims;
+    requiredclaims: TJWTClaims;
     id: TSynUniqueIdentifierBits;
     value: variant;
     payload: RawUTF8;
-    head: TPUtf8CharDynArray;
+    head: array[0..1] of TValuePUTF8Char;
     aud: TDocVariantData;
     tok: PAnsiChar absolute Token;
 begin
@@ -14566,9 +14655,9 @@ begin
     if (headerlen=0) or (headerlen>512) then
       exit;
     Base64URIToBin(tok,headerlen-1,signature);
-    JSONDecode(pointer(signature),['alg','typ'],head);
-    if not IdemPropNameU(fAlgorithm,head[0],StrLen(head[0])) or
-       ((head[1]<>nil) and not IdemPropNameU('JWT',head[1],StrLen(head[1]))) then
+    JSONDecode(pointer(signature),['alg','typ'],@head);
+    if not head[0].Idem(fAlgorithm) or
+       ((head[1].Value<>nil) and not head[1].Idem('JWT')) then
       exit;
   end else begin
     headerlen := length(fHeaderB64); // fast direct compare of fHeaderB64 (including "alg")
@@ -14595,7 +14684,7 @@ begin
   cap := JSONObjectPropCount(P);
   if cap<=0 then
     exit;
-  claims := fClaims - excluded;
+  requiredclaims := fClaims - excluded;
   repeat
     N := GetJSONPropName(P);
     if N=nil then
@@ -14615,8 +14704,8 @@ begin
             JWT.result := jwtUnexpectedClaim;
             exit;
           end;
-          SetString(JWT.reg[claim],V,StrLen(V));
-          if claim in claims then
+          FastSetString(JWT.reg[claim],V,StrLen(V));
+          if claim in requiredclaims then
           case claim of
           jrcJwtID:
             if not(joNoJwtIDCheck in fOptions) then
@@ -14664,9 +14753,9 @@ begin
   until EndOfObject='}';
   if JWT.data.Count>0 then
     JWT.data.Capacity := JWT.data.Count;
-  if claims-JWT.claims<>[] then
+  if requiredclaims-JWT.claims<>[] then
     JWT.result := jwtMissingClaim else begin
-    SetString(headpayload,tok,payloadend-1);
+    FastSetString(headpayload,tok,payloadend-1);
     JWT.result := jwtValid;
   end;
 end;
@@ -14683,9 +14772,9 @@ end;
 
 class function TJWTAbstract.VerifyPayload(const Token, ExpectedSubject, ExpectedIssuer,
   ExpectedAudience: RawUTF8; Expiration: PUnixTime; Signature: PRawUTF8; Payload: PVariant;
-  IgnoreTime: boolean): TJWTResult;
+  IgnoreTime: boolean; NotBeforeDelta: TUnixTime): TJWTResult;
 var P,B: PUTF8Char;
-    V: TPUtf8CharDynArray;
+    V: array[0..4] of TValuePUTF8Char;
     now, time: PtrUInt;
     text: RawUTF8;
 begin
@@ -14710,37 +14799,36 @@ begin
     exit;
   if Payload<>nil then
     _Json(text,Payload^,JSON_OPTIONS_FAST);
-  JSONDecode(pointer(text),['iss','aud','exp','nbf','sub'],V,true);
+  JSONDecode(pointer(text),['iss','aud','exp','nbf','sub'],@V,true);
   result := jwtUnexpectedClaim;
-  if (ExpectedSubject<>'') and not IdemPropNameU(ExpectedSubject,V[4],StrLen(V[4])) then
-    exit;
-  if (ExpectedIssuer<>'') and not IdemPropNameU(ExpectedIssuer,V[0],StrLen(V[0])) then
+  if ((ExpectedSubject<>'') and not V[4].Idem(ExpectedSubject)) or
+     ((ExpectedIssuer<>'') and not V[0].Idem(ExpectedIssuer)) then
     exit;
   result := jwtUnknownAudience;
-  if (ExpectedAudience<>'') and not IdemPropNameU(ExpectedAudience,V[1],StrLen(V[1])) then
+  if (ExpectedAudience<>'') and not V[1].Idem(ExpectedAudience) then
     exit;
   if Expiration<>nil then
     Expiration^ := 0;
-  if (V[2]<>nil) or (V[3]<>nil) then begin
+  if (V[2].Value<>nil) or (V[3].Value<>nil) then begin
     now := UnixTimeUTC;
-    if V[2]<>nil then begin
-      time := GetCardinal(V[2]);
+    if V[2].Value<>nil then begin
+      time := V[2].ToCardinal;
       result := jwtExpired;
       if not IgnoreTime and (now>time) then
         exit;
       if Expiration<>nil then
         Expiration^ := time;
     end;
-    if not IgnoreTime and (V[3]<>nil) then begin
-      time := GetCardinal(V[3]);
+    if not IgnoreTime and (V[3].Value<>nil) then begin
+      time := V[3].ToCardinal;
       result := jwtNotBeforeFailed;
-      if (time=0) or (now<time) then
+      if (time=0) or (now+PtrUInt(NotBeforeDelta)<time) then
         exit;
     end;
   end;
   inc(P);
   if Signature<>nil then
-    SetRawUTF8(Signature^,P,StrLen(P));
+    FastSetString(Signature^,P,StrLen(P));
   result := jwtValid;
 end;
 
@@ -14902,6 +14990,10 @@ begin
   result := _TJWTClaim[claim];
 end;
 
+function ToText(claims: TJWTClaims): ShortString;
+begin
+  GetSetNameShort(TypeInfo(TJWTClaims),claims,result);
+end;
 
 {$endif NOVARIANTS}
 
@@ -14968,21 +15060,22 @@ asm // rcx=crc, rdx=buf, r8=len (linux: rdi, rsi, rdx)
         ja      @intel // only call Intel code if worth it
         shr     r8, 3
         jz      @2
+        {$ifdef FPC}align 8{$endif}
 @1:     {$ifdef FPC}
         crc32   rax, qword [rdx] // hash 8 bytes per opcode
         {$else}
         db $F2,$48,$0F,$38,$F1,$02 // circumvent Delphi inline asm compiler bug
         {$endif}
+        add     rdx, 8
         dec     r8
-        lea     rdx, [rdx + 8]
         jnz     @1
 @2:     and     ecx, 7
         jz      @0
         cmp     ecx, 4
         jb      @4
         crc32   eax, dword ptr[rdx]
+        add     rdx, 4
         sub     ecx, 4
-        lea     rdx, [rdx + 4]
         jz      @0
 @4:     crc32   eax, byte ptr[rdx]
         dec     ecx

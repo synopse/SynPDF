@@ -73,6 +73,12 @@
 
 }
 
+
+(********************** User-Trigerred Conditionals **********************)
+
+{  Those conditionals below can be enabled in your project Options,
+   to tune the compilation depending your setup or your project expectations. }
+
 {.$define PUREPASCAL}
 // define this if your compiler doesn't support Delphi's x86 asm
 // - is set automaticaly in case of a 64 bits compiler (only FPC exists now)
@@ -146,23 +152,18 @@
 // flag is available in Intel's CpuFeatures 
 // -> disabled by default, since in practice it is much slower for small blocks
 
-{$ifdef LVCL}
-   // NormToUpper[] exists only in our enhanced RTL
-  {$define OWNNORMTOUPPER}
-  // LVCL does not support variants
-  {$define NOVARIANTS}
-{$endif}
+{.$define NOXPOWEREDNAME}
+// define this to avoid sending "X-Powered-By: Synopse mORMot" HTTP header
 
-{$ifdef UNICODE}
-  {$undef ENHANCEDRTL} // Delphi 2009 and up don't have our Enhanced Runtime library
-  {$define HASVARUSTRING}
-  {$define HASCODEPAGE}
-  {$define FPC_OR_UNICODE}
-  { due to a bug in Delphi 2009+, we need to fake inheritance of record,
-    since TDynArrayHashed = object(TDynArray) fails to initialize
-    http://blog.synopse.info/post/2011/01/29/record-and-object-issue-in-Delphi-2010 }
-  {$define UNDIRECTDYNARRAY}
-{$endif}
+{.$define SQLVIRTUALLOGS}
+// enable low-level logging of SQlite3 virtual table query planner costs
+// -> to be used only for internal debugging
+
+
+
+{$ifdef FPC}
+
+(********************** FPC Conditionals **********************)
 
 { Free Pascal adaptation notes:
   - we use the Delphi compatibility mode
@@ -182,8 +183,6 @@
       conditional PUREPASCAL is defined (e.g. for CPUX64)
 }
 
-{$ifdef FPC}
-
   {$ifndef FPC_DELPHI}
     {$MODE DELPHI} // e.g. for asm syntax - disabled for FPC 2.6 compatibility
   {$endif}
@@ -196,7 +195,6 @@
 
   {$undef ENHANCEDRTL}    // there is no version of our Enhanced RTL for FPC
   {$undef DOPATCHTRTL}
-  {$define DELPHI5ORFPC}
   {$define USETYPEINFO}  // will use SynFPCTypInfo.pas wrapper
   {$define HASINLINE}
   {$define HASUINT64}
@@ -205,16 +203,47 @@
   {$define HASAESNI}
   {$define HASTTHREADSTART}
   {$define HASINTERFACEASTOBJECT}
+  {$define EXTENDEDTOSTRING_USESTR} // FloatToText uses str() in FPC
+  {$define DELPHI5ORFPC}
+  {$define FPC_OR_PUREPASCAL}
+  {$define FPC_OR_KYLIX}
   {$define FPC_OR_UNICODE}
   {$define FPC_ENUMHASINNER}
-  {$ifdef VER3_1_1} // if FPC_FULLVERSION>30100 ... ifend is not Delphi 5 compatible :(
-    {$define FPC_NEWRTTI} // RTTI has been enhanced in latest trunk
+
+  // $if FPC_FULLVERSION>20700 breaks Delphi 6-7 and SynProject :(
+  {$ifdef VER2_7}
+    {$define ISFPC27}
   {$endif}
-  {$ifdef FPC_NEWRTTI}
-    {$define ISDELPHI2010_OR_FPC_NEWRTTI}
-  {$else}
-    {$define DELPHI_OR_FPC_OLDRTTI}
-    {$define FPC_OLDRTTI}
+  {$ifdef VER3_0}
+    {$define ISFPC27}
+    {$define ISFPC30}
+    {$define HASDIRECTTYPEINFO}
+    // PTypeInfo would be stored with no pointer de-reference
+    // => Delphi and newer FPC uses a pointer reference to ease exe linking
+  {$endif}
+  {$ifdef VER3_1}
+    {$define ISFPC27}
+    {$define ISFPC30}
+    {.$define HASDIRECTTYPEINFO}
+    // define this for trunk revisions older than June 2016 - see
+    // http://wiki.freepascal.org/User_Changes_Trunk#RTTI_Binary_format_change
+  {$endif}
+  {$ifdef VER3_1_1} // if FPC_FULLVERSION>30100 ... ifend is not Delphi 5 compatible :(
+    {$define ISFPC32}
+  {$endif}
+  {$ifdef VER3_2}
+    {$define ISFPC27}
+    {$define ISFPC30}
+    {$define ISFPC32}
+  {$endif}
+  {$ifdef VER3_3}
+    {$define ISFPC27}
+    {$define ISFPC30}
+    {$define ISFPC32}
+  {$endif}
+
+  {$ifdef ANDROID}
+    {$define LINUX} // a Linux-based system
   {$endif}
 
   // define FPCSQLITE3STATIC to enable static-linked SQLite3 engine for FPC
@@ -240,10 +269,6 @@
     // note: problems with current static/aarch64-linux\sqlite3.o
   {$endif}
 
-  {$ifdef ANDROID}
-    {$define LINUX} // a Linux-based system
-  {$endif}
-
   {$ifdef BSD}
     // this includes Darwin and BSD family like FreeBSD
     {$define LINUX} // not true, but a POSIX/BSD system
@@ -264,24 +289,38 @@
   {$endif}
 
   {$ifdef CPU64}
+    {$define FPC_64}
     {$define PUREPASCAL} // e.g. x64, AARCH64
     {$ifdef CPUX64}
       {$define CPUINTEL}
+      {$define FPC_CPUINTEL}
       {$ASMMODE INTEL} // as Delphi expects
     {$endif CPUX64}
   {$else}
+    {$define FPC_32}
     {$ifdef CPUARM}
       {$define PUREPASCAL} // ARM32
     {$endif CPUARM}
     {$ifdef CPUX86}
       {$define CPUINTEL}
+      {$define FPC_CPUINTEL}
       {$ASMMODE INTEL} // as Delphi expects
     {$endif CPUX86}
   {$endif CPU64}
 
-  // FPC has its own RTTI layout only since late 3.x
-  // when http://bugs.freepascal.org/view.php?id=26774 has been fixed
-  {$ifdef FPC_NEWRTTI} // use dedicated branch conditional
+  {$ifdef ISFPC30}
+    {$ifndef MSWINDOWS}
+      // define FPCUSEVERSIONINFO to link low-level executable file information
+      // units in SynCommons.pas
+      // => disabled by default, to reduce the executable overhead
+      {.$define FPCUSEVERSIONINFO}
+    {$endif MSWINDOWS}
+  {$endif ISFPC30}
+
+  {$ifdef ISFPC32}
+    // FPC has its own RTTI layout only since late 3.x
+    {$define FPC_NEWRTTI}
+    // when http://bugs.freepascal.org/view.php?id=26774 has been fixed
     {$ifdef CPUINTEL}
       {$define HASINTERFACERTTI}
     {$endif}
@@ -291,29 +330,15 @@
     {$ifdef CPUAARCH64}
       {$define HASINTERFACERTTI}
     {$endif}
-  {$endif FPC_NEWRTTI}
+  {$endif}
 
-  {$define FPC_OR_PUREPASCAL}
-  {$define FPC_OR_KYLIX}
+  {$ifdef FPC_NEWRTTI}
+    {$define ISDELPHI2010_OR_FPC_NEWRTTI}
+  {$else}
+    {$define DELPHI_OR_FPC_OLDRTTI}
+    {$define FPC_OLDRTTI}
+  {$endif}
 
-  // $if FPC_FULLVERSION>20700 breaks Delphi 6-7 and SynProject :(
-  {$ifdef VER2_7}
-    {$define ISFPC27}
-  {$endif}
-  {$ifdef VER3_0}
-    {$define ISFPC27}
-    {$define ISFPC30}
-    {$define HASDIRECTTYPEINFO}
-    // PTypeInfo would be stored with no pointer de-reference
-    // => Delphi and newer FPC uses a pointer reference to ease exe linking
-  {$endif}
-  {$ifdef VER3_1}
-    {$define ISFPC27}
-    {$define ISFPC30}
-    {.$define HASDIRECTTYPEINFO}
-    // define this for trunk revisions older than June 2016 - see
-    // http://wiki.freepascal.org/User_Changes_Trunk#RTTI_Binary_format_change
-  {$endif}
   {$ifdef FPC_HAS_CPSTRING}
     // see http://wiki.freepascal.org/FPC_Unicode_support
     {$define HASCODEPAGE} // UNICODE means {$mode delphiunicode}
@@ -331,23 +356,30 @@
     {$define FPC_ENUMHASINNER}
   {$endif}
 
-  {$ifdef FPC_HAS_MANAGEMENT_OPERATORS}
-    {$define ISDELPHI2006ANDUP}
-  {$endif FPC_HAS_MANAGEMENT_OPERATORS}
-
-  {$ifdef ISFPC30}
-    {$ifndef MSWINDOWS}
-    // define FPCUSEVERSIONINFO to link low-level executable file information
-    // units in SynCommons.pas
-    // => disabled by default, to reduce the executable overhead
-    {.$define FPCUSEVERSIONINFO}
-    {$endif MSWINDOWS}
-  {$endif ISFPC30}
-
 
 {$else FPC}
 
+(********************** Delphi Conditionals **********************)
+
   {$define DELPHI_OR_FPC_OLDRTTI}
+
+  {$ifdef LVCL}
+    {$define OWNNORMTOUPPER} // NormToUpper[] exists only in our enhanced RTL
+    {$define NOVARIANTS} // LVCL does not support variants
+    {$define EXTENDEDTOSTRING_USESTR} // no FloatToText implemented in LVCL
+  {$endif}
+
+  {$ifdef UNICODE}
+    {$undef ENHANCEDRTL} // Delphi 2009 and up don't have our Enhanced Runtime library
+    {$define HASVARUSTRING}
+    {$define HASCODEPAGE}
+    {$define FPC_OR_UNICODE}
+    { due to a bug in Delphi 2009+, we need to fake inheritance of record,
+      since TDynArrayHashed = object(TDynArray) fails to initialize
+      http://blog.synopse.info/post/2011/01/29/record-and-object-issue-in-Delphi-2010 }
+    {$define UNDIRECTDYNARRAY}
+  {$endif}
+
   {$ifndef PUREPASCAL}
     {$define CPUINTEL} // Delphi only for Intel by now
   {$endif}
@@ -356,6 +388,7 @@
     {$define CPU64DELPHI}
     {$undef CPU32}
     {$define PUREPASCAL}   // no x86 32 bit asm to be used
+    {$define EXTENDEDTOSTRING_USESTR} // FloatToText() much slower in x64 mode
   {$else CPUX64}
     {$define CPU32} // Delphi compiler for 32 bit CPU
     {$define CPU32DELPHI}
@@ -371,6 +404,7 @@
         {$define FPC_OR_KYLIX}
         // Kylix 3 will be handled just like Delphi 7
         {$undef ENHANCEDRTL}   // Enhanced Runtime library not fully tested yet
+        {$define EXTENDEDTOSTRING_USESTR}
         {$define DOPATCHTRTL}  // nice speed up for server apps
         {$define NOVARCOPYPROC}
         {$define NOSQLITE3STATIC} // Kylix will use external sqlite3.so
@@ -384,6 +418,7 @@
         {$define DELPHI6OROLDER}
         {$define NOVARCOPYPROC}
         {$undef ENHANCEDRTL} // Delphi 6 doesn't have our Enhanced Runtime library
+        {$define EXTENDEDTOSTRING_USESTR} // no TFormatSettings before Delphi 7
       {$else}
         {$define ISDELPHI7ANDUP} // Delphi 7 or newer
         {$define WITHUXTHEME}   // VCL handle UI theming
@@ -399,89 +434,90 @@
     {$endif LINUX}
     {$if CompilerVersion >= 17}
       {$define ISDELPHI2005ANDUP} // Delphi 2005 or newer
-    {$ifend}
-    {$if CompilerVersion >= 18}
-      {$define ISDELPHI2006ANDUP} // Delphi 2006 or newer
-      {$define HASNEWFILEAGE}
-      {$define HASINLINE}
-      {$define HASINLINEDELPHI}
-      {$define HASINLINENOTX86}
-      {$define HASREGION}
-      {$define HASFASTMM4}
-    {$ifend}
-    {$ifdef VER180}
-      {$define ISDELPHI20062007} // to circumvent some specific bugs
-    {$endif}
-    {$ifdef VER185}
-      {$define ISDELPHI20062007}
-    {$endif}
-    {$if CompilerVersion > 18}
-      {$define ISDELPHI2007ANDUP} // Delphi 2007 or newer
-    {$ifend}
-    {$if CompilerVersion = 20}
-      {$define ISDELPHI2009} // Delphi 2009 has specific compilation issues :(
-      // for Delphi 2009 and up, use UNICODE conditional :)
-      {$define FPC_OR_UNICODE}
-    {$ifend}
-    {$if CompilerVersion >= 21.0}
-      // Delphi 2010/XE: Reduce EXE size by disabling much RTTI
-      {$define ISDELPHI2010}
-      {$define ISDELPHI2010_OR_FPC_NEWRTTI}
-      {$define FPC_OR_UNICODE}
-      {$define HASTTHREADSTART}
-      {$define HASINTERFACEASTOBJECT}
-      {$ifdef NEWRTTINOTUSED}
-        {$WEAKLINKRTTI ON}
-        {$RTTI EXPLICIT METHODS([]) PROPERTIES([]) FIELDS([])}
-      {$endif NEWRTTINOTUSED}
-    {$ifend}
-    {$if CompilerVersion >= 22.0}
-      {$define ISDELPHIXE}
-    {$ifend}
-    {$if CompilerVersion >= 23.0}
-      // Delphi XE2 has some cross-platform features
-      // e.g. {$ifdef ISDELPHIXE2}VCL.Graphics{$else}Graphics{$endif}
-      {$define ISDELPHIXE2}
-      {$define HASVARUSTRARG}
-      {$define HASTTHREADTERMINATESET} // introduced TThread.TerminateSet
-    {$ifend}
-    {$if CompilerVersion >= 24.0}
-      {$define ISDELPHIXE3}
-    {$ifend}
-    {$if CompilerVersion >= 25.0}
-      {$define ISDELPHIXE4}
-      {$define HASAESNI}
-    {$ifend}
-    {$if CompilerVersion >= 26.0}
-      {$define ISDELPHIXE5}
-      {$define PUBLISHRECORD}
-      // if defined, will handle RTTI available only since Delphi XE5 for
-      // record published properties 
-    {$ifend}
-    {$if CompilerVersion >= 27.0}
-      {$define ISDELPHIXE6}
-    {$ifend}
-    {$if CompilerVersion >= 28.0}
-      {$define ISDELPHIXE7}
-    {$ifend}
-    {$if CompilerVersion >= 29.0}
-      {$define ISDELPHIXE8}
-    {$ifend}
-    {$if CompilerVersion >= 30.0}
-      {$define ISDELPHI10}
-    {$ifend}
-    {$if CompilerVersion >= 31.0}
-      {$define ISDELPHI101}
-    {$ifend}
-    {$if CompilerVersion >= 32.0}
-      {$define ISDELPHI102}
-      {$ifdef CPUX64}
-      {$ifdef VER320withoutAprilUpdate}
-        {$undef HASINLINE} // circumvent Delphi 10.2 Tokyo Win64 compiler bug
+      {$if CompilerVersion >= 18}
+        {$define ISDELPHI2006ANDUP} // Delphi 2006 or newer
+        {$define HASNEWFILEAGE}
+        {$define HASINLINE}
+        {$define HASINLINEDELPHI}
         {$define HASINLINENOTX86}
+        {$define HASREGION}
+        {$define HASFASTMM4}
+      {$ifend}
+      {$ifdef VER180}
+        {$define ISDELPHI20062007} // to circumvent some specific bugs
       {$endif}
+      {$ifdef VER185}
+        {$define ISDELPHI20062007}
       {$endif}
-    {$ifend}
+      {$if CompilerVersion > 18}
+        {$define ISDELPHI2007ANDUP} // Delphi 2007 or newer
+      {$ifend}
+      {$if CompilerVersion = 20}
+        {$define ISDELPHI2009} // Delphi 2009 has specific compilation issues :(
+        // for Delphi 2009 and up, use UNICODE conditional :)
+        {$define FPC_OR_UNICODE}
+      {$ifend}
+      {$if CompilerVersion >= 21.0}
+        // Delphi 2010/XE: Reduce EXE size by disabling much RTTI
+        {$define ISDELPHI2010}
+        {$define ISDELPHI2010_OR_FPC_NEWRTTI}
+        {$define FPC_OR_UNICODE}
+        {$define HASTTHREADSTART}
+        {$define HASINTERFACEASTOBJECT}
+        {$ifdef NEWRTTINOTUSED}
+          {$WEAKLINKRTTI ON}
+          {$RTTI EXPLICIT METHODS([]) PROPERTIES([]) FIELDS([])}
+        {$endif NEWRTTINOTUSED}
+      {$ifend}
+      {$if CompilerVersion >= 22.0}
+        {$define ISDELPHIXE}
+      {$ifend}
+      {$if CompilerVersion >= 23.0}
+        // Delphi XE2 has some cross-platform features
+        // e.g. {$ifdef ISDELPHIXE2}VCL.Graphics{$else}Graphics{$endif}
+        {$define ISDELPHIXE2}
+        {$define HASVARUSTRARG}
+        {$define HASTTHREADTERMINATESET} // introduced TThread.TerminateSet
+      {$ifend}
+      {$if CompilerVersion >= 24.0}
+        {$define ISDELPHIXE3}
+      {$ifend}
+      {$if CompilerVersion >= 25.0}
+        {$define ISDELPHIXE4}
+        {$define HASAESNI}
+      {$ifend}
+      {$if CompilerVersion >= 26.0}
+        {$define ISDELPHIXE5}
+        {$define PUBLISHRECORD}
+        // if defined, will handle RTTI available only since Delphi XE5 for
+        // record published properties 
+      {$ifend}
+      {$if CompilerVersion >= 27.0}
+        {$define ISDELPHIXE6}
+      {$ifend}
+      {$if CompilerVersion >= 28.0}
+        {$define ISDELPHIXE7}
+      {$ifend}
+      {$if CompilerVersion >= 29.0}
+        {$define ISDELPHIXE8}
+      {$ifend}
+      {$if CompilerVersion >= 30.0}
+        {$define ISDELPHI10}
+      {$ifend}
+      {$if CompilerVersion >= 31.0}
+        {$define ISDELPHI101}
+      {$ifend}
+      {$if CompilerVersion >= 32.0}
+        {$define ISDELPHI102}
+        {$ifdef CPUX64}
+        {$ifdef VER320withoutAprilUpdate}
+          // circumvent early Delphi 10.2 Tokyo Win64 compiler bug
+          {$undef HASINLINE}
+          {$define HASINLINENOTX86}
+        {$endif}
+        {$endif}
+      {$ifend}
+    {$ifend CompilerVersion >= 17}
     {$ifopt O-} // if we don't expect fast code, don't optimize the framework
       {$undef ENHANCEDRTL}
       {$undef DOPATCHTRTL}
@@ -495,10 +531,14 @@
     {$define NOVARIANTS}
     {$define NOVARCOPYPROC}
     {$undef ENHANCEDRTL} // Delphi 5 doesn't have our Enhanced Runtime library
+    {$define EXTENDEDTOSTRING_USESTR} // no TFormatSettings before Delphi 7
     {$undef DOPATCHTRTL}
-  {$ENDIF}
+  {$ENDIF CONDITIONALEXPRESSIONS}
 
 {$endif FPC}
+
+
+(********************** Shared Conditionals **********************)
 
 {$ifdef PUREPASCAL}
   {$define NODELPHIASM}
@@ -516,6 +556,7 @@
 {$V-} // disable Var-String Checking
 {$T-} // Typed @ operator
 {$Z1} // enumerators stored as byte by default
+
 {$ifndef FPC}
   {$P+} // Open string params
   {$ifdef VER150}
@@ -524,26 +565,11 @@
     {$WARN UNSAFE_CODE OFF}
     {$WARN UNSAFE_CAST OFF}
   {$ENDIF}
-
   {$ifdef CONDITIONALEXPRESSIONS}  // Delphi 6 or newer
     {$WARN SYMBOL_PLATFORM OFF}
     {$WARN UNIT_PLATFORM OFF}
   {$endif}
 {$endif FPC}
-
-// see https://synopse.info/fossil/tktview?name=6593f0fbd1
-{$ifndef WITHUXTHEME}
-  {$define EXTENDEDTOSTRING_USESTR} // no TFormatSettings before Delphi 6
-{$endif}
-{$ifdef LVCL}
-  {$define EXTENDEDTOSTRING_USESTR} // no FloatToText implemented in LVCL
-{$endif}
-{$ifdef FPC}
-  {$define EXTENDEDTOSTRING_USESTR} // FloatToText uses str() in FPC
-{$endif}
-{$ifdef CPU64}
-  {$define EXTENDEDTOSTRING_USESTR} // FloatToText() much slower in x64 mode
-{$endif}
 
 {$ifdef CPUINTEL}
   {$ifdef CPUX86} // safest to reset x87 exceptions
@@ -573,10 +599,6 @@
   {$define NOSQLITE3ENCRYPT}
 {$endif}
 
-{.$define SQLVIRTUALLOGS}
-// enable low-level logging of SQlite3 virtual table query planner costs
-// -> to be used only for internal debugging
-
 {$ifdef MSWINDOWS}
   {$define USEWININET}         // publish TWinINet/TWinHttp/TWinHttpAPI classes
   {.$define ONLYUSEHTTPSOCKET} // for testing (no benefit vs http.sys)
@@ -591,5 +613,4 @@
   {$endif}
 {$endif}
 
-// define this to avoid sending "X-Powered-By: Synopse mORMot" HTTP header
-{.$define NOXPOWEREDNAME}
+
