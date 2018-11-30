@@ -1159,25 +1159,25 @@ function IsValidUTF8WithoutControlChars(const source: RawUTF8): Boolean; overloa
 function Utf8TruncateToUnicodeLength(var text: RawUTF8; maxUtf16: integer): boolean;
 
 /// will truncate the supplied UTF-8 value if its length exceeds the specified
-// UTF-8 Unicode characters count
+// bytes count
 // - this function will ensure that the returned content will contain only valid
 // UTF-8 sequence, i.e. will trim the whole trailing UTF-8 sequence
 // - returns FALSE if text was not truncated, TRUE otherwise
-function Utf8TruncateToLength(var text: RawUTF8; maxUTF8: cardinal): boolean;
+function Utf8TruncateToLength(var text: RawUTF8; maxBytes: cardinal): boolean;
 
 /// compute the truncated length of the supplied UTF-8 value if it exceeds the
-// specified UTF-8 Unicode characters count
+// specified bytes count
 // - this function will ensure that the returned content will contain only valid
 // UTF-8 sequence, i.e. will trim the whole trailing UTF-8 sequence
 // - returns maxUTF8 if text was not truncated, or the number of fitting bytes
-function Utf8TruncatedLength(const text: RawUTF8; maxUTF8: cardinal): integer; overload;
+function Utf8TruncatedLength(const text: RawUTF8; maxBytes: cardinal): integer; overload;
 
 /// compute the truncated length of the supplied UTF-8 value if it exceeds the
-// specified UTF-8 Unicode characters count
+// specified bytes count
 // - this function will ensure that the returned content will contain only valid
 // UTF-8 sequence, i.e. will trim the whole trailing UTF-8 sequence
 // - returns maxUTF8 if text was not truncated, or the number of fitting bytes
-function Utf8TruncatedLength(text: PAnsiChar; textlen,maxUTF8: cardinal): integer; overload;
+function Utf8TruncatedLength(text: PAnsiChar; textlen,maxBytes: cardinal): integer; overload;
 
 /// calculate the UTF-16 Unicode characters count of the UTF-8 encoded first line
 // - count may not match the UCS4 glyphs number, in case of UTF-16 surrogates
@@ -2910,7 +2910,9 @@ procedure Split(const Str: RawUTF8; const SepStr: array of RawUTF8;
 /// returns the last occurence of the given SepChar separated context
 // - e.g. SplitRight('01/2/34','/')='34'
 // - if SepChar doesn't appear, will return Str, e.g. SplitRight('123','/')='123'
-function SplitRight(const Str: RawUTF8; SepChar: AnsiChar): RawUTF8;
+// - if LeftStr is supplied, the RawUTF8 it points to will be filled with
+// the left part just before SepChar ('' if SepChar doesn't appear)
+function SplitRight(const Str: RawUTF8; SepChar: AnsiChar; LeftStr: PRawUTF8=nil): RawUTF8;
 
 /// returns the last occurence of the given SepChar separated context
 // - e.g. SplitRight('path/one\two/file.ext','/\')='file.ext', i.e.
@@ -5210,6 +5212,8 @@ type
     function KnownType: TDynArrayKind;  inline;
     procedure Clear;                    inline;
     procedure ElemCopy(const A; var B); inline;
+    function ElemPtr(index: PtrInt): pointer; inline;
+    procedure ElemCopyAt(index: PtrInt; var Dest); inline;
     // warning: you shall call ReHash() after manual Add/Delete
     function Add(const Elem): integer;  inline;
     procedure Delete(aIndex: PtrInt);  inline;
@@ -5682,12 +5686,21 @@ type
     /// will try to acquire the mutex
     // - use as such to avoid race condition (from a Safe: TSynLocker property):
     // ! if Safe.TryLock then
-    // ! try
-    // !   ...
-    // ! finally
-    // !   Safe.Unlock;
-    // ! end;
+    // !   try
+    // !     ...
+    // !   finally
+    // !     Safe.Unlock;
+    // !   end;
     function TryLock: boolean; {$ifdef HASINLINE}inline;{$endif}
+    /// will try to acquire the mutex for a given time
+    // - use as such to avoid race condition (from a Safe: TSynLocker property):
+    // ! if Safe.TryLockMS(100) then
+    // !   try
+    // !     ...
+    // !   finally
+    // !     Safe.Unlock;
+    // !   end;
+    function TryLockMS(retryms: integer): boolean;
     /// release the instance for exclusive access
     procedure UnLock; {$ifdef HASINLINE}inline;{$endif}
     /// will enter the mutex until the IUnknown reference is released
@@ -13405,6 +13418,7 @@ type
 // depending on the underlying operating system
 // - will use SHGetFolderPath and the corresponding CSIDL constant under Windows
 // - will return the $HOME folder (whatever kind value is given) otherwise
+// - returned folder name contains the trailing path delimiter (\ or /)
 function GetSystemPath(kind: TSystemPath): TFileName;
 
 /// self-modifying code - change some memory buffer in the code segment
@@ -16291,14 +16305,16 @@ type
   /// value object able to gather information about a system drive
   TSynMonitorDisk = class(TSynPersistent)
   protected
-    fName: RawUTF8;
-    fVolumeName: RawUTF8;
+    fName: TFileName;
+    {$ifdef MSWINDOWS}
+    fVolumeName: TFileName;
+    {$endif}
     fAvailableSize: TSynMonitorOneSize;
     fFreeSize: TSynMonitorOneSize;
     fTotalSize: TSynMonitorOneSize;
     fLastDiskInfoRetrievedTix: cardinal;
     procedure RetrieveDiskInfo; virtual;
-    function GetName: RawUTF8;
+    function GetName: TFileName;
     function GetAvailable: TSynMonitorOneSize;
     function GetFree: TSynMonitorOneSize;
     function GetTotal: TSynMonitorOneSize;
@@ -16312,9 +16328,11 @@ type
     class function FreeAsText: RawUTF8;
   published
     /// the disk name
-    property Name: RawUTF8 read GetName;
-    /// the volume name
-    property VolumeName: RawUTF8 read fVolumeName write fVolumeName;
+    property Name: TFileName read GetName;
+    {$ifdef MSWINDOWS}
+    /// the volume name (only available on Windows)
+    property VolumeName: TFileName read fVolumeName write fVolumeName;
+    {$endif MSWINDOWS}
     /// space currently available on this disk for the current user
     // - may be less then FreeSize, if user quotas are specified
     property AvailableSize: TSynMonitorOneSize read GetAvailable;
@@ -16323,6 +16341,12 @@ type
     /// total space
     property TotalSize: TSynMonitorOneSize read GetTotal;
   end;
+
+/// retrieve low-level information about a given disk partition
+// - as used by TSynMonitorDisk
+procedure GetDiskInfo(var aDriveFolderOrFile: TFileName;
+  out aAvailableBytes, aFreeBytes, aTotalBytes: QWord
+  {$ifdef MSWINDOWS}; aVolumeName: PFileName = nil{$endif});
 
 
 { ******************* cross-cutting classes and functions ***************** }
@@ -19629,35 +19653,35 @@ begin
   result := false;
 end;
 
-function Utf8TruncateToLength(var text: RawUTF8; maxUTF8: cardinal): boolean;
+function Utf8TruncateToLength(var text: RawUTF8; maxBytes: cardinal): boolean;
 begin
-  if cardinal(length(text))<maxUTF8 then begin
+  if cardinal(length(text))<maxBytes then begin
     result := false;
     exit; // nothing to truncate
   end;
-  while (maxUTF8>0) and (ord(text[maxUTF8]) and $c0=$80) do dec(maxUTF8);
-  if (maxUTF8>0) and (ord(text[maxUTF8]) and $80<>0) then dec(maxUTF8);
-  SetLength(text,maxUTF8);
+  while (maxBytes>0) and (ord(text[maxBytes]) and $c0=$80) do dec(maxBytes);
+  if (maxBytes>0) and (ord(text[maxBytes]) and $80<>0) then dec(maxBytes);
+  SetLength(text,maxBytes);
   result := true;
 end;
 
-function Utf8TruncatedLength(const text: RawUTF8; maxUTF8: cardinal): integer;
+function Utf8TruncatedLength(const text: RawUTF8; maxBytes: cardinal): integer;
 begin
   result := length(text);
-  if cardinal(result)<maxUTF8 then
+  if cardinal(result)<maxBytes then
     exit;
-  result := maxUTF8;
+  result := maxBytes;
   while (result>0) and (ord(text[result]) and $c0=$80) do dec(result);
   if (result>0) and (ord(text[result]) and $80<>0) then dec(result);
 end;
 
-function Utf8TruncatedLength(text: PAnsiChar; textlen,maxUTF8: cardinal): integer;
+function Utf8TruncatedLength(text: PAnsiChar; textlen,maxBytes: cardinal): integer;
 begin
-  if textlen<maxUTF8 then begin
+  if textlen<maxBytes then begin
     result := textlen;
     exit;
   end;
-  result := maxUTF8;
+  result := maxBytes;
   while (result>0) and (ord(text[result]) and $c0=$80) do dec(result);
   if (result>0) and (ord(text[result]) and $80<>0) then dec(result);
 end;
@@ -22110,6 +22134,10 @@ function VariantToBoolean(const V: Variant; var Value: Boolean): boolean;
 var tmp: TVarData;
 begin
   case TVarData(V).VType of
+  varEmpty, varNull: begin
+    result := false;
+    exit;
+  end;
   varBoolean:
     Value := TVarData(V).VBoolean;
   varInteger: // coming e.g. from GetJsonField()
@@ -23039,15 +23067,19 @@ asm
 end;
 {$endif}
 
-function SplitRight(const Str: RawUTF8; SepChar: AnsiChar): RawUTF8;
+function SplitRight(const Str: RawUTF8; SepChar: AnsiChar; LeftStr: PRawUTF8): RawUTF8;
 var i: PtrInt;
 begin
   for i := length(Str) downto 1 do
     if Str[i]=SepChar then begin
       result := copy(Str,i+1,maxInt);
+      if LeftStr<>nil then
+        LeftStr^ := copy(Str,1,i-1);
       exit;
     end;
   result := Str;
+  if LeftStr<>nil then
+    LeftStr^ := '';
 end;
 
 function SplitRights(const Str, SepChar: RawUTF8): RawUTF8;
@@ -31485,7 +31517,7 @@ end;
 
 function FastLocateIntegerSorted(P: PIntegerArray; R: PtrInt; Value: integer): PtrInt;
 var L,i: PtrInt;
-   cmp: integer;
+    cmp: integer;
 begin
   if R<0 then
     result := 0 else begin
@@ -47665,11 +47697,12 @@ begin
     if PosiEnd>MemStream.Size then
       MemStream.Size := PosiEnd;
     if SaveTo(PAnsiChar(MemStream.Memory)+Posi)-MemStream.Memory<>PosiEnd then
-      EStreamError.Create('TDynArray.SaveToStream');
+      raise EStreamError.Create('TDynArray.SaveToStream: SaveTo');
     MemStream.Seek(PosiEnd,soBeginning);
   end else begin
     tmp := SaveTo;
-    Stream.Write(pointer(tmp)^,length(tmp));
+    if Stream.Write(pointer(tmp)^,length(tmp))<>length(tmp) then
+      raise EStreamError.Create('TDynArray.SaveToStream: Write error');
   end;
 end;
 
@@ -49319,6 +49352,14 @@ procedure TDynArrayHashed.ElemCopy(const A; var B);
 begin
   InternalDynArray.ElemCopy(A,B);
 end;
+function TDynArrayHashed.ElemPtr(index: PtrInt): pointer;
+begin
+  result := InternalDynArray.ElemPtr(index);
+end;
+procedure TDynArrayHashed.ElemCopyAt(index: PtrInt; var Dest);
+begin
+  InternalDynArray.ElemCopyAt(index,Dest);
+end;
 function TDynArrayHashed.KnownType: TDynArrayKind;
 begin
   result := InternalDynArray.KnownType;
@@ -50559,6 +50600,17 @@ function TSynLocker.TryLock: boolean;
 begin
   result := not fLocked and
     (TryEnterCriticalSection(fSection){$ifdef LINUX}{$ifdef FPC}<>0{$endif}{$endif});
+end;
+
+function TSynLocker.TryLockMS(retryms: integer): boolean;
+begin
+  repeat
+    result := TryLock;
+    if result or (retryms <= 0) then
+      break;
+    SleepHiRes(1);
+    dec(retryms);
+  until false;
 end;
 
 function TSynLocker.ProtectMethod: IUnknown;
@@ -52742,7 +52794,9 @@ begin
     dec(BinBytes,ChunkBytes);
     if BinBytes=0 then break;
     // Flush writes B-buf+1 -> special one below:
-    inc(fTotalFileSize,fStream.Write(fTempBuf^,B-fTempBuf));
+    ChunkBytes := B-fTempBuf;
+    fStream.WriteBuffer(fTempBuf^,ChunkBytes);
+    inc(fTotalFileSize,ChunkBytes);
     B := fTempBuf;
   until false;
   dec(B); // allow CancelLastChar
@@ -53058,7 +53112,9 @@ begin
       inc(PByte(P),i);
       dec(Len,i);
       // FlushInc writes B-buf+1 -> special one below:
-      inc(fTotalFileSize,fStream.Write(fTempBuf^,B-fTempBuf));
+      i := B-fTempBuf;
+      fStream.WriteBuffer(fTempBuf^,i);
+      inc(fTotalFileSize,i);
       B := fTempBuf;
     until false;
     dec(B); // allow CancelLastChar
@@ -53949,12 +54005,15 @@ begin
 end;
 
 procedure TTextWriter.FlushToStream;
+var i: PtrInt;
 begin
   if fEchos<>nil then begin
     EchoFlush;
     fEchoStart := 0;
   end;
-  inc(fTotalFileSize,fStream.Write(fTempBuf^,B-fTempBuf+1));
+  i := B-fTempBuf+1;
+  fStream.WriteBuffer(fTempBuf^,i);
+  inc(fTotalFileSize,i);
   if not (twoFlushToStreamNoAutoResize in fCustomOptions) and
      not (twoBufferIsExternal in fCustomOptions) and
      (fTempBufSize<49152) and
@@ -53996,7 +54055,7 @@ begin
   CancelAll;
   if (fInitialStreamPosition=0) and fStream.InheritsFrom(TRawByteStringStream) then
     TRawByteStringStream(fStream).fDataString := text else
-    fStream.Write(pointer(text)^,length(text));
+    fStream.WriteBuffer(pointer(text)^,length(text));
   fTotalFileSize := fInitialStreamPosition+cardinal(length(text));
 end;
 
@@ -54076,8 +54135,10 @@ begin
         main := Base64EncodeMain(PAnsiChar(fTempBuf),P,n);
         n := main*4;
         if n<cardinal(fTempBufSize)-4 then
-          inc(B,n) else
-          inc(fTotalFileSize,fStream.Write(fTempBuf^,n));
+          inc(B,n) else begin
+          fStream.WriteBuffer(fTempBuf^,n);
+          inc(fTotalFileSize,n);
+        end;
         n := main*3;
         inc(P,n);
         dec(Len,n);
@@ -57105,7 +57166,7 @@ begin
   inherited;
 end;
 
-function TSynMonitorDisk.GetName: RawUTF8;
+function TSynMonitorDisk.GetName: TFileName;
 begin
   RetrieveDiskInfo;
   result := fName;
@@ -57130,72 +57191,77 @@ begin
 end;
 
 class function TSynMonitorDisk.FreeAsText: RawUTF8;
+var name: TFileName;
+    avail,free,total: QWord;
 begin
-  with TSynMonitorDisk.Create do
-  try
-    FormatUTF8('% % / %',[Name,FreeSize.Text,TotalSize.Text],result);
-  finally
-    Free;
-  end;
+  GetDiskInfo(name,avail,free,total);
+  FormatUTF8('% % / %',[name, KB(free),KB(total)],result);
 end;
 
 {$ifdef MSWINDOWS}
 function GetDiskFreeSpaceExA(lpDirectoryName: PAnsiChar;
   var lpFreeBytesAvailableToCaller, lpTotalNumberOfBytes,
-  lpTotalNumberOfFreeBytes: QWord): LongBool; stdcall; external kernel32;
+      lpTotalNumberOfFreeBytes: QWord): LongBool; stdcall; external kernel32;
+function GetDiskFreeSpaceExW(lpDirectoryName: PWideChar;
+  var lpFreeBytesAvailableToCaller, lpTotalNumberOfBytes,
+      lpTotalNumberOfFreeBytes: QWord): LongBool; stdcall; external kernel32;
 {$endif}
 
-procedure TSynMonitorDisk.RetrieveDiskInfo;
-  procedure RetrieveInfo;
-  {$ifdef MSWINDOWS}
-  var tmp: array[byte] of AnsiChar;
-      dummy,flags: DWORD;
-      dn: RawUTF8;
-  begin
-    if fName='' then
-      fName := UpperCase(StringToUTF8(ExtractFileDrive(ExeVersion.ProgramFilePath)));
-    dn := fName;
-    if (dn<>'') and (dn[2]=':') and (dn[3]=#0) then
-      dn := dn+'\';
-    if fVolumeName='' then begin
-      tmp[0] := #0;
-      GetVolumeInformationA(pointer(dn),tmp,SizeOf(tmp),nil,dummy,flags,nil,0);
-      SetString(fVolumeName,PAnsiChar(@tmp),StrLen(@tmp));
-    end;
-    GetDiskFreeSpaceExA(pointer(dn),PQWord(@fAvailableSize.fBytes)^,
-      PQWord(@fTotalSize.fBytes)^,PQWord(@fFreeSize.fBytes)^);
-  {$else}
-  {$ifdef KYLIX3}
-  var fs: TStatFs64;
-      h: THandle;
-  begin
-    if fName='' then
-      fName := '.';
-    h := FileOpen(fName,fmShareDenyNone);
-    fstatfs64(h,fs);
-    FileClose(h);
-    fAvailableSize.fBytes := fs.f_bavail*fs.f_bsize;
-    fFreeSize.fBytes := fAvailableSize.fBytes;
-    fTotalSize.fBytes := fs.f_blocks*fs.f_bsize;
-  {$endif}
-  {$ifdef FPC}
-  var fs: tstatfs;
-  begin
-    if fName='' then
-      fName := '.';
-    fpStatFS(fName,@fs);
-    fAvailableSize.fBytes := QWord(fs.bavail)*QWord(fs.bsize);
-    fFreeSize.fBytes := fAvailableSize.fBytes;
-    fTotalSize.fBytes := QWord(fs.blocks)*QWord(fs.bsize);
-  {$endif}
-  {$endif}
+procedure GetDiskInfo(var aDriveFolderOrFile: TFileName;
+  out aAvailableBytes, aFreeBytes, aTotalBytes: QWord
+  {$ifdef MSWINDOWS}; aVolumeName: PFileName = nil{$endif});
+{$ifdef MSWINDOWS}
+var tmp: array[0..MAX_PATH-1] of Char;
+    dummy,flags: DWORD;
+    dn: TFileName;
+begin
+  if aDriveFolderOrFile='' then
+    aDriveFolderOrFile := SysUtils.UpperCase(ExtractFileDrive(ExeVersion.ProgramFilePath));
+  dn := aDriveFolderOrFile;
+  if (dn<>'') and (dn[2]=':') and (dn[3]=#0) then
+    dn := dn+'\';
+  if (aVolumeName<>nil) and (aVolumeName^='') then begin
+    tmp[0] := #0;
+    GetVolumeInformation(pointer(dn),tmp,MAX_PATH,nil,dummy,flags,nil,0);
+    aVolumeName^ := tmp;
   end;
+  {$ifdef UNICODE}GetDiskFreeSpaceExW{$else}GetDiskFreeSpaceExA{$endif}(
+    pointer(dn),aAvailableBytes,aTotalBytes,aFreeBytes);
+{$else}
+{$ifdef KYLIX3}
+var fs: TStatFs64;
+    h: THandle;
+begin
+  if aDriveFolderOrFile='' then
+    aDriveFolderOrFile := '.';
+  h := FileOpen(aDriveFolderOrFile,fmShareDenyNone);
+  fstatfs64(h,fs);
+  FileClose(h);
+  aAvailableBytes := fs.f_bavail*fs.f_bsize;
+  aFreeBytes := aAvailableBytes;
+  aTotalBytes := fs.f_blocks*fs.f_bsize;
+{$endif}
+{$ifdef FPC}
+var fs: tstatfs;
+begin
+  if aDriveFolderOrFile='' then
+    aDriveFolderOrFile := '.';
+  fpStatFS(aDriveFolderOrFile,@fs);
+  aAvailableBytes := QWord(fs.bavail)*QWord(fs.bsize);
+  aFreeBytes := aAvailableBytes; // no user Quota involved here
+  aTotalBytes := QWord(fs.blocks)*QWord(fs.bsize);
+{$endif FPC}
+{$endif MSWINDOWS}
+end;
+
+procedure TSynMonitorDisk.RetrieveDiskInfo;
 var tix: cardinal;
 begin
   tix := GetTickCount64 shr 7; // allow 128 ms resolution for updates
   if fLastDiskInfoRetrievedTix<>tix then begin
     fLastDiskInfoRetrievedTix := tix;
-    RetrieveInfo;
+    GetDiskInfo(fName,PQWord(@fAvailableSize.fBytes)^,PQWord(@fFreeSize.fBytes)^,
+      PQWord(@fTotalSize.fBytes)^{$ifdef MSWINDOWS},@fVolumeName{$endif});
   end;
 end;
 
@@ -59020,8 +59086,8 @@ begin
     fSafe.Padding[DIC_TIMETIX].VInteger := now;
     for i := fSafe.Padding[DIC_TIMECOUNT].VInteger-1 downto 0 do
       if (now>fTimeOut[i]) and (fTimeOut[i]<>0) and
-         (not Assigned(fOnCanDelete) or fOnCanDelete(fKeys.{$ifdef UNDIRECTDYNARRAY}
-         InternalDynArray.{$endif}ElemPtr(i)^,fValues.ElemPtr(i)^,i)) then begin
+         (not Assigned(fOnCanDelete) or
+         fOnCanDelete(fKeys.ElemPtr(i)^,fValues.ElemPtr(i)^,i)) then begin
         fKeys.Delete(i);
         fValues.Delete(i);
         fTimeOuts.Delete(i);
@@ -59162,7 +59228,7 @@ begin
     ndx := fKeys.FindHashed(aKey);
     if ndx<0 then
       exit;
-    nested.Init(fValues.ElemType, fValues.ElemPtr(ndx)^);
+    nested.Init(fValues.ElemType,fValues.ElemPtr(ndx)^);
     case aAction of
     iaFind:
       result := nested.Find(aArrayValue)>=0;
@@ -59764,8 +59830,7 @@ begin
     fMap := 0;
   end;
   {$else}
-  if (fBuf<>nil) and (fBufSize>0)
-    {$ifndef KYLIX3} and (fFileSize<>fBufSize){$endif} then
+  if (fBuf<>nil) and (fBufSize>0) then
     {$ifdef KYLIX3}munmap{$else}fpmunmap{$endif}(fBuf,fBufSize);
   {$endif}
   fBuf := nil;
@@ -59915,7 +59980,7 @@ end;
 function TFileBufferWriter.Flush: Int64;
 begin
   if fPos>0 then begin
-    fStream.Write(fBuffer^,fPos);
+    fStream.WriteBuffer(fBuffer^,fPos);
     fPos := 0;
   end;
   result := fTotalWritten;
@@ -59938,11 +60003,11 @@ begin
   inc(fTotalWritten,DataLen);
   if fPos+DataLen>fBufLen then begin
     if fPos>0 then begin
-      fStream.Write(fBuffer^,fPos);
+      fStream.WriteBuffer(fBuffer^,fPos);
       fPos := 0;
     end;
     if DataLen>fBufLen then begin
-      fStream.Write(Data^,DataLen);
+      fStream.WriteBuffer(Data^,DataLen);
       exit;
     end;
   end;
@@ -59959,7 +60024,7 @@ begin
       len := fBufLen else
       len := Count;
     if fPos+len>fBufLen then begin
-      fStream.Write(fBuffer^,fPos);
+      fStream.WriteBuffer(fBuffer^,fPos);
       fPos := 0;
     end;
     FillcharFast(fBuffer^[fPos],len,Data);
@@ -59971,7 +60036,7 @@ end;
 procedure TFileBufferWriter.Write1(Data: byte);
 begin
   if fPos+1>fBufLen then begin
-    fStream.Write(fBuffer^,fPos);
+    fStream.WriteBuffer(fBuffer^,fPos);
     fPos := 0;
   end;
   fBuffer^[fPos] := Data;
@@ -59982,7 +60047,7 @@ end;
 procedure TFileBufferWriter.Write2(Data: word);
 begin
   if fPos+2>fBufLen then begin
-    fStream.Write(fBuffer^,fPos);
+    fStream.WriteBuffer(fBuffer^,fPos);
     fPos := 0;
   end;
   PWord(@fBuffer^[fPos])^ := Data;
@@ -59993,7 +60058,7 @@ end;
 procedure TFileBufferWriter.Write4(Data: integer);
 begin
   if fPos+SizeOf(integer)>fBufLen then begin
-    fStream.Write(fBuffer^,fPos);
+    fStream.WriteBuffer(fBuffer^,fPos);
     fPos := 0;
   end;
   PInteger(@fBuffer^[fPos])^ := Data;
@@ -60009,7 +60074,7 @@ end;
 procedure TFileBufferWriter.Write8(const Data8Bytes);
 begin
   if fPos+SizeOf(Int64)>fBufLen then begin
-    fStream.Write(fBuffer^,fPos);
+    fStream.WriteBuffer(fBuffer^,fPos);
     fPos := 0;
   end;
   PInt64(@fBuffer^[fPos])^ := Int64(Data8Bytes);
@@ -60051,7 +60116,7 @@ var len: integer;
 begin
   len := DA.SaveToLength;
   if (len<=fBufLen) and (fPos+len>fBufLen) then begin
-    fStream.Write(fBuffer^,fPos);
+    fStream.WriteBuffer(fBuffer^,fPos);
     fPos := 0;
   end;
   if fPos+len>fBufLen then begin
@@ -60088,7 +60153,7 @@ begin
     raise ESynException.CreateUTF8('%.Write(VType=%) VariantSaveLength=0',
       [self,TVarData(Value).VType]);
   if fPos+len>fBufLen then begin
-    fStream.Write(fBuffer^,fPos);
+    fStream.WriteBuffer(fBuffer^,fPos);
     fPos := 0;
     if len>fBufLen then begin
       GetMem(tmp,len);
@@ -60103,7 +60168,7 @@ begin
   inc(fTotalWritten,len);
   if tmp=nil then
     inc(fPos,len) else begin
-    fStream.Write(tmp^,len);
+    fStream.WriteBuffer(tmp^,len);
     FreeMem(tmp);
   end;
 end;
@@ -60127,7 +60192,7 @@ begin
   while Len>0 do begin
     Dest := pointer(fBuffer);
     if fPos+Len>fBufLen then begin
-      fStream.Write(fBuffer^,fPos);
+      fStream.WriteBuffer(fBuffer^,fPos);
       fPos := 0;
     end else
       inc(Dest,fPos);
@@ -60209,7 +60274,7 @@ begin
       if ValuesCount=0 then
         break;
     end;
-    fStream.Write(fBuffer^,fPos);
+    fStream.WriteBuffer(fBuffer^,fPos);
     fPos := 0;
   until false;
 end;
@@ -60256,7 +60321,7 @@ procedure TFileBufferWriter.WriteVarUInt32(Value: PtrUInt);
 var pos: integer;
 begin
   if fPos+16>fBufLen then begin
-    fStream.Write(fBuffer^,fPos);
+    fStream.WriteBuffer(fBuffer^,fPos);
     fPos := 0;
   end;
   pos := fPos;
@@ -60268,7 +60333,7 @@ procedure TFileBufferWriter.WriteVarInt64(Value: Int64);
 var pos: integer;
 begin
   if fPos+48>fBufLen then begin
-    fStream.Write(fBuffer^,fPos);
+    fStream.WriteBuffer(fBuffer^,fPos);
     fPos := 0;
   end;
   pos := fPos;
@@ -60280,7 +60345,7 @@ procedure TFileBufferWriter.WriteVarUInt64(Value: QWord);
 var pos: integer;
 begin
   if fPos+48>fBufLen then begin
-    fStream.Write(fBuffer^,fPos);
+    fStream.WriteBuffer(fBuffer^,fPos);
     fPos := 0;
   end;
   pos := fPos;
@@ -60470,7 +60535,7 @@ begin
       if ValuesCount=0 then
         break;
     end;
-    fStream.Write(fBuffer^,fPos);
+    fStream.WriteBuffer(fBuffer^,fPos);
     fPos := 0;
   until false;
 end;
@@ -60548,7 +60613,7 @@ begin
       if ValuesCount=0 then
         break;
     end;
-    fStream.Write(fBuffer^,fPos);
+    fStream.WriteBuffer(fBuffer^,fPos);
     fPos := 0;
   until false;
 end;
@@ -61838,11 +61903,11 @@ begin
       D := tmp.buf;
     Head.CompressedSize := result;
     Head.HashCompressed := Hash32(D,result);
-    Dest.Write(Head,SizeOf(Head));
-    Dest.Write(D^,Head.CompressedSize);
+    Dest.WriteBuffer(Head,SizeOf(Head));
+    Dest.WriteBuffer(D^,Head.CompressedSize);
     Trailer.HeaderRelativeOffset := result+(SizeOf(Head)+SizeOf(Trailer));
     Trailer.Magic := Magic;
-    Dest.Write(Trailer,SizeOf(Trailer));
+    Dest.WriteBuffer(Trailer,SizeOf(Trailer));
     result := Head.CompressedSize+(SizeOf(Head)+SizeOf(Trailer));
   finally
     tmp.Done;
@@ -62636,9 +62701,9 @@ var i: integer;
 begin
   i := length(Header);
   if i>0 then
-    Dest.Write(pointer(Header)^,i);
+    Dest.WriteBuffer(pointer(Header)^,i);
   if fMap.Size>0 then
-    Dest.Write(fMap.Buffer^,fMap.Size);
+    Dest.WriteBuffer(fMap.Buffer^,fMap.Size);
   if fAppendedLinesCount=0 then
     exit;
   W := TTextWriter.Create(Dest,@temp,SizeOf(temp));
