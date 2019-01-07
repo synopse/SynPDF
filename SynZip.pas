@@ -6,7 +6,7 @@ unit SynZip;
 {
     This file is part of Synopse framework.
 
-    Synopse framework. Copyright (C) 2018 Arnaud Bouchez
+    Synopse framework. Copyright (C) 2019 Arnaud Bouchez
       Synopse Informatique - https://synopse.info
 
   *** BEGIN LICENSE BLOCK *****
@@ -25,7 +25,7 @@ unit SynZip;
 
   The Initial Developer of the Original Code is Arnaud Bouchez.
 
-  Portions created by the Initial Developer are Copyright (C) 2018
+  Portions created by the Initial Developer are Copyright (C) 2019
   the Initial Developer. All Rights Reserved.
 
   Contributor(s):
@@ -315,7 +315,7 @@ function CompressGZip(var DataRawByteString; Compress: boolean): AnsiString;
 // - will use internaly a level compression of 1, i.e. fastest available (content
 // of 4803 bytes is compressed into 700, and time is 440 us instead of 220 us)
 // - deflate content encoding is pretty inconsistent in practice, so slightly
-// slower CompressGZip() is preferred - http://stackoverflow.com/a/9186091/458259
+// slower CompressGZip() is preferred - http://stackoverflow.com/a/9186091
 function CompressDeflate(var DataRawByteString; Compress: boolean): AnsiString;
 
 /// (un)compress a data content using the zlib algorithm
@@ -323,7 +323,7 @@ function CompressDeflate(var DataRawByteString; Compress: boolean): AnsiString;
 // - will use internaly a level compression of 1, i.e. fastest available (content
 // of 4803 bytes is compressed into 700, and time is 440 us instead of 220 us)
 // - zlib content encoding is pretty inconsistent in practice, so slightly
-// slower CompressGZip() is preferred - http://stackoverflow.com/a/9186091/458259
+// slower CompressGZip() is preferred - http://stackoverflow.com/a/9186091
 function CompressZLib(var DataRawByteString; Compress: boolean): AnsiString;
 
 /// low-level check of the code returned by the ZLib library

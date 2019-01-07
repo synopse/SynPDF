@@ -20,7 +20,7 @@
 
   The Initial Developer of the Original Code is Arnaud Bouchez.
 
-  Portions created by the Initial Developer are Copyright (C) 2018
+  Portions created by the Initial Developer are Copyright (C) 2019
   the Initial Developer. All Rights Reserved.
 
   Contributor(s):
@@ -200,7 +200,7 @@
   {$define HASUINT64}
   {$define HASINLINENOTX86}
   {$define NODELPHIASM}   // ignore low-level System.@LStrFromPCharLen calls
-  {$define HASAESNI}
+  {$define HASAESNI} // should be commented to test project with valgrind
   {$define HASTTHREADSTART}
   {$define HASINTERFACEASTOBJECT}
   {$define EXTENDEDTOSTRING_USESTR} // FloatToText uses str() in FPC
@@ -442,6 +442,9 @@
         {$define HASINLINENOTX86}
         {$define HASREGION}
         {$define HASFASTMM4}
+        // you can define this so that GetMemoryInfo/TSynMonitorMemory returns
+        // low-level FastMM4 information
+        {.$define WITH_FASTMM4STATS}
       {$ifend}
       {$ifdef VER180}
         {$define ISDELPHI20062007} // to circumvent some specific bugs

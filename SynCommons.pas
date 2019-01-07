@@ -6,7 +6,7 @@ unit SynCommons;
 (*
     This file is part of Synopse framework.
 
-    Synopse framework. Copyright (C) 2018 Arnaud Bouchez
+    Synopse framework. Copyright (C) 2019 Arnaud Bouchez
       Synopse Informatique - https://synopse.info
 
   *** BEGIN LICENSE BLOCK *****
@@ -25,7 +25,7 @@ unit SynCommons;
 
   The Initial Developer of the Original Code is Arnaud Bouchez.
 
-  Portions created by the Initial Developer are Copyright (C) 2018
+  Portions created by the Initial Developer are Copyright (C) 2019
   the Initial Developer. All Rights Reserved.
 
   Contributor(s):
@@ -74,12 +74,8 @@ unit SynCommons;
 interface
 
 uses
-{$ifndef LVCL}
-{$ifndef FPC}
-{$ifndef HASFASTMM4}
+{$ifdef WITH_FASTMM4STATS}
   FastMM4,
-{$endif}
-{$endif}
 {$endif}
 {$ifdef MSWINDOWS}
   Windows,
@@ -771,6 +767,9 @@ type
   // - could be used e.g. to make a temporary copy when JSON is parsed in-place
   // - call one of the Init() overloaded methods, then Done to release its memory
   // - will avoid temporary memory allocation via the heap for up to 4KB of data
+  // - all Init() methods will allocate 16 more bytes, for a trailing #0 and
+  // to ensure our fast JSON parsing won't trigger any GPF (since it may read
+  // up to 4 bytes ahead via its PInteger() trick) or any SSE4.2 function
   {$ifdef UNICODE}TSynTempBuffer = record{$else}TSynTempBuffer = object{$endif}
   public
     /// the text/binary length, in bytes, excluding the trailing #0
@@ -786,7 +785,7 @@ type
     /// initialize a temporary copy of the supplied text buffer
     procedure Init(Source: pointer; SourceLen: integer); overload;
     /// initialize a new temporary buffer of a given number of bytes
-    function Init(SourceLen: integer): pointer; overload;
+    function Init(SourceLen: integer): pointer; overload; {$ifdef HASINLINE}inline;{$endif}
     /// initialize the buffer returning the internal buffer size (4095 bytes)
     // - could be used e.g. for an API call, first trying with plain temp.Init
     // and using temp.buf and temp.len safely in the call, only calling
@@ -1419,7 +1418,7 @@ procedure VariantToInlineValue(const V: Variant; var result: RawUTF8);
 function VariantToVariantUTF8(const V: Variant): variant;
 
 /// faster alternative to Finalize(aVariantDynArray)
-// - this function will take in account and optimize the release of a dynamic
+// - this function will take account and optimize the release of a dynamic
 // array of custom variant types values
 // - for instance, an array of TDocVariant will be optimized for speed
 procedure VariantDynArrayClear(var Value: TVariantDynArray);
@@ -1651,7 +1650,8 @@ function FormatUTF8(const Format: RawUTF8; const Args, Params: array of const;
 /// read and store text into values[] according to fmt specifiers
 // - %d as PInteger, %D as PInt64, %u as PCardinal, %U as PQWord, %f as PDouble,
 // %F as PCurrency, %x as 8 hexa chars to PInteger, %X as 16 hexa chars to PInt64,
-// %s as PShortString (UTF-8 encoded)
+// %s as PShortString (UTF-8 encoded), %S as PRawUTF8, %L as PRawUTF8 (getting
+// all text until the end of the line)
 // - optionally, specifiers and any whitespace separated identifiers may be
 // extracted and stored into the ident[] array, e.g. '%dFirstInt %s %DOneInt64'
 // will store ['dFirstInt','s','DOneInt64'] into ident
@@ -2785,39 +2785,43 @@ function ConvertCaseUTF8(P: PUTF8Char; const Table: TNormTableByte): PtrInt;
 
 {$endif USENORMTOUPPER}
 
+/// check if the supplied text has some case-insentitive 'a'..'z','A'..'Z' chars
+// - will therefore be correct with true UTF-8 content, but only for 7 bit
+function IsCaseSensitive(const S: RawUTF8): boolean;
+
 /// fast conversion of the supplied text into uppercase
 // - this will only convert 'a'..'z' into 'A'..'Z' (no NormToUpper use), and
-// will therefore by correct with true UTF-8 content, but only for 7 bit
+// will therefore be correct with true UTF-8 content, but only for 7 bit
 function UpperCase(const S: RawUTF8): RawUTF8;
 
 /// fast conversion of the supplied text into uppercase
 // - this will only convert 'a'..'z' into 'A'..'Z' (no NormToUpper use), and
-// will therefore by correct with true UTF-8 content, but only for 7 bit
+// will therefore be correct with true UTF-8 content, but only for 7 bit
 procedure UpperCaseCopy(Text: PUTF8Char; Len: integer; var result: RawUTF8); overload;
 
 /// fast conversion of the supplied text into uppercase
 // - this will only convert 'a'..'z' into 'A'..'Z' (no NormToUpper use), and
-// will therefore by correct with true UTF-8 content, but only for 7 bit
+// will therefore be correct with true UTF-8 content, but only for 7 bit
 procedure UpperCaseCopy(const Source: RawUTF8; var Dest: RawUTF8); overload;
 
 /// fast in-place conversion of the supplied variable text into uppercase
 // - this will only convert 'a'..'z' into 'A'..'Z' (no NormToUpper use), and
-// will therefore by correct with true UTF-8 content, but only for 7 bit
+// will therefore be correct with true UTF-8 content, but only for 7 bit
 procedure UpperCaseSelf(var S: RawUTF8);
 
 /// fast conversion of the supplied text into lowercase
 // - this will only convert 'A'..'Z' into 'a'..'z' (no NormToLower use), and
-// will therefore by correct with true UTF-8 content
+// will therefore be correct with true UTF-8 content
 function LowerCase(const S: RawUTF8): RawUTF8;
 
 /// fast conversion of the supplied text into lowercase
 // - this will only convert 'A'..'Z' into 'a'..'z' (no NormToLower use), and
-// will therefore by correct with true UTF-8 content
+// will therefore be correct with true UTF-8 content
 procedure LowerCaseCopy(Text: PUTF8Char; Len: integer; var result: RawUTF8);
 
 /// fast in-place conversion of the supplied variable text into lowercase
 // - this will only convert 'A'..'Z' into 'a'..'z' (no NormToLower use), and
-// will therefore by correct with true UTF-8 content, but only for 7 bit
+// will therefore be correct with true UTF-8 content, but only for 7 bit
 procedure LowerCaseSelf(var S: RawUTF8);
 
 /// accurate conversion of the supplied UTF-8 content into the corresponding
@@ -3048,6 +3052,10 @@ function GetNextItem(var P: PUTF8Char; Sep: AnsiChar= ','): RawUTF8; overload;
 // - P=nil after call when end of text is reached
 procedure GetNextItem(var P: PUTF8Char; Sep: AnsiChar; var result: RawUTF8); overload;
 
+/// return next CSV string (unquoted if needed) from P
+// - P=nil after call when end of text is reached
+procedure GetNextItem(var P: PUTF8Char; Sep, Quote: AnsiChar; var result: RawUTF8); overload;
+
 /// return trimmed next CSV string from P
 // - P=nil after call when end of text is reached
 procedure GetNextItemTrimed(var P: PUTF8Char; Sep: AnsiChar; var result: RawUTF8);
@@ -3148,7 +3156,10 @@ function GetNextItemCurrency(var P: PUTF8Char; Sep: AnsiChar= ','): currency; ov
 procedure GetNextItemCurrency(var P: PUTF8Char; out result: currency; Sep: AnsiChar= ','); overload;
 
 /// return n-th indexed CSV string in P, starting at Index=0 for first one
-function GetCSVItem(P: PUTF8Char; Index: PtrUInt; Sep: AnsiChar = ','): RawUTF8;
+function GetCSVItem(P: PUTF8Char; Index: PtrUInt; Sep: AnsiChar = ','): RawUTF8; overload;
+
+/// return n-th indexed CSV string (unquoted if needed) in P, starting at Index=0 for first one
+function GetUnQuoteCSVItem(P: PUTF8Char; Index: PtrUInt; Sep: AnsiChar = ','; Quote: AnsiChar=''''): RawUTF8; overload;
 
 /// return n-th indexed CSV string in P, starting at Index=0 for first one
 // - this function return the generic string type of the compiler, and
@@ -3729,13 +3740,13 @@ function UnCamelCase(D, P: PUTF8Char): integer; overload;
 
 /// convert a string into an human-friendly CamelCase identifier
 // - replacing spaces or punctuations by an uppercase character
-// - it is not the reverse function to UnCamelCase()
+// - as such, it is not the reverse function to UnCamelCase()
 procedure CamelCase(P: PAnsiChar; len: integer; var s: RawUTF8;
   const isWord: TSynByteSet=[ord('0')..ord('9'),ord('a')..ord('z'),ord('A')..ord('Z')]); overload;
 
 /// convert a string into an human-friendly CamelCase identifier
 // - replacing spaces or punctuations by an uppercase character
-// - it is not the reverse function to UnCamelCase()
+// - as such, it is not the reverse function to UnCamelCase()
 procedure CamelCase(const text: RawUTF8; var s: RawUTF8;
   const isWord: TSynByteSet=[ord('0')..ord('9'),ord('a')..ord('z'),ord('A')..ord('Z')]); overload;
   {$ifdef HASINLINE}inline;{$endif}
@@ -4536,6 +4547,20 @@ type
 
   /// internal set to specify some standard Delphi arrays
   TDynArrayKinds = set of TDynArrayKind;
+
+  {$ifdef FPC}
+  /// map the Delphi/FPC dynamic array header (stored before each instance)
+  // - define globally for proper inlining
+  TDynArrayRec = packed record
+    /// dynamic array reference count (basic garbage memory mechanism)
+    refCnt: PtrInt;
+    high: tdynarrayindex;
+    function GetLength: sizeint; inline;
+    procedure SetLength(len: sizeint); inline;
+    property length: sizeint read GetLength write SetLength;
+  end;
+  PDynArrayRec = ^TDynArrayRec;
+  {$endif FPC}
 
 function ToText(k: TDynArrayKind): PShortString; overload;
 
@@ -7886,7 +7911,7 @@ type
     // - Instance must be not nil
     // - overriden version in TJSONSerializer would implement IncludeUnitName
     procedure AddInstancePointer(Instance: TObject; SepChar: AnsiChar;
-      IncludeUnitName: boolean); virtual;
+      IncludeUnitName, IncludePointer: boolean); virtual;
     /// append a quoted string as JSON, with in-place decoding
     // - if QuotedString does not start with ' or ", it will written directly
     // (i.e. expects to be a number, or null/true/false constants)
@@ -10235,13 +10260,21 @@ type
   // - used e.g. by JSONDecode() overloaded function to returns names/values
   {$ifdef UNICODE}TValuePUTF8Char = record{$else}TValuePUTF8Char = object{$endif}
   public
+    /// a pointer to the actual UTF-8 text
     Value: PUTF8Char;
+    /// how many UTF-8 bytes are stored in Value
     ValueLen: PtrInt;
+    /// convert the value into a UTF-8 string
     procedure ToUTF8(var Text: RawUTF8); overload; {$ifdef HASINLINE}inline;{$endif}
+    /// convert the value into a UTF-8 string
     function ToUTF8: RawUTF8; overload; {$ifdef HASINLINE}inline;{$endif}
+    /// convert the value into a VCL/generic string
     function ToString: string;
+    /// convert the value into a signed integer
     function ToInteger: PtrInt; {$ifdef HASINLINE}inline;{$endif}
+    /// convert the value into an unsigned integer
     function ToCardinal: PtrUInt; {$ifdef HASINLINE}inline;{$endif}
+    /// will call IdemPropNameU() over the stored text Value
     function Idem(const Text: RawUTF8): boolean; {$ifdef HASINLINE}inline;{$endif}
   end;
   /// used e.g. by JSONDecode() overloaded function to returns values
@@ -10251,9 +10284,13 @@ type
   /// store one name/value pair of raw UTF-8 content, from a JSON buffer
   // - used e.g. by JSONDecode() overloaded function to returns names/values
   TNameValuePUTF8Char = record
+    /// a pointer to the actual UTF-8 name text
     Name: PUTF8Char;
+    /// a pointer to the actual UTF-8 value text
     Value: PUTF8Char;
+    /// how many UTF-8 bytes are stored in Name
     NameLen: integer;
+    /// how many UTF-8 bytes are stored in Value
     ValueLen: integer;
   end;
   /// used e.g. by JSONDecode() overloaded function to returns name/value pairs
@@ -11672,11 +11709,11 @@ type
    cfBMI2, cfERMS, cfINVPCID, cfRTM, cfPQM, cf_b13, cfMPX, cfPQE,
    cfAVX512F, cfAVX512DQ, cfRDSEED, cfADX, cfSMAP, cfAVX512IFMA, cfPCOMMIT, cfCLFLUSH,
    cfCLWB, cfIPT, cfAVX512PF, cfAVX512ER, cfAVX512CD, cfSHA, cfAVX512BW, cfAVX512VL,
-   cfPREFW1, cfAVX512VBMI, cfUMIP, cfPKU, cfOSPKE, cf_c05, cf_c06, cf_c07,
-   cf_c08, cf_c09, cf_c10, cf_c11, cf_c12, cf_c13, cfAVX512VPC, cf_c15,
+   cfPREFW1, cfAVX512VBMI, cfUMIP, cfPKU, cfOSPKE, cf_c05, cfAVX512VBMI2, cf_c07,
+   cfGFNI, cfVAES, cfVCLMUL, cfAVX512NNI, cfAVX512BITALG, cf_c13, cfAVX512VPC, cf_c15,
    cf_cc16, cf_c17, cf_c18, cf_c19, cf_c20, cf_c21, cfRDPID, cf_c23,
    cf_c24, cf_c25, cf_c26, cf_c27, cf_c28, cf_c29, cfSGXLC, cf_c31,
-   cf_d0, cf_d1, cfAVX512NNI, cfAVX512MAS, cf_d4, cf_d5, cf_d6, cf_d7);
+   cf_d0, cf_d1, cfAVX512NNIW, cfAVX512MAS, cf_d4, cf_d5, cf_d6, cf_d7);
 
   /// all features, as retrieved from an Intel CPU
   TIntelCpuFeatures = set of TIntelCpuFeature;
@@ -12236,6 +12273,8 @@ type
     // - e.g. append '20110325 19241502 '
     // - as called by TTextWriter.AddCurrentLogTime()
     procedure AddLogTime(WR: TTextWriter);
+    /// convert the stored time into a TDateTime
+    function ToDateTime: TDateTime;
   end;
   PSynSystemTime = ^TSynSystemTime;
 
@@ -13122,7 +13161,7 @@ type
     wSeven, wSeven_64, wServer2008_R2, wServer2008_R2_64,
     wEight, wEight_64, wServer2012, wServer2012_64,
     wEightOne, wEightOne_64, wServer2012R2, wServer2012R2_64,
-    wTen, wTen_64, wServer2016, wServer2016_64);
+    wTen, wTen_64, wServer2016, wServer2016_64, wServer2019_64);
   /// the running Operating System, encoded as a 32-bit integer
   TOperatingSystemVersion = packed record
     case os: TOperatingSystem of
@@ -13140,7 +13179,7 @@ const
     '7', '7 64bit', 'Server 2008 R2', 'Server 2008 R2 64bit',
     '8', '8 64bit', 'Server 2012', 'Server 2012 64bit',
     '8.1', '8.1 64bit', 'Server 2012 R2', 'Server 2012 R2 64bit',
-    '10', '10 64bit', 'Server 2016', 'Server 2016 64bit');
+    '10', '10 64bit', 'Server 2016', 'Server 2016 64bit', 'Server 2019 64bit');
 
   /// the compiler family used
   COMP_TEXT = {$ifdef FPC}'Fpc'{$else}'Delphi'{$endif};
@@ -15842,6 +15881,7 @@ type
     // - typical use is to declare a fTimeElapsed: TPrecisionTimer protected
     // member, then call fTimeElapsed.ProfileCurrentMethod at the beginning of
     // all process expecting some timing, then log/save fTimeElapsed.Stop content
+    // - FPC TIP: result should be assigned to a local variable of IUnknown type
     function ProfileCurrentMethod: IUnknown;
     /// low-level method to force values settings to allow thread safe timing
     // - by default, this timer is not thread safe: you can use this method to
@@ -16332,21 +16372,67 @@ type
     {$ifdef MSWINDOWS}
     /// the volume name (only available on Windows)
     property VolumeName: TFileName read fVolumeName write fVolumeName;
-    {$endif MSWINDOWS}
     /// space currently available on this disk for the current user
-    // - may be less then FreeSize, if user quotas are specified
+    // - may be less then FreeSize, if user quotas are specified (only taken
+    // into account under Windows)
     property AvailableSize: TSynMonitorOneSize read GetAvailable;
+    {$endif MSWINDOWS}
     /// free space currently available on this disk
     property FreeSize: TSynMonitorOneSize read GetFree;
     /// total space
     property TotalSize: TSynMonitorOneSize read GetTotal;
   end;
 
+  /// hold low-level information about current memory usage
+  // - as filled by GetMemoryInfo()
+  TMemoryInfo = record
+    memtotal, memfree, filetotal, filefree, vmtotal, vmfree,
+    allocreserved, allocused: QWord;
+    percent: integer;
+  end;
+
+/// retrieve low-level information about current memory usage
+// - as used by TSynMonitorMemory
+// - under BSD, only memtotal/memfree/percent are properly returned
+// - allocreserved and allocused are set only if withalloc is TRUE
+function GetMemoryInfo(out info: TMemoryInfo; withalloc: boolean): boolean;
+
 /// retrieve low-level information about a given disk partition
-// - as used by TSynMonitorDisk
-procedure GetDiskInfo(var aDriveFolderOrFile: TFileName;
+// - as used by TSynMonitorDisk and GetDiskPartitionsText()
+// - only under Windows the Quotas are applied separately to aAvailableBytes
+// in respect to global aFreeBytes
+function GetDiskInfo(var aDriveFolderOrFile: TFileName;
   out aAvailableBytes, aFreeBytes, aTotalBytes: QWord
-  {$ifdef MSWINDOWS}; aVolumeName: PFileName = nil{$endif});
+  {$ifdef MSWINDOWS}; aVolumeName: PFileName = nil{$endif}): boolean;
+
+type
+  /// stores information about a disk partition
+  TDiskPartition = packed record
+    /// the name of this partition
+    // - is the Volume name under Windows, or the Device name under POSIX
+    name: RawUTF8;
+    /// where this partition has been mounted
+    // - e.g. 'C:' or '/home'
+    // - you can use GetDiskInfo(mounted) to retrieve current space information
+    mounted: TFileName;
+    /// total size (in bytes) of this partition
+    size: QWord;
+  end;
+  /// stores information about several disk partitions
+  TDiskPartitions = array of TDiskPartition;
+
+/// retrieve low-level information about all mounted disk partitions of the system
+// - returned partitions array is sorted by "mounted" ascending order
+function GetDiskPartitions: TDiskPartitions;
+
+/// retrieve low-level information about all mounted disk partitions as text
+// - returns e.g. under Linux
+// '/ /dev/sda3 (19 GB), /boot /dev/sda2 (486.8 MB), /home /dev/sda4 (0.9 TB)'
+// or under Windows 'C:\ System (115 GB), D:\ Data (99.3 GB)'
+// - uses internally a cache unless nocache is true
+// - includes the free space if withfreespace is true - e.g. '(80 GB / 115 GB)'
+function GetDiskPartitionsText(nocache: boolean=false;
+  withfreespace: boolean=false): RawUTF8;
 
 
 { ******************* cross-cutting classes and functions ***************** }
@@ -16958,10 +17044,14 @@ type
   /// stores TSynBackgroundTimer internal registration list
   TSynBackgroundTimerTaskDynArray = array of TSynBackgroundTimerTask;
 
-  /// TThread able to run one or several tasks at a periodic pace
+  /// TThread able to run one or several tasks at a periodic pace in a
+  // background thread
   // - as used e.g. by TSQLRest.TimerEnable/TimerDisable methods, via the
   // inherited TSQLRestBackgroundTimer
   // - each process can have its own FIFO of text messages
+  // - if you expect to update some GUI, you should rather use a TTimer
+  // component (with a period of e.g. 200ms), since TSynBackgroundTimer will
+  // use its own separated thread
   TSynBackgroundTimer = class(TSynBackgroundThreadProcess)
   protected
     fTask: TSynBackgroundTimerTaskDynArray;
@@ -17831,7 +17921,7 @@ begin
     widestringmanager.Ansi2UnicodeMoveProc(Source,
       {$ifdef ISFPC27}fCodePage,{$endif}tmp,SourceChars);
     MoveFast(Pointer(tmp)^,Dest^,length(tmp)*2);
-    result := Dest+SourceChars;
+    result := Dest+length(tmp);
     {$else}
     {$ifdef KYLIX3}
     result := Dest; // makes compiler happy
@@ -17896,7 +17986,7 @@ begin
 end;
 
 // UTF-8 is AT MOST 50% bigger than UTF-16 in bytes in range U+0800..U+FFFF
-// see http://stackoverflow.com/a/7008095/458259 -> WideCharCount*3 below
+// see http://stackoverflow.com/a/7008095 -> WideCharCount*3 below
 
 procedure TSynAnsiConvert.InternalAppendUTF8(Source: PAnsiChar; SourceChars: Cardinal;
   DestTextWriter: TObject; Escape: TTextWriterKind);
@@ -18687,76 +18777,63 @@ end;
 
 procedure TSynTempBuffer.Init(const Source: RawByteString);
 begin
-  len := length(Source);
-  if len=0 then
-    buf := nil else begin
-    if len<SizeOf(tmp) then
-      buf := @tmp else
-      GetMem(buf,len+1); // +1 to include trailing #0
-    MoveFast(pointer(Source)^,buf^,len+1); // +1 to include trailing #0
-  end;
+  Init(pointer(Source),length(Source));
 end;
 
 function TSynTempBuffer.Init(Source: PUTF8Char): PUTF8Char;
 begin
-  len := StrLen(Source);
-  if len=0 then
-    buf := nil else begin
-    if len<SizeOf(tmp) then
-      buf := @tmp else
-      GetMem(buf,len+1); // +1 to include trailing #0
-    MoveFast(Source^,buf^,len+1);
-  end;
+  Init(Source,StrLen(Source));
+  result := buf;
+end;
+
+function TSynTempBuffer.Init(SourceLen: integer): pointer;
+begin
+  Init(nil,SourceLen);
   result := buf;
 end;
 
 procedure TSynTempBuffer.Init(Source: pointer; SourceLen: integer);
 begin
   len := SourceLen;
-  if len=0 then
+  if len<=0 then
     buf := nil else begin
-    if len<SizeOf(tmp) then
+    if len<=SizeOf(tmp)-16 then
       buf := @tmp else
-      GetMem(buf,len+1); // +1 to include trailing #0
-    MoveFast(Source^,buf^,len+1);
+      GetMem(buf,len+16); // +16 for trailing #0 and for PInteger() parsing
+    if Source<>nil then begin
+      MoveFast(Source^,buf^,len);
+      PPtrInt(PAnsiChar(buf)+len)^ := 0; // init last 4/8 bytes (makes valgrid happy)
+    end;
   end;
-end;
-
-function TSynTempBuffer.Init(SourceLen: integer): pointer;
-begin
-  len := SourceLen;
-  if len=0 then
-    buf := nil else
-    if len<SizeOf(tmp) then
-      buf := @tmp else
-      GetMem(buf,len+1); // +1 to include trailing #0
-  result := buf;
 end;
 
 function TSynTempBuffer.Init: integer;
 begin
   buf := @tmp;
-  result := SizeOf(tmp)-1;
+  result := SizeOf(tmp)-16;
   len := result;
 end;
 
 function TSynTempBuffer.InitRandom(RandomLen: integer): pointer;
 begin
-  result := Init(RandomLen+3);
+  Init(nil,RandomLen);
   if RandomLen>0 then
-    FillRandom(result,(RandomLen shr 2)+1);
+    FillRandom(buf,(RandomLen shr 2)+1);
+  result := buf;     
 end;
 
 function TSynTempBuffer.InitIncreasing(Count, Start: integer): PIntegerArray;
 begin
-  result := Init((Count-Start)*4);
-  FillIncreasing(result,Start,Count);
+  Init(nil,(Count-Start)*4);
+  FillIncreasing(buf,Start,Count);
+  result := buf;     
 end;
 
 function TSynTempBuffer.InitZero(ZeroLen: integer): pointer;
 begin
-  result := Init(ZeroLen);
-  FillCharFast(result^,ZeroLen,0);
+  Init(nil,ZeroLen-16);
+  FillCharFast(buf^,ZeroLen,0);
+  result := buf;     
 end;
 
 procedure TSynTempBuffer.Done;
@@ -18780,7 +18857,7 @@ end;
 procedure TSynTempWriter.Init(maxsize: integer);
 begin
   if maxsize<=0 then
-    maxsize := SizeOf(tmp.tmp)-1; // -1 for trailing #0
+    maxsize := SizeOf(tmp.tmp)-16; // TSynTempBuffer allocates +16
   pos := tmp.Init(maxsize);
 end;
 
@@ -21183,7 +21260,20 @@ type
     refCnt: SizeInt;
     length: SizeInt;
 {$else FPC}
-   TStrRec = packed record
+  /// map the Delphi/FPC dynamic array header (stored before each instance)
+  TDynArrayRec = packed record
+    /// dynamic array reference count (basic garbage memory mechanism)
+    {$ifdef CPUX64}
+    _Padding: LongInt; // Delphi/FPC XE2+ expects 16 byte alignment
+    {$endif}
+    refCnt: Longint;
+    /// length in element count
+    // - size in bytes = length*ElemSize
+    length: PtrInt;
+  end;
+  PDynArrayRec = ^TDynArrayRec;
+
+  TStrRec = packed record
  {$ifdef UNICODE}
     {$ifdef CPU64}
     /// padding bytes for 16 byte alignment of the header
@@ -21207,27 +21297,6 @@ type
     length: Longint;
 {$endif FPC}
   end;
-
-  /// map the Delphi/FPC dynamic array header (stored before each instance)
-  TDynArrayRec = packed record
-    /// dynamic array reference count (basic garbage memory mechanism)
-    {$ifdef FPC}
-    refCnt: PtrInt;
-    high: tdynarrayindex;
-    function GetLength: sizeint; inline;
-    procedure SetLength(len: sizeint); inline;
-    property length: sizeint read GetLength write SetLength;
-    {$else}
-    {$ifdef CPUX64}
-    _Padding: LongInt; // Delphi/FPC XE2+ expects 16 byte alignment
-    {$endif}
-    refCnt: Longint;
-    /// length in element count
-    // - size in bytes = length*ElemSize
-    length: PtrInt;
-    {$endif}
-  end;
-  PDynArrayRec = ^TDynArrayRec;
 
   {$ifdef FPC}
     {$PACKRECORDS C}
@@ -23295,7 +23364,7 @@ begin // here p and up are expected to be <> nil
     u := up^;
     if u=#0 then
       break;
-    if u<>table^[up[PtrUInt(p)]] then
+    if table^[up[PtrUInt(p)]]<>u then
       exit;
     inc(up);
   until false;
@@ -24287,6 +24356,7 @@ function ScanUTF8(P: PUTF8Char; PLen: integer; const fmt: RawUTF8;
 var
   v,w: PtrInt;
   F,FEnd,PEnd: PUTF8Char;
+label next;
 begin
   result := 0;
   if (fmt='') or (P=nil) or (PLen<=0) or (high(values)<0) then
@@ -24325,13 +24395,22 @@ begin
              exit;
       'X': if not GetNextItemHexDisplayToBin(P,values[v],8,#0) then
              exit;
-      's': begin
+      's','S': begin
         w := 0;
         while (P[w]>' ') and (P+w<=PEnd) do inc(w);
-        SetString(PShortString(values[v])^,P,w);
+        if F^='s' then
+          SetString(PShortString(values[v])^,PAnsiChar(P),w) else
+          SetString(PRawUTF8(values[v])^,PAnsiChar(P),w);
         inc(P,w);
         while (P^<=' ') and (P^<>#0) and (P<=PEnd) do inc(P);
       end;
+      'L': begin
+        w := 0;
+        while not(P[w] in [#0,#10,#13]) and (P+w<=PEnd) do inc(w);
+        SetString(PRawUTF8(values[v])^,PAnsiChar(P),w);
+        inc(P,w);
+      end;
+      '%': goto next;
       else raise ESynException.CreateUTF8('ScanUTF8: unknown ''%'' specifier [%]',[F^,fmt]);
       end;
       inc(result);
@@ -24347,7 +24426,7 @@ begin
         exit;
       break;
     end else begin
-      while (P^<>F^) and (P<=PEnd) do inc(P);
+next: while (P^<>F^) and (P<=PEnd) do inc(P);
       inc(F);
       inc(P);
       if (F>=FEnd) or (P>=PEnd) then
@@ -26754,9 +26833,13 @@ begin
     10: Vers := wTen;
   end;
   if Vers>=wVista then begin
-    if OSVersionInfo.wProductType<>VER_NT_WORKSTATION then
+    if OSVersionInfo.wProductType<>VER_NT_WORKSTATION then begin // Server edition
       inc(Vers,2); // e.g. wEight -> wServer2012
-    if SystemInfo.wProcessorArchitecture=PROCESSOR_ARCHITECTURE_AMD64 then
+      if OSVersionInfo.dwBuildNumber>=17763 then // https://stackoverflow.com/q/53393150
+        inc(Vers, 2); // wServer2016 -> wServer2019_64
+    end;
+    if (SystemInfo.wProcessorArchitecture=PROCESSOR_ARCHITECTURE_AMD64) and
+       (Vers < wServer2019_64) then
       inc(Vers);   // e.g. wEight -> wEight64
     OpenProcessAccess := PROCESS_QUERY_LIMITED_INFORMATION;
   end else
@@ -27396,7 +27479,7 @@ end;
 
 {$ifdef USENORMTOUPPER}
 
-function AnsiICompW(u1, u2: PWideChar): PtrInt;
+function AnsiICompW(u1, u2: PWideChar): PtrInt; {$ifdef HASINLINE}inline;{$endif}
 begin
   if u1<>u2 then
     if u1<>nil then
@@ -27688,7 +27771,7 @@ end;
 function AnsiIComp(Str1, Str2: PWinAnsiChar): integer;
 {$ifdef PUREPASCAL}
 begin
-  result := StrIComp(Str1,Str2); // fast enough
+  result := StrIComp(Str1,Str2); // fast enough, especially since inlined
 end;
 {$else}
 asm
@@ -28680,6 +28763,18 @@ begin
 {$ifdef POSIX}
   result := WideStringToUTF8(WideLowerCase(UTF8ToWideString(S)));
 {$endif}
+end;
+
+function IsCaseSensitive(const S: RawUTF8): boolean;
+var i: PtrInt;
+    up: PByteArray; // better x86-64 / PIC asm generation
+begin
+  up := @NormToUpperAnsi7Byte;
+  result := true;
+  for i := 0 to length(S)-1 do
+    if up[PByteArray(S)[i]]<>PByteArray(S)[i] then
+      exit;
+  result := false;
 end;
 
 function UpperCase(const S: RawUTF8): RawUTF8;
@@ -32161,7 +32256,7 @@ function GetExtended(P: PUTF8Char; out err: integer): TSynExtended;
     1E-6,1E-5,1E-4,1E-3,1E-2,1E-1,1E0,1E1,1E2,1E3,1E4,1E5,1E6,1E7,1E8,1E9,1E10,
     1E11,1E12,1E13,1E14,1E15,1E16,1E17,1E18,1E19,1E20,1E21,1E22,1E23,1E24,1E25,
     1E26,1E27,1E28,1E29,1E30,1E31);
-  function IntPower(Exponent: Integer): TSynExtended;
+  function IntPower(Exponent: Integer): TSynExtended; {$ifdef HASINLINE}inline;{$endif}
   var Y: Cardinal;
       LBase: Int64;
   begin
@@ -32809,7 +32904,7 @@ begin
   end;
 end;
 
-{$WARNINGS OFF} // some Delphi compilers do not analyse well code below
+{$WARNINGS OFF} // some Delphi compilers do not analyze well code below
 function GotoNextLine(source: PUTF8Char): PUTF8Char;
 begin
   if source<>nil then
@@ -32869,6 +32964,20 @@ begin
       P := S+1 else
       P := nil;
   end;
+end;
+
+procedure GetNextItem(var P: PUTF8Char; Sep, Quote: AnsiChar; var result: RawUTF8);
+begin
+  if P=nil then
+    result := ''
+  else if P^=Quote then begin
+    P := UnQuoteSQLStringVar(P,result);
+    if P=nil then
+      result := ''
+    else if P^<>#0 then
+      inc(P);
+  end else
+    GetNextItem(P,Sep,result);
 end;
 
 procedure GetNextItemTrimed(var P: PUTF8Char; Sep: AnsiChar; var result: RawUTF8);
@@ -33275,6 +33384,15 @@ begin
     result := '' else
     for i := 0 to Index do
       GetNextItem(P,Sep,result);
+end;
+
+function GetUnQuoteCSVItem(P: PUTF8Char; Index: PtrUInt; Sep, Quote: AnsiChar): RawUTF8;
+var i: PtrUInt;
+begin
+  if P=nil then
+    result := '' else
+    for i := 0 to Index do
+      GetNextItem(P,Sep,Quote,result);
 end;
 
 function GetLastCSVItem(const CSV: RawUTF8; Sep: AnsiChar): RawUTF8;
@@ -35329,7 +35447,7 @@ procedure FillZero(var secret: RawByteString);
 begin
   if secret<>'' then
     with PStrRec(Pointer(PtrInt(secret)-STRRECSIZE))^ do
-    if refCnt>0 then // avoid GPF if const
+    if refCnt=1 then // avoid GPF if const
       FillcharFast(pointer(secret)^,length,0);
 end;
 
@@ -35337,7 +35455,7 @@ procedure FillZero(var secret: RawUTF8);
 begin
   if secret<>'' then
     with PStrRec(Pointer(PtrInt(secret)-STRRECSIZE))^ do
-    if refCnt>0 then // avoid GPF if const
+    if refCnt=1 then // avoid GPF if const
       FillcharFast(pointer(secret)^,length,0);
 end;
 
@@ -36608,6 +36726,15 @@ begin
   WR.B := P+16;
 end;
 
+function TSynSystemTime.ToDateTime: TDateTime;
+var time: TDateTime;
+begin
+  if TryEncodeDate(Year,Month,Day,result) then
+    if TryEncodeTime(Hour,Minute,Second,MilliSecond,time) then
+      result := result+time else
+      result := 0 else
+    result := 0;
+end;
 
 { TTimeZoneData }
 
@@ -37500,52 +37627,54 @@ begin
   Space := D;
   DBeg := D;
   SpaceBeg := D;
-  if (D<>nil) and (P<>nil) then // avoid GPF
-  repeat
-    CapitalCount := 0;
-    Number := P^ in  ['0'..'9'];
-    if Number then
-      repeat
-        inc(CapitalCount);
-        D^ := P^;
+  if (D<>nil) and (P<>nil) then begin // avoid GPF
+    repeat
+      CapitalCount := 0;
+      Number := P^ in  ['0'..'9'];
+      if Number then
+        repeat
+          inc(CapitalCount);
+          D^ := P^;
+          inc(P);
+          inc(D);
+        until not (P^ in ['0'..'9']) else
+        repeat
+          inc(CapitalCount);
+          D^ := P^;
+          inc(P);
+          inc(D);
+        until not (P^ in ['A'..'Z']);
+      if P^=#0 then break; // no lowercase conversion of last fully uppercased word
+      if (CapitalCount > 1) and not Number then begin
+        dec(P);
+        dec(D);
+      end;
+      while P^ in ['a'..'z'] do begin
+        D^  := P^;
+        inc(D);
+        inc(P);
+      end;
+      if P^='_' then
+      if P[1]='_' then begin
+        D^ := ':';
         inc(P);
         inc(D);
-      until not (P^ in ['0'..'9']) else
-      repeat
-        inc(CapitalCount);
-        D^ := P^;
+        goto Next;
+      end else begin
+        PWord(D)^ := ord(' ')+ord('-')shl 8;
+        inc(D,2);
+  Next: if Space=SpaceBeg then
+          SpaceBeg := D+1;
         inc(P);
-        inc(D);
-      until not (P^ in ['A'..'Z']);
-    if P^=#0 then break; // no lowercase conversion of last fully uppercased word
-    if (CapitalCount > 1) and not Number then begin
-      dec(P);
-      dec(D);
-    end;
-    while P^ in ['a'..'z'] do begin
-      D^  := P^;
+        Space := D+1;
+      end else
+        Space := D;
+      if P^=#0 then break;
+      D^ := ' ';
       inc(D);
-      inc(P);
-    end;
-    if P^='_' then
-    if P[1]='_' then begin
-      D^ := ':';
-      inc(P);
-      inc(D);
-      goto Next;
-    end else begin
-      PWord(D)^ := ord(' ')+ord('-')shl 8;
-      inc(D,2);
-Next: if Space=SpaceBeg then
-        SpaceBeg := D+1;
-      inc(P);
-      Space := D+1;
-    end else
-      Space := D;
-    if P^=#0 then break;
-    D^ := ' ';
-    inc(D);
-  until false;
+    until false;
+    if (Space>DBeg) then Dec(Space); // here Space point to uninitialized memory
+  end;
   while Space>SpaceBeg do begin
     if Space^ in ['A'..'Z'] then
       if not (Space[1] in ['A'..'Z',' ']) then
@@ -38413,7 +38542,7 @@ begin
       {$ifdef CPUINTEL}'cpufeatures', LowerCase(ToText(CpuFeatures, ' ')),{$endif}
       'processcpu',cpu,'processmem',mem,
       'freemem',TSynMonitorMemory.FreeAsText,
-      'freedisk',TSynMonitorDisk.FreeAsText]);
+      'disk',GetDiskPartitionsText(false,true)]);
 end;
 
 {$ifdef MSWINDOWS}
@@ -41966,6 +42095,7 @@ var wasString, wasValid: boolean;
     Reader: TDynArrayJSONCustomReader;
     FirstChar,EndOfObj: AnsiChar;
     Val: PUTF8Char;
+    ValLen: integer;
 begin // code below must match TTextWriter.AddRecordJSON
   result := nil; // indicates error
   if JSON=nil then
@@ -41977,10 +42107,10 @@ begin // code below must match TTextWriter.AddRecordJSON
     if not (PTypeKind(TypeInfo)^ in tkRecordTypes) then
       raise ESynException.CreateUTF8('RecordLoadJSON(%/%)',
         [PShortString(@PTypeInfo(TypeInfo).NameLen)^,ToText(PTypeKind(TypeInfo)^)^]);
-    Val := GetJSONField(JSON,JSON,@wasString,@EndOfObj);
-    if (Val=nil) or not wasString or
+    Val := GetJSONField(JSON,JSON,@wasString,@EndOfObj,@ValLen);
+    if (Val=nil) or not wasString or (ValLen<3) or
        (PInteger(Val)^ and $00ffffff<>JSON_BASE64_MAGIC) or
-       (RecordLoad(Rec,pointer(Base64ToBin(Val+3)),TypeInfo)=nil) then
+       (RecordLoad(Rec,pointer(Base64ToBin(PAnsiChar(Val)+3,ValLen-3)),TypeInfo)=nil) then
       exit; // invalid content
   end else begin
     if not GlobalJSONCustomParsers.RecordSearch(TypeInfo,Reader) then
@@ -47231,7 +47361,7 @@ end;
 function SortDynArrayString(const A,B): integer;
 begin
   {$ifdef UNICODE}
-  result := SysUtils.StrComp(PChar(A),PChar(B));
+  result := StrCompW(PWideChar(A),PWideChar(B));
   {$else}
   result := StrComp(PUTF8Char(A),PUTF8Char(B));
   {$endif}
@@ -47641,7 +47771,7 @@ begin
       end;
     end;
     4: begin
-      // optimized version for TIntegerDynArray + TRawUTF8DynArray and such
+      // optimized version for TIntegerDynArray and such
       P2 := P1+n*SizeOf(Integer);
       while P1<P2 do begin
         tmp := PInteger(P1)^;
@@ -48597,7 +48727,7 @@ end;
 
 procedure TDynArrayQuickSort.QuickSort(L, R: PtrInt);
 var I, J: PtrInt;
-    tmp: pointer;
+    {$ifndef PUREPASCAL}tmp: pointer;{$endif}
 begin
   if L<R then
   repeat
@@ -48617,12 +48747,14 @@ begin
       end;
       if I <= J then begin
         if I<>J then
+          {$ifndef PUREPASCAL} // inlined Exchg() is OK
           if ElemSize=SizeOf(pointer) then begin
             // optimized version e.g. for TRawUTF8DynArray/TObjectDynArray
             tmp := PPointer(IP)^;
             PPointer(IP)^ := PPointer(JP)^;
             PPointer(JP)^ := tmp;
           end else
+          {$endif}
             // generic exchange of row element data
             Exchg(IP,JP,ElemSize);
         if P = I then P := J else
@@ -53210,7 +53342,7 @@ begin
   L := length(s);
   if L=0 then
     exit;
-  if PInteger(s)^ and $ffffff=JSON_BASE64_MAGIC then begin
+  if (L>2) and (PInteger(s)^ and $ffffff=JSON_BASE64_MAGIC) then begin
     AddNoJSONEscape(pointer(s),L); // identified as a BLOB content
     exit;
   end;
@@ -53753,12 +53885,14 @@ begin
 end;
 
 procedure TTextWriter.AddInstancePointer(Instance: TObject; SepChar: AnsiChar;
-  IncludeUnitName: boolean);
+  IncludeUnitName, IncludePointer: boolean);
 begin
   AddShort(PShortString(PPointer(PPtrInt(Instance)^+vmtClassName)^)^);
-  Add('(');
-  AddPointer(PtrUInt(Instance));
-  Add(')');
+  if IncludePointer then begin
+    Add('(');
+    AddPointer(PtrUInt(Instance));
+    Add(')');
+  end;
   if SepChar<>#0 then
     Add(SepChar);
 end;
@@ -53883,33 +54017,38 @@ end;
 
 procedure TTextWriter.CancelLastChar;
 begin
-  dec(B);
+  if B>=fTempBuf then // Add() methods append at B+1
+    dec(B);
 end;
 
 function TTextWriter.LastChar: AnsiChar;
 begin
-  result := B^;
+  if B>=fTempBuf then
+    result := B^ else
+    result := #0; // returns #0 if no char has been written yet
 end;
 
 procedure TTextWriter.CancelLastChar(aCharToCancel: AnsiChar);
 begin
-  if B^=aCharToCancel then
+  if (B>=fTempBuf) and (B^=aCharToCancel) then
     dec(B);
 end;
 
 function TTextWriter.PendingBytes: PtrUInt;
 begin
-  result := B-fTempBuf;
+  result := B-fTempBuf+1;
 end;
 
 procedure TTextWriter.CancelLastComma;
 begin
-  if B^=',' then
+  if (B>=fTempBuf) and (B^=',') then
     dec(B);
 end;
 
 procedure TTextWriter.SetBuffer(aBuf: pointer; aBufSize: integer);
 begin
+  if aBufSize<=16 then
+    raise ESynException.CreateUTF8('%.SetBuffer(size=%)',[self,aBufSize]);
   if aBuf=nil then
     GetMem(fTempBuf,aBufSize) else begin
     fTempBuf := aBuf;
@@ -53917,7 +54056,7 @@ begin
   end;
   fTempBufSize := aBufSize;
   B := fTempBuf-1; // Add() methods will append at B+1
-  BEnd := fTempBuf+fTempBufSize-16; // -2 made reports with FPC heaptrc tooling
+  BEnd := fTempBuf+fTempBufSize-16; // -16 to avoid buffer overwrite/overread
   if DefaultTextWriterTrimEnum then
     Include(fCustomOptions,twoTrimLeftEnumSets);
 end;
@@ -54012,6 +54151,8 @@ begin
     fEchoStart := 0;
   end;
   i := B-fTempBuf+1;
+  if i<=0 then
+    exit;
   fStream.WriteBuffer(fTempBuf^,i);
   inc(fTotalFileSize,i);
   if not (twoFlushToStreamNoAutoResize in fCustomOptions) and
@@ -55886,9 +56027,8 @@ begin
     exit;
   TextAttr := ord(color);
   if ord(color)>=8 then
-    write(#27'[1;3') else
-    write(#27'[0;3');
-  write(AnsiTbl[(ord(color) and 7)+1],'m');
+    write(#27'[1;3',AnsiTbl[(ord(color) and 7)+1],'m') else
+    write(#27'[0;3',AnsiTbl[(ord(color) and 7)+1],'m');
   ioresult;
 end;
 {$I+}
@@ -57059,12 +57199,10 @@ function GlobalMemoryStatusEx(var lpBuffer: TMemoryStatusEx): BOOL;
 {$endif}
 {$endif}
 
-procedure TSynMonitorMemory.RetrieveMemoryInfo;
-procedure RetrieveInfo;
-{$ifndef FPC}
+function GetMemoryInfo(out info: TMemoryInfo; withalloc: boolean): boolean;
+{$ifdef WITH_FASTMM4STATS}
 var Heap: TMemoryManagerState;
     sb: integer;
-    tot,res: QWord;
 {$endif}
 {$ifdef MSWINDOWS}
 var global: TMemoryStatusEx;
@@ -57072,79 +57210,90 @@ var global: TMemoryStatusEx;
 begin
   FillCharFast(global,SizeOf(global),0);
   global.dwLength := SizeOf(global);
-  GlobalMemoryStatusEx(global);
-  FMemoryLoadPercent := global.dwMemoryLoad;
-  FPhysicalMemoryTotal.fBytes := global.ullTotalPhys;
-  FPhysicalMemoryFree.fBytes := global.ullAvailPhys;
-  FPagingFileTotal.fBytes := global.ullTotalPageFile;
-  FPagingFileFree.fBytes := global.ullAvailPageFile;
-  FVirtualMemoryTotal.fBytes := global.ullTotalVirtual;
-  FVirtualMemoryFree.fBytes := global.ullAvailVirtual;
+  result := GlobalMemoryStatusEx(global);
+  info.percent := global.dwMemoryLoad;
+  info.memtotal := global.ullTotalPhys;
+  info.memfree := global.ullAvailPhys;
+  info.filetotal := global.ullTotalPageFile;
+  info.filefree := global.ullAvailPageFile;
+  info.vmtotal := global.ullTotalVirtual;
+  info.vmfree := global.ullAvailVirtual;
   {$ifdef FPC} // GetHeapStatus is only about current thread -> use WinAPI
-  if Assigned(GetProcessMemoryInfo) then begin
+  if withalloc and Assigned(GetProcessMemoryInfo) then begin
     FillcharFast(mem,SizeOf(mem),0);
     mem.cb := SizeOf(mem);
     GetProcessMemoryInfo(GetCurrentProcess,mem,SizeOf(mem));
-    FAllocatedReserved.fBytes := mem.PeakWorkingSetSize;
-    FAllocatedUsed.fBytes := mem.WorkingSetSize;
+    info.allocreserved := mem.PeakWorkingSetSize;
+    info.allocused := mem.WorkingSetSize;
   end;
   {$endif FPC}
 {$else}
 {$ifdef BSD}
 begin
-  FPhysicalMemoryTotal.fBytes := fpsysctlhwint(
-    {$ifdef DARWIN}HW_MEMSIZE{$else}HW_PHYSMEM{$endif});
-  FPhysicalMemoryFree.fBytes := FPhysicalMemoryTotal.fBytes-fpsysctlhwint(HW_USERMEM);
-  if FPhysicalMemoryTotal.fBytes<>0 then // avoid div per 0 exception
-    FMemoryLoadPercent := ((FPhysicalMemoryTotal.fBytes-FPhysicalMemoryFree.fBytes)*100)div FPhysicalMemoryTotal.fBytes;
+  FillCharFast(info,SizeOf(info),0);
+  info.memtotal := fpsysctlhwint({$ifdef DARWIN}HW_MEMSIZE{$else}HW_PHYSMEM{$endif});
+  info.memfree := info.memtotal-fpsysctlhwint(HW_USERMEM);
+  if info.memtotal<>0 then // avoid div per 0 exception
+    info.percent := ((info.memtotal-info.memfree)*100)div info.memtotal;
 {$else}
 var si: TSysInfo; // Linuxism
     P: PUTF8Char;
     {$ifdef FPC}mu: cardinal{$else}const mu=1{$endif};
 begin
+  FillCharFast(info,SizeOf(info),0);
   {$ifdef FPC}
-  SysInfo(@si);
+  result := SysInfo(@si)=0;
   mu := si.mem_unit;
   {$else}
-  SysInfo(si); // missing field in Kylix' Libc
+  result := SysInfo(si)=0; // some missing fields in Kylix' Libc
   {$endif}
   if si.totalram<>0 then // avoid div per 0 exception
-    FMemoryLoadPercent := ((si.totalram-si.freeram)*100)div si.totalram;
-  FPhysicalMemoryTotal.fBytes := si.totalram*mu;
-  FPhysicalMemoryFree.fBytes := si.freeram*mu;
-  FPagingFileTotal.fBytes := si.totalswap*mu;
-  FPagingFileFree.fBytes := si.freeswap*mu;
-  // virtual memory information is not available under Linux
-  P := pointer(StringFromFile('/proc/self/statm',true));
-  FAllocatedReserved.fBytes := GetNextItemCardinal(P,' ')*SystemInfo.dwPageSize; // VmSize
-  FAllocatedUsed.fBytes := GetNextItemCardinal(P,' ')*SystemInfo.dwPageSize;     // VmRSS
+    info.percent := ((si.totalram-si.freeram)*100)div si.totalram;
+  info.memtotal := si.totalram*mu;
+  info.memfree := si.freeram*mu;
+  info.filetotal := si.totalswap*mu;
+  info.filefree := si.freeswap*mu;
+  if withalloc then begin
+    // virtual memory information is not available under Linux
+    P := pointer(StringFromFile('/proc/self/statm',{hasnosize=}true));
+    info.allocreserved := GetNextItemCardinal(P,' ')*SystemInfo.dwPageSize; // VmSize
+    info.allocused := GetNextItemCardinal(P,' ')*SystemInfo.dwPageSize;     // VmRSS
+  end;
   // GetHeapStatus is only about current thread -> use /proc/[pid]/statm
 {$endif BSD}
 {$endif MSWINDOWS}
-{$ifndef FPC}
-{$ifdef LVCL}
-  tot := 0;
-  res := 0;
-{$else}
-  GetMemoryManagerState(Heap); // direct access to FastMM4 statistics
-  tot := Heap.TotalAllocatedMediumBlockSize+Heap.TotalAllocatedLargeBlockSize;
-  res := Heap.ReservedMediumBlockAddressSpace+Heap.ReservedLargeBlockAddressSpace;
-  for sb := 0 to high(Heap.SmallBlockTypeStates) do
-    with Heap.SmallBlockTypeStates[sb] do begin
-      inc(tot,UseableBlockSize*AllocatedBlockCount);
-      inc(res,ReservedAddressSpace);
-    end;
-{$endif LVCL}
-  FAllocatedUsed.fBytes := tot;
-  FAllocatedReserved.fBytes := res;
-{$endif FPC}
+{$ifdef WITH_FASTMM4STATS} // override OS information by actual FastMM4
+  if withalloc then begin
+    GetMemoryManagerState(Heap); // direct raw FastMM4 access
+    info.allocused := Heap.TotalAllocatedMediumBlockSize+Heap.TotalAllocatedLargeBlockSize;
+    info.allocreserved := Heap.ReservedMediumBlockAddressSpace+Heap.ReservedLargeBlockAddressSpace;
+    for sb := 0 to high(Heap.SmallBlockTypeStates) do
+      with Heap.SmallBlockTypeStates[sb] do begin
+        inc(info.allocused,UseableBlockSize*AllocatedBlockCount);
+        inc(info.allocreserved,ReservedAddressSpace);
+      end;
+  end;
+{$endif WITH_FASTMM4STATS}
 end;
+
+procedure TSynMonitorMemory.RetrieveMemoryInfo;
 var tix: cardinal;
+    info: TMemoryInfo;
 begin
   tix := GetTickCount64 shr 7; // allow 128 ms resolution for updates
   if fLastMemoryInfoRetrievedTix<>tix then begin
     fLastMemoryInfoRetrievedTix := tix;
-    RetrieveInfo;
+    if not GetMemoryInfo(info,{withalloc=}true) then
+      exit;
+    FMemoryLoadPercent := info.percent;
+    FPagingFileTotal.fBytes := info.memtotal;
+    FPhysicalMemoryFree.fBytes := info.memfree;
+    FPagingFileTotal.fBytes := info.filetotal;
+    FPagingFileFree.fBytes  := info.filefree;
+    FVirtualMemoryTotal.fBytes := info.vmtotal;
+    FVirtualMemoryFree.fBytes := info.vmfree;
+    FAllocatedReserved.fBytes := info.allocreserved;
+    FAllocatedUsed.fBytes := info.allocused;
   end;
 end;
 
@@ -57205,11 +57354,14 @@ function GetDiskFreeSpaceExA(lpDirectoryName: PAnsiChar;
 function GetDiskFreeSpaceExW(lpDirectoryName: PWideChar;
   var lpFreeBytesAvailableToCaller, lpTotalNumberOfBytes,
       lpTotalNumberOfFreeBytes: QWord): LongBool; stdcall; external kernel32;
+function DeviceIoControl(hDevice: THandle; dwIoControlCode: DWORD; lpInBuffer: Pointer;
+  nInBufferSize: DWORD; lpOutBuffer: Pointer; nOutBufferSize: DWORD;
+  var lpBytesReturned: DWORD; lpOverlapped: POverlapped): BOOL; stdcall; external kernel32;
 {$endif}
 
-procedure GetDiskInfo(var aDriveFolderOrFile: TFileName;
+function GetDiskInfo(var aDriveFolderOrFile: TFileName;
   out aAvailableBytes, aFreeBytes, aTotalBytes: QWord
-  {$ifdef MSWINDOWS}; aVolumeName: PFileName = nil{$endif});
+  {$ifdef MSWINDOWS}; aVolumeName: PFileName = nil{$endif}): boolean;
 {$ifdef MSWINDOWS}
 var tmp: array[0..MAX_PATH-1] of Char;
     dummy,flags: DWORD;
@@ -57225,7 +57377,7 @@ begin
     GetVolumeInformation(pointer(dn),tmp,MAX_PATH,nil,dummy,flags,nil,0);
     aVolumeName^ := tmp;
   end;
-  {$ifdef UNICODE}GetDiskFreeSpaceExW{$else}GetDiskFreeSpaceExA{$endif}(
+  result := {$ifdef UNICODE}GetDiskFreeSpaceExW{$else}GetDiskFreeSpaceExA{$endif}(
     pointer(dn),aAvailableBytes,aTotalBytes,aFreeBytes);
 {$else}
 {$ifdef KYLIX3}
@@ -57235,7 +57387,7 @@ begin
   if aDriveFolderOrFile='' then
     aDriveFolderOrFile := '.';
   h := FileOpen(aDriveFolderOrFile,fmShareDenyNone);
-  fstatfs64(h,fs);
+  result := fstatfs64(h,fs)=0;
   FileClose(h);
   aAvailableBytes := fs.f_bavail*fs.f_bsize;
   aFreeBytes := aAvailableBytes;
@@ -57246,7 +57398,7 @@ var fs: tstatfs;
 begin
   if aDriveFolderOrFile='' then
     aDriveFolderOrFile := '.';
-  fpStatFS(aDriveFolderOrFile,@fs);
+  result := fpStatFS(aDriveFolderOrFile,@fs)=0;
   aAvailableBytes := QWord(fs.bavail)*QWord(fs.bsize);
   aFreeBytes := aAvailableBytes; // no user Quota involved here
   aTotalBytes := QWord(fs.blocks)*QWord(fs.bsize);
@@ -57265,6 +57417,95 @@ begin
   end;
 end;
 
+function SortDynArrayDiskPartitions(const A,B): integer;
+begin
+  result := SortDynArrayString(TDiskPartition(A).mounted,TDiskPartition(B).mounted);
+end;
+
+function GetDiskPartitions: TDiskPartitions;
+{$ifdef MSWINDOWS} // DeviceIoControl(IOCTL_DISK_GET_PARTITION_INFO) requires root
+var drives, drive, m, n: integer;
+    fn, volume: TFileName;
+{$else}
+var mounts, fs, mnt, typ: RawUTF8;
+    p: PUTF8Char;
+    fn: TFileName;
+    n: integer;
+{$endif}
+    av, fr, tot: QWord;
+begin
+  result := nil;
+  n := 0;
+{$ifdef MSWINDOWS}
+   fn := '#:\';
+   drives := GetLogicalDrives;
+   m := 1 shl 2;
+   for drive := 3 to 26 do begin // retrieve partitions mounted as C..Z drives
+     if drives and m <> 0 then begin
+       fn[1] := char(64 + drive);
+       if GetDiskInfo(fn,av,fr,tot,@volume) then begin
+         SetLength(result,n+1);
+         StringToUTF8(volume,result[n].name);
+         result[n].mounted := fn;
+         volume := '';
+         result[n].size := tot;
+         inc(n);
+       end;
+     end;
+     m := m shl 1;
+   end;
+{$else} // see https://github.com/gagern/gnulib/blob/master/lib/mountlist.c
+  mounts := StringFromFile({$ifdef BSD}'/etc/mtab'{$else}'/proc/self/mounts'{$endif},
+    {hasnosize=}true);
+  p := pointer(mounts);
+  repeat
+    fs := '';
+    mnt := '';
+    typ := '';
+    ScanUTF8(GetNextLine(p,p),'%S %S %S',[@fs,@mnt,@typ]);
+    if (fs<>'') and (fs<>'rootfs') and (mnt<>'') and (mnt<>'/mnt') and (typ<>'') and
+       (IdemPCharArray(pointer(mnt),['/PROC/','/SYS/','/RUN/'])<0) and
+       (FindPropName(['autofs','proc','subfs','debugfs','devpts','fusectl','mqueue',
+        'rpc-pipefs','sysfs','devfs','kernfs','ignore','none','tmpfs','securityfs',
+        'ramfs','rootfs','devtmpfs','hugetlbfs'],typ)<0) then begin
+      fn := UTF8ToString(mnt);
+      if GetDiskInfo(fn,av,fr,tot) and (tot>1 shl 20) then begin
+        //writeln('fs=',fs,' mnt=',mnt,' typ=',typ, ' av=',KB(av),' fr=',KB(fr),' tot=',KB(tot));
+        SetLength(result,n+1);
+        result[n].name := fs;
+        result[n].mounted := fn;
+        result[n].size := tot;
+        inc(n);
+      end;
+    end;
+  until p=nil;
+  DynArray(TypeInfo(TDiskPartitions),result).Sort(SortDynArrayDiskPartitions);
+  {$endif}
+end;
+
+var
+  _DiskPartitions: TDiskPartitions;
+
+function GetDiskPartitionsText(nocache, withfreespace: boolean): RawUTF8;
+var i: integer;
+    parts: TDiskPartitions;
+   function GetInfo(var p: TDiskPartition): shortstring;
+   var av, fr, tot: QWord;
+   begin
+     if not withfreespace or not GetDiskInfo(p.mounted,av,fr,tot) then
+       FormatShort('% % (%)',[p.mounted,p.name,KB(p.size)],result) else
+       FormatShort('% % (% / %)',[p.mounted,p.name,KB(fr),KB(tot)],result);
+   end;
+begin
+  if (_DiskPartitions=nil) or nocache then
+    _DiskPartitions := GetDiskPartitions;
+  parts := _DiskPartitions;
+  if parts=nil then
+    result := '' else
+    ShortStringToAnsi7String(GetInfo(parts[0]),result);
+  for i := 1 to high(parts) do
+    result := FormatUTF8('%, %',[result,GetInfo(parts[i])]);
+end;
 
 
 { ******************* cross-cutting classes and functions ***************** }
@@ -63486,7 +63727,7 @@ end;
 
 {$ifdef KYLIX3}
 type
-  // see http://stackoverflow.com/a/3085509/458259 about this known Kylix bug
+  // see http://stackoverflow.com/a/3085509 about this known Kylix bug
   TEventHack = class(THandleObject) // should match EXACTLY SyncObjs.pas source!
   private
     FEvent: TSemaphore;
@@ -65100,8 +65341,10 @@ begin
     strcspn := @strcspnSSE42;
     {$ifdef CPU64}
     {$ifdef FPC} // done in InitRedirectCode for Delphi
+    {$ifdef HASAESNI}
     StrLen := @StrLenSSE42;
     StrComp := @StrCompSSE42;
+    {$endif}
     {$endif}
     {$endif}
     {$ifndef PUREPASCAL}
@@ -65174,6 +65417,8 @@ initialization
   TTextWriter.RegisterCustomJSONSerializerFromText([
     TypeInfo(TFindFilesDynArray),
      'Name:string Attr:Integer Size:Int64 Timestamp:TDateTime',
+    TypeInfo(TDiskPartitions),
+      'name:RawUTF8 mounted:string size:QWord',
     TypeInfo(TSystemUseDataDynArray),
      'Timestamp:TDateTime Kernel,User:single WorkDB,VirtualKB:cardinal']);
   // some type definition assertions
