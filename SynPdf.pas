@@ -6,7 +6,7 @@ unit SynPdf;
 {
     This file is part of Synopse framework.
 
-    Synopse framework. Copyright (C) 2017 Arnaud Bouchez
+    Synopse framework. Copyright (C) 2019 Arnaud Bouchez
       Synopse Informatique - https://synopse.info
 
   *** BEGIN LICENSE BLOCK *****
@@ -25,7 +25,7 @@ unit SynPdf;
 
   The Initial Developer of the Original Code is Arnaud Bouchez.
 
-  Portions created by the Initial Developer are Copyright (C) 2017
+  Portions created by the Initial Developer are Copyright (C) 2019
   the Initial Developer. All Rights Reserved.
 
   Contributor(s):
@@ -35,11 +35,13 @@ unit SynPdf;
    CoMPi
    Damien (ddemars)
    David Mead (MDW)
+   David Heffernan
    FalconB
    Florian Grummel
    Harald Simon
    Josh Kelley (joshkel)
-   LoukaO  
+   Karel (vandrovnik)
+   LoukaO
    Marsh
    MChaos
    Mehrdad Momeni (nosa)
@@ -64,7 +66,7 @@ unit SynPdf;
 
   ***** END LICENSE BLOCK *****
 
-  Sponsors:               https://synopse.info/fossil/wiki?name=HelpDonate
+  Sponsors: https://synopse.info/fossil/wiki?name=HelpDonate
   Ongoing development and maintenance of the SynPDF library was sponsored
   in part by:
    http://www.helpndoc.com
@@ -286,7 +288,7 @@ unit SynPdf;
   - EMR_INTERSECTCLIPRECT fix supplied by Marsh - but patch disabled by default
   - huge UniScribe fixes supplied by Mehrdad Momeni (nosa) - THANKS A LOT!
   - enhanced clipping process by Achim Kalwa
-  - added Support for ARC ARCTO PIE and CHORD - thanks ProHolz for the patch 
+  - added Support for ARC ARCTO PIE and CHORD - thanks ProHolz for the patch
 
 }
 
@@ -756,15 +758,15 @@ type
   protected
     fLastObjectNumber: integer;
     fLastGenerationNumber: Integer;
-    fLastRC4Key: TRC4InternalKey;
     fUserPass, fOwnerPass: TPdfBuffer32;
+    fLastRC4Key: TRC4;
     procedure EncodeBuffer(const BufIn; var BufOut; Count: cardinal); override;
   public
     /// prepare a specific document to be encrypted
     // - will compute the internal keys
     procedure AttachDocument(aDoc: TPdfDocument); override;
   end;
-{$endif}
+{$endif USE_PDFSECURITY}
 
   /// buffered writer class, specialized for PDF encoding
   TPdfWrite = class
@@ -1342,11 +1344,6 @@ type
   TPdfPage = class;
   TPdfPageClass = class of TPdfPage;
 
-  /// array used to store a TPdfImage hash
-  // - uses 4 crc32c hash codes, created with 4 diverse seeds, in order to avoid
-  // false positives
-  TPdfImageHash = array[0..3] of cardinal;
-
   /// potential font styles
   TPdfFontStyle = (pfsBold, pfsItalic, pfsUnderline, pfsStrikeOut);
   /// set of font styles
@@ -1409,7 +1406,7 @@ type
     fEncryptionObject: TPdfDictionary;
     fCurrentObjectNumber: integer;
     fCurrentGenerationNumber: integer;
-    {$endif}
+    {$endif USE_PDFSECURITY}
     function GetGeneratePDF15File: boolean;
     procedure SetGeneratePDF15File(const Value: boolean);
     function GetInfo: TPdfInfo;     {$ifdef HASINLINE}inline;{$endif}
@@ -1526,7 +1523,7 @@ type
     // - returns '' if this image is not already there
     // - uses 4 hash codes, created with 4 diverse seeds, in order to avoid
     // false positives
-    function GetXObjectImageName(const Hash: TPdfImageHash; Width, Height: Integer): PDFString;
+    function GetXObjectImageName(const Hash: THash128Rec; Width, Height: Integer): PDFString;
     {$endif USE_BITMAP}
     /// wrapper to create an annotation
     // - the annotation is set to a specified position of the current page
@@ -1539,6 +1536,9 @@ type
     // fMissingBookmarks list, and will be linked at CreateBookMark method call
     function CreateLink(const ARect: TPdfRect; const aBookmarkName: RawUTF8;
       BorderStyle: TPdfAnnotationBorder=abSolid; BorderWidth: integer=1): TPdfDictionary;
+    /// wrapper to create a hyper-link, with a specific URL value
+    function CreateHyperLink(const ARect: TPdfRect; const url: RawUTF8;
+      BorderStyle: TPdfAnnotationBorder=abSolid; BorderWidth: integer=0): TPdfDictionary;
     /// create an Outline entry at a specified position of the current page
     // - the outline tree is created from the specified numerical level (0=root),
     // just after the item added via the previous CreateOutline call
@@ -1782,7 +1782,7 @@ type
   /// is used to define the TMetaFile kind of arc to be drawn
   TPdfCanvasArcType =(
     acArc, acArcTo, acArcAngle, acPie, acChoord);
-  {$endif}
+  {$endif USE_ARC}
 
   /// access to the PDF Canvas, used to draw on the page
   TPdfCanvas = class(TObject)
@@ -1845,7 +1845,7 @@ type
    {$ifdef USE_ARC}
    procedure ARCI(centerx, centery, W, H, Sx, Sy, Ex, Ey: integer;
      clockwise: boolean; arctype: TPdfCanvasArcType; var position: TPoint);
-   {$endif}
+   {$endif USE_ARC}
     // wrapper call I2X() and I2Y() for conversion (points to origin+size)
     function BoxI(Box: TRect; Normalize: boolean): TPdfBox; {$ifdef HASINLINE}inline;{$endif}
     // wrapper call I2X() and I2Y() for conversion
@@ -1882,7 +1882,7 @@ type
     procedure ConcatToCTM(a, b, c, d, e, f: Single; Decimals: Cardinal=6); {  cm  }
 
     /// Set the flatness tolerance in the graphics state
-    // - see Section 6.5.1, “Flatness Tolerance” of the PDF 1.3 reference:
+    // - see Section 6.5.1, "Flatness Tolerance" of the PDF 1.3 reference:
     // The flatness tolerance controls the maximum permitted distance in
     // device pixels between the mathematically correct path and an
     // approximation constructed from straight line segments
@@ -1966,7 +1966,7 @@ type
     // it does nothing
     procedure Closepath;                                         {  h   }
     /// End the path object without filling or stroking it
-    // - This operator is a “path-painting no-op,” used primarily for the
+    // - This operator is a "path-painting no-op", used primarily for the
     // side effect of changing the clipping path
     procedure NewPath;                                           {  n   }
     /// Stroke the path
@@ -2007,7 +2007,7 @@ type
     // the page affected by painting operators. The closed subpaths of this path
     // define the area that can be painted. Marks falling inside this area will
     // be applied to the page; those falling outside it will not. (Precisely what
-    // is considered to be “inside” a path is discussed under “Filling,” above.)
+    // is considered to be inside a path is discussed under "Filling", above.)
     // - The initial clipping path includes the entire page. Both clipping path
     // methods (Clip and EoClip) may appear after the last path construction operator
     // and before the path-painting operator that terminates a path object.
@@ -2032,7 +2032,7 @@ type
     // - word spacing is used by the ShowText and ShowTextNextLine methods
     // - Default value is 0
     procedure SetWordSpace(wordSpace: Single);                   {  Tw  }
-    /// Set the horizontal scaling to (scale ÷ 100)
+    /// Set the horizontal scaling to (scale/100)
     // - hScaling is a number specifying the percentage of the normal width
     // - Default value is 100 (e.g. normal width)
     procedure SetHorizontalScaling(hScaling: Single);              {  Tz  }
@@ -2643,7 +2643,8 @@ type
     // it is in fact a TMetaFileCanvas instance from fVCLCurrentMetaFile
     fVCLCurrentCanvas: TCanvas;
     fVCLCurrentMetaFile: TMetaFile;
-    // allow to create the meta file and its canvas only if necessary
+    // allow to create the meta file and its canvas only if necessary, and
+    // compress the page content using SynLZ to reduce memory usage
     procedure CreateVCLCanvas;
     procedure SetVCLCurrentMetaFile;
     procedure FlushVCLCanvas;
@@ -2744,7 +2745,7 @@ type
   private
     fPixelHeight: Integer;
     fPixelWidth: Integer;
-    fHash: TPdfImageHash;
+    fHash: THash128Rec;
   public
     /// create the image from a supplied VCL TGraphic instance
     // - handle TBitmap and SynGdiPlus picture types, i.e. TJpegImage
@@ -3680,7 +3681,7 @@ begin
   lstartx := xB;
   lstarty := yB;
   // calculate and reserve Space for the result
-  ressize := n; 
+  ressize := n;
   case fArctype of
     acArc :     inc(ressize,1); // first move
     acArcTo:    inc(ressize,3); // first line and move
@@ -3810,7 +3811,7 @@ begin
       fCurrentObjectNumber := FObjectNumber;
       fCurrentGenerationNumber := FGenerationNumber;
     end;
-{$endif}
+{$endif USE_PDFSECURITY}
 end;
 
 procedure TPdfObject.SetObjectNumber(Value: integer);
@@ -4444,7 +4445,7 @@ begin
   {$ifdef USE_PDFSECURITY}
     if (TmpSize>0) and (W.fDoc.fEncryption<>nil) and not FDoNotEncrypt then
       W.fDoc.fEncryption.EncodeBuffer(Buf^,Buf^,TmpSize);
-  {$endif}
+  {$endif USE_PDFSECURITY}
     W.Add(#10'stream'#10).Add(Buf,TmpSize).
       Add(#10'endstream');
     FWriter.fDestStream.Size := 0; // release internal stream memory
@@ -4698,7 +4699,7 @@ begin
     if BEnd-B<=L then begin
       Save;
       inc(fDestStreamPosition,L);
-      fDestStream.Write(pointer(Text)^,L);
+      fDestStream.WriteBuffer(pointer(Text)^,L);
     end else begin
       MoveFast(pointer(Text)^,B^,L);
       inc(B,L);
@@ -4712,7 +4713,7 @@ begin
   if BEnd-B<=Len then begin
     Save;
     inc(fDestStreamPosition,Len);
-    fDestStream.Write(Text^,Len);
+    fDestStream.WriteBuffer(Text^,Len);
   end else begin
     MoveFast(Text^,B^,Len);
     inc(B,Len);
@@ -4770,7 +4771,7 @@ function TPdfWrite.AddEscapeContent(const Text: RawByteString): TPdfWrite;
 var tmp: PAnsiChar;
     L: integer;
     buf: array[byte] of AnsiChar;
-{$endif}
+{$endif USE_PDFSECURITY}
 begin
 {$ifdef USE_PDFSECURITY}
   if (Text<>'') and (fDoc.fEncryption<>nil) then begin
@@ -4786,7 +4787,7 @@ begin
         Freemem(tmp);
     end;
   end else
-{$endif}
+{$endif USE_PDFSECURITY}
   result := AddEscape(pointer(Text),length(Text));
 end;
 
@@ -5022,7 +5023,7 @@ end;
 var L: Integer;
 {$ifdef USE_PDFSECURITY}
     tmp: TWordDynArray;
-{$endif}
+{$endif USE_PDFSECURITY}
 begin
   if WideCharCount>0 then begin
 {$ifdef USE_PDFSECURITY}
@@ -5031,7 +5032,7 @@ begin
       fDoc.fEncryption.EncodeBuffer(PW^,pointer(tmp)^,WideCharCount*2);
       PW := pointer(tmp);
     end;
-{$endif}
+{$endif USE_PDFSECURITY}
     repeat
       L := WideCharCount;
       if BEnd-B<=L*4 then begin
@@ -5404,7 +5405,7 @@ var L: integer;
 begin
   L := B-@Tmp;
   inc(fDestStreamPosition,L);
-  fDestStream.Write(Tmp,L);
+  fDestStream.WriteBuffer(Tmp,L);
   B := @Tmp;
 end;
 
@@ -5512,7 +5513,7 @@ procedure TPdfTrailer.ToCrossReference(Doc: TPdfDocument);
 var i: integer;
 {$ifdef USE_PDFSECURITY}
     Enc: TPdfEncryption;
-{$endif}
+{$endif USE_PDFSECURITY}
 begin
   FXRef := Doc.FXref;
   FCrossReference := TPdfStream.Create(Doc);
@@ -5522,14 +5523,14 @@ begin
   FCrossReference.FDoNotEncrypt := true;
   if Doc.fEncryption<>nil then
     exit; // still a bug with encryption + objectstream
-{$endif}
+{$endif USE_PDFSECURITY}
   FObjectStream := TPdfObjectStream.Create(Doc);
 {$ifdef USE_PDFSECURITY}
   FObjectStream.FDoNotEncrypt := true;
   Enc := Doc.fEncryption;
   try
     Doc.fEncryption := nil; // force /ObjStm content not encrypted
-{$endif}
+{$endif USE_PDFSECURITY}
     for i := 1 to FXRef.ItemCount-1 do
     with FXRef.Items[i] do
       if (ByteOffset<=0) and Value.InheritsFrom(TPdfDictionary) then begin
@@ -5540,7 +5541,7 @@ begin
   finally
     Doc.fEncryption := Enc;
   end;
-{$endif}
+{$endif USE_PDFSECURITY}
 end;
 
 
@@ -5662,7 +5663,7 @@ begin
   fPDFA1 := APDFA1;
   {$ifdef USE_PDFSECURITY}
   fEncryption := AEncryption;
-  {$endif}
+  {$endif USE_PDFSECURITY}
   fTPdfPageClass := TPdfPage;
   if ACodePage=0 then
     FCodePage := LCIDToCodePage(SysLocale.DefaultLCID) else // GetACP can be<>SysLocale
@@ -5727,7 +5728,7 @@ begin
   inherited;
   {$ifdef USE_PDFSECURITY}
   fEncryption.Free;
-  {$endif}
+  {$endif USE_PDFSECURITY}
 end;
 
 function TPdfDocument.CreateEmbeddedFont(const FontName: RawUTF8): TPdfFont;
@@ -5972,7 +5973,7 @@ begin
 end;
 
 {$ifdef USE_BITMAP}
-function TPdfDocument.GetXObjectImageName(const Hash: TPdfImageHash;
+function TPdfDocument.GetXObjectImageName(const Hash: THash128Rec;
   Width, Height: Integer): PDFString;
 var Obj: TPdfXObject;
     Img: TPdfImage absolute Obj;
@@ -5984,8 +5985,7 @@ begin
       Obj := TPdfXObject(FXRef.GetObject(Obj.FObjectNumber));
     if (Obj<>nil) and Obj.InheritsFrom(TPdfImage) and
        (Img.PixelWidth=Width) and (Img.PixelHeight=Height) and
-       not IsZero(@Img.fHash,sizeof(Hash)) and
-       CompareMem(@Img.fHash,@Hash,SizeOf(Hash)) and
+       not IsZero(Img.fHash.b) and IsEqual(Img.fHash.b,Hash.b) and
        (Obj.Attributes<>nil) then begin
       result := TPdfName(Obj.Attributes.ValueByName('Name')).Value;
       if result<>'' then
@@ -6044,6 +6044,18 @@ begin
     result.AddItem('Dest',aDest.GetValue);
 end;
 
+function TPdfDocument.CreateHyperLink(const ARect: TPdfRect; const url : RawUTF8;
+  BorderStyle: TPdfAnnotationBorder; BorderWidth: integer): TPdfDictionary;
+var aURIObj: TPdfDictionary;
+begin
+  result := CreateAnnotation(asLink,ARect,BorderStyle,BorderWidth);
+  aURIObj := TPdfDictionary.Create(FXref);
+  aURIObj.FSaveAtTheEnd := true;
+  aURIObj.AddItem('S', 'URI');
+  aURIObj.AddItemTextUTF8('URI', url);
+  FXref.AddObject(aURIObj);
+end;
+
 function TPdfDocument.CreateDestination: TPdfDestination;
 begin
   Result := TPdfDestination.Create(Self);
@@ -6084,7 +6096,7 @@ var CatalogDictionary: TPdfDictionary;
     FileID: array[0..3] of cardinal;
     {$ifndef USE_PDFSECURITY}
     P: PAnsiChar;
-    {$endif}
+    {$endif USE_PDFSECURITY}
 const
   ICC: array[0..139] of cardinal = (
     805437440,1161970753,4098,1920233069,541214546,542792024,134270983,318769920,989868800,
@@ -6143,14 +6155,14 @@ begin
   {$ifdef USE_PDFSECURITY}
   if fEncryption<>nil then
     NeedFileID := true;
-  {$endif}
+  {$endif USE_PDFSECURITY}
   if PDFA1 then begin
     if fFileFormat<pdf14 then
       fFileFormat := pdf14;
     {$ifdef USE_PDFSECURITY}
     if fEncryption<>nil then
       raise EPdfInvalidOperation.Create('PDF/A-1 not allowed when encryption is enabled');
-    {$endif}
+    {$endif USE_PDFSECURITY}
     fUseFontFallBack := true;
     FOutputIntents := TPdfArray.Create(FXref);
     Dico := TPdfDictionary.Create(FXRef);
@@ -6188,7 +6200,7 @@ begin
     P[0] := '<';
     SynCommons.BinToHex(PAnsiChar(@FileID[0]),P+1,16);
     P[33] := '>';
-    {$endif}
+    {$endif USE_PDFSECURITY}
     ID := TPdfArray.Create(FXref);
     ID.AddItem(TPdfRawText.Create(IDs));
     ID.AddItem(TPdfRawText.Create(IDs));
@@ -6197,7 +6209,7 @@ begin
   {$ifdef USE_PDFSECURITY}
   if fEncryption<>nil then
     fEncryption.AttachDocument(self);
-  {$endif}
+  {$endif USE_PDFSECURITY}
 end;
 
 function TPdfDocument.AddXObject(const AName: PDFString; AXObject: TPdfXObject): integer;
@@ -6559,7 +6571,7 @@ function TPdfDocument.TTFFontPostcriptName(aFontIndex: integer; AStyle: TPdfFont
 // see http://www.microsoft.com/typography/OTSPEC/name.htm
 function TrueTypeFontName(const aFontName: RawUTF8; AStyle: TPdfFontStyles): PDFString;
 var i: Integer;
-begin // from PDF 1.3 § 5.5.2
+begin // from PDF 1.3 #5.5.2
   SetString(result,PAnsiChar(pointer(aFontName)),length(aFontName));
   for i := length(result) downto 1 do
     if (Result[i]<=' ') or (Result[i]>=#127) then
@@ -6630,16 +6642,17 @@ end;
 function TPdfDocument.CreateOrGetImage(B: TBitmap; DrawAt: PPdfBox; ClipRc: PPdfBox): PDFString;
 var J: TJpegImage;
     Img: TPdfImage;
-    Hash: TPdfImageHash;
+    Hash: THash128Rec;
     y,w,h,row: integer;
     nPals: cardinal;
     Pals: array of TPaletteEntry;
 const PERROW: array[TPixelFormat] of byte = (0,1,4,8,15,16,24,32,0);
   procedure DoHash(bits: pointer; size: Integer);
-  var i: integer;
   begin
-    for i := 0 to high(Hash) do
-      Hash[i] := crc32c(Hash[i],bits,size);
+    Hash.c0 := crc32c(Hash.c0,bits,size);
+    Hash.c1 := crc32c(Hash.c1,bits,size);
+    Hash.c2 := Hash.c2+Hash.c0; // naive, but sufficient, cascading
+    Hash.c3 := Hash.c3+Hash.c1;
   end;
 begin
   result := '';
@@ -6653,10 +6666,10 @@ begin
       B.PixelFormat := pf24bit;
       row := 24;
     end;
-    Hash[0] := 0;
-    Hash[1] := 2972236863;
-    Hash[2] := 1598500460;
-    Hash[3] := 767514222;
+    Hash.c0 := 0;
+    Hash.c1 := 1400305337; // 3 prime numbers
+    Hash.c2 := 2468776129;
+    Hash.c3 := 3121238909;
     if B.Palette<>0 then begin
       nPals := 0;
       if (GetObject(B.Palette,sizeof(nPals),@nPals)<>0) and (nPals>0) then begin
@@ -7734,7 +7747,7 @@ begin
         end;
       end;
 end;
-{$endif}
+{$endif USE_ARC}
 
 procedure TPdfCanvas.PointI(x, y: Single);
 begin
@@ -8168,7 +8181,7 @@ end;
 
 const
   { collection of flags defining various characteristics of the font
-    see PDF Reference 1.3 §5.7.1 }
+    see PDF Reference 1.3 #5.7.1 }
   PDF_FONT_FIXED_WIDTH = 1;
   PDF_FONT_SERIF       = 2;
   PDF_FONT_SYMBOLIC    = 4;
@@ -8403,7 +8416,7 @@ begin
   WR := TPdfWrite.Create(fDoc,DS);
   try
     if Unicode then begin
-      // 1. Unicode Font (see PDF 1.3 reference §5.9)
+      // 1. Unicode Font (see PDF 1.3 reference #5.9)
       // create descendant font
       Descendant := TPdfDictionary.Create(fDoc.FXref);
       Descendant.AddItem('Type','Font');
@@ -9058,8 +9071,8 @@ begin
   FCanvas.FContents.FSaveAtTheEnd := true; // as expected in SaveToStream() below
 end;
 
-constructor TPdfDocumentGDI.Create(AUseOutlines: Boolean=false; ACodePage: integer=0;
-  APDFA1: boolean=false {$ifdef USE_PDFSECURITY}; AEncryption: TPdfEncryption=nil{$endif});
+constructor TPdfDocumentGDI.Create(AUseOutlines: Boolean; ACodePage: integer;
+  APDFA1: boolean{$ifdef USE_PDFSECURITY}; AEncryption: TPdfEncryption{$endif});
 begin
   inherited;
   fTPdfPageClass := TPdfPageGdi;
@@ -9080,11 +9093,15 @@ end;
 function TPdfDocumentGDI.GetVCLCanvasSize: TSize;
 begin
   if (FCanvas<>nil) and (FCanvas.FPage<>nil) then
-    result := TPdfPageGdi(FCanvas.FPage).fVCLCanvasSize else
+  with TPdfPageGdi(FCanvas.FPage) do begin
+    if fVCLCurrentCanvas=nil then
+      CreateVCLCanvas;
+    result := fVCLCanvasSize;
+  end else
     Int64(result) := 0;
 end;
 
-procedure TPdfDocumentGDI.SaveToStream(AStream: TStream; ForceModDate: TDateTime=0);
+procedure TPdfDocumentGDI.SaveToStream(AStream: TStream; ForceModDate: TDateTime);
 var i: integer;
     P: TPdfPageGDI;
 begin
@@ -9146,8 +9163,8 @@ begin
   fVCLCurrentMetaFile.Width  := fVCLCanvasSize.cx;
   fVCLCurrentMetaFile.Height := fVCLCanvasSize.cy;
   if fVCLMetaFileCompressed<>'' then begin
-    tmp := fVCLMetaFileCompressed;
-    CompressSynLZ(tmp,false);
+    SetLength(tmp,SynLZdecompressdestlen(pointer(fVCLMetaFileCompressed)));
+    SynLZdecompress1(Pointer(fVCLMetaFileCompressed),length(fVCLMetaFileCompressed),pointer(tmp));
     Stream := TRawByteStringStream.Create(tmp);
     try
       fVCLCurrentMetaFile.LoadFromStream(Stream);
@@ -9165,6 +9182,7 @@ end;
 
 procedure TPdfPageGDI.FlushVCLCanvas;
 var Stream: TRawByteStringStream;
+    len: integer;
 begin
   if (self=nil) or (fVCLCurrentCanvas=nil) then
     exit;
@@ -9173,8 +9191,10 @@ begin
   Stream := TRawByteStringStream.Create;
   try
     fVCLCurrentMetaFile.SaveToStream(Stream);
-    fVCLMetaFileCompressed := Stream.DataString;
-    CompressSynLZ(fVCLMetaFileCompressed,true);
+    len := Length(Stream.DataString);
+    SetLength(fVCLMetaFileCompressed,SynLZcompressdestlen(len));
+    SetLength(fVCLMetaFileCompressed,
+      SynLZcompress1(pointer(Stream.DataString),len,pointer(fVCLMetaFileCompressed)));
   finally
     Stream.Free;
   end;
@@ -9296,15 +9316,15 @@ type
   end;
 
 const
-  STOCKBRUSHCOLOR: array[WHITE_BRUSH..BLACK_BRUSH] of cardinal = (
+  STOCKBRUSHCOLOR: array[WHITE_BRUSH..BLACK_BRUSH] of integer = (
     clWhite, $AAAAAA, $808080, $666666, clBlack);
-  STOCKPENCOLOR: array[WHITE_PEN..BLACK_PEN] of cardinal = (
+  STOCKPENCOLOR: array[WHITE_PEN..BLACK_PEN] of integer = (
     clWhite, clBlack);
 
-function CenterPoint(const Rect: TRect): TPoint;
+function CenterPoint(const Rect: TRect): TPoint; {$ifdef HASINLINE}inline;{$endif}
 begin
-  result.X := (Rect.Right-Rect.Left) div 2+Rect.Left;
-  result.Y := (Rect.Bottom-Rect.Top) div 2+Rect.Top;
+  result.X := (Rect.Right+Rect.Left) div 2;
+  result.Y := (Rect.Bottom+Rect.Top) div 2;
 end;
 
 /// EMF enumeration callback function, called from GDI
@@ -9314,10 +9334,8 @@ function EnumEMFFunc(DC: HDC; var Table: THandleTable; R: PEnhMetaRecord;
 var i: integer;
     InitTransX: XForm;
     polytypes: PByteArray;
-
 begin
   result := true;
-
   with E.DC[E.nDC] do
   case R^.iType of
   EMR_HEADER: begin
@@ -9364,24 +9382,29 @@ begin
   EMR_SETWORLDTRANSFORM:
     E.ScaleMatrix(@PEMRSetWorldTransform(R)^.xform, MWT_SET);
   EMR_CREATEPEN:
-    with PEMRCreatePen(R)^, E.obj[ihPen-1] do begin
-      kind := OBJ_PEN;
-      PenColor := lopn.lopnColor;
-      PenWidth := lopn.lopnWidth.X;
-      PenStyle := lopn.lopnStyle;
-    end;
+    with PEMRCreatePen(R)^ do
+    if ihPen-1<cardinal(length(E.Obj)) then
+      with E.obj[ihPen-1] do begin
+        kind := OBJ_PEN;
+        PenColor := lopn.lopnColor;
+        PenWidth := lopn.lopnWidth.X;
+        PenStyle := lopn.lopnStyle;
+      end;
   EMR_CREATEBRUSHINDIRECT:
-    with PEMRCreateBrushIndirect(R)^, E.obj[ihBrush-1] do begin
-      kind := OBJ_BRUSH;
-      BrushColor := lb.lbColor;
-      BrushNull := (lb.lbStyle=BS_NULL);
-      BrushStyle := lb.lbStyle;
-    end;
+    with PEMRCreateBrushIndirect(R)^ do
+    if ihBrush-1<cardinal(length(E.Obj)) then
+      with E.obj[ihBrush-1] do begin
+        kind := OBJ_BRUSH;
+        BrushColor := lb.lbColor;
+        BrushNull := (lb.lbStyle=BS_NULL);
+        BrushStyle := lb.lbStyle;
+      end;
   EMR_EXTCREATEFONTINDIRECTW:
     E.CreateFont(PEMRExtCreateFontIndirect(R));
   EMR_DELETEOBJECT:
-    if PEMRDeleteObject(R)^.ihObject-1<cardinal(length(E.Obj)) then // avoid GPF
-      E.obj[PEMRDeleteObject(R)^.ihObject-1].kind := 0;
+    with PEMRDeleteObject(R)^ do
+      if ihObject-1<cardinal(length(E.Obj)) then // avoid GPF
+        E.obj[ihObject-1].kind := 0;
   EMR_SELECTOBJECT:
     E.SelectObjectFromIndex(PEMRSelectObject(R)^.ihObject);
   EMR_MOVETOEX: begin
@@ -9490,14 +9513,21 @@ begin
       E.Canvas.MoveToI(PEMRPolyLine(R)^.aptl[0].X,PEMRPolyLine(R)^.aptl[0].Y);
       for i := 1 to PEMRPolyLine(R)^.cptl-1 do
         E.Canvas.LineToI(PEMRPolyLine(R)^.aptl[i].X,PEMRPolyLine(R)^.aptl[i].Y);
-      Position := PEMRPolyLine(R)^.aptl[PEMRPolyLine(R)^.cptl-1];
+      if PEMRPolyLine(R)^.cptl>0 then
+        Position := PEMRPolyLine(R)^.aptl[PEMRPolyLine(R)^.cptl-1] else
+        Position := PEMRPolyLine(R)^.aptl[0];
     end else begin
       E.Canvas.MoveToI(PEMRPolyLine16(R)^.apts[0].X,PEMRPolyLine16(R)^.apts[0].Y);
-      for i := 1 to PEMRPolyLine16(R)^.cpts-1 do
-        E.Canvas.LineToI(PEMRPolyLine16(R)^.apts[i].X,PEMRPolyLine16(R)^.apts[i].Y);
-      with PEMRPolyLine16(R)^.apts[PEMRPolyLine16(R)^.cpts-1] do begin
-        Position.X := X;
-        Position.Y := Y;
+      if PEMRPolyLine16(R)^.cpts>0 then begin
+        for i := 1 to PEMRPolyLine16(R)^.cpts-1 do
+          E.Canvas.LineToI(PEMRPolyLine16(R)^.apts[i].X,PEMRPolyLine16(R)^.apts[i].Y);
+        with PEMRPolyLine16(R)^.apts[PEMRPolyLine16(R)^.cpts-1] do begin
+          Position.X := X;
+          Position.Y := Y;
+        end;
+      end else begin
+        Position.X := PEMRPolyLine16(R)^.apts[0].X;
+        Position.Y := PEMRPolyLine16(R)^.apts[0].Y;
       end;
     end;
     Moved := false;
@@ -9519,7 +9549,9 @@ begin
       E.Canvas.CurveToCI(PEMRPolyBezier(R)^.aptl[i*3+1].X,PEMRPolyBezier(R)^.aptl[i*3+1].Y,
         PEMRPolyBezier(R)^.aptl[i*3+2].X,PEMRPolyBezier(R)^.aptl[i*3+2].Y,
         PEMRPolyBezier(R)^.aptl[i*3+3].X,PEMRPolyBezier(R)^.aptl[i*3+3].Y);
-    Position := PEMRPolyBezier(R)^.aptl[PEMRPolyBezier(R)^.cptl-1];
+    if PEMRPolyBezier(R)^.cptl>0 then
+      Position := PEMRPolyBezier(R)^.aptl[PEMRPolyBezier(R)^.cptl-1] else
+      Position := PEMRPolyBezier(R)^.aptl[0];
     Moved := false;
     if not E.Canvas.FNewPath then
       if not pen.null then
@@ -9530,13 +9562,18 @@ begin
     if not pen.null then
       E.NeedPen;
     E.Canvas.MoveToI(PEMRPolyBezier16(R)^.apts[0].X,PEMRPolyBezier16(R)^.apts[0].Y);
-    for i := 0 to (PEMRPolyBezier16(R)^.cpts div 3)-1 do
-      E.Canvas.CurveToCI(PEMRPolyBezier16(R)^.apts[i*3+1].X,PEMRPolyBezier16(R)^.apts[i*3+1].Y,
-        PEMRPolyBezier16(R)^.apts[i*3+2].X,PEMRPolyBezier16(R)^.apts[i*3+2].Y,
-        PEMRPolyBezier16(R)^.apts[i*3+3].X,PEMRPolyBezier16(R)^.apts[i*3+3].Y);
-    with PEMRPolyBezier16(R)^.apts[PEMRPolyBezier16(R)^.cpts-1] do begin
-      Position.X := X;
-      Position.Y := Y;
+    if PEMRPolyBezier16(R)^.cpts>0 then begin
+      for i := 0 to (PEMRPolyBezier16(R)^.cpts div 3)-1 do
+        E.Canvas.CurveToCI(PEMRPolyBezier16(R)^.apts[i*3+1].X,PEMRPolyBezier16(R)^.apts[i*3+1].Y,
+          PEMRPolyBezier16(R)^.apts[i*3+2].X,PEMRPolyBezier16(R)^.apts[i*3+2].Y,
+          PEMRPolyBezier16(R)^.apts[i*3+3].X,PEMRPolyBezier16(R)^.apts[i*3+3].Y);
+      with PEMRPolyBezier16(R)^.apts[PEMRPolyBezier16(R)^.cpts-1] do begin
+        Position.X := X;
+        Position.Y := Y;
+      end;
+    end else begin
+      Position.X := PEMRPolyBezier16(R)^.apts[0].X;
+      Position.Y := PEMRPolyBezier16(R)^.apts[0].Y;
     end;
     Moved := false;
     if not E.Canvas.FNewPath then
@@ -9550,11 +9587,13 @@ begin
     if not E.Canvas.FNewPath then
       if not Moved then
         E.Canvas.MoveToI(Position.X,Position.Y);
-    for i := 0 to (PEMRPolyBezierTo(R)^.cptl div 3)-1 do
-      E.Canvas.CurveToCI(PEMRPolyBezierTo(R)^.aptl[i*3].X,PEMRPolyBezierTo(R)^.aptl[i*3].Y,
-        PEMRPolyBezierTo(R)^.aptl[i*3+1].X,PEMRPolyBezierTo(R)^.aptl[i*3+1].Y,
-        PEMRPolyBezierTo(R)^.aptl[i*3+2].X,PEMRPolyBezierTo(R)^.aptl[i*3+2].Y);
-    Position := PEMRPolyBezierTo(R)^.aptl[PEMRPolyBezierTo(R)^.cptl-1];
+    if PEMRPolyBezierTo(R)^.cptl>0 then begin
+      for i := 0 to (PEMRPolyBezierTo(R)^.cptl div 3)-1 do
+        E.Canvas.CurveToCI(PEMRPolyBezierTo(R)^.aptl[i*3].X,PEMRPolyBezierTo(R)^.aptl[i*3].Y,
+          PEMRPolyBezierTo(R)^.aptl[i*3+1].X,PEMRPolyBezierTo(R)^.aptl[i*3+1].Y,
+          PEMRPolyBezierTo(R)^.aptl[i*3+2].X,PEMRPolyBezierTo(R)^.aptl[i*3+2].Y);
+      Position := PEMRPolyBezierTo(R)^.aptl[PEMRPolyBezierTo(R)^.cptl-1];
+    end;
     Moved := false;
     if not E.Canvas.FNewPath then
       if not pen.null then
@@ -9567,13 +9606,15 @@ begin
     if not E.Canvas.FNewPath then
       if not Moved then
         E.Canvas.MoveToI(Position.X,Position.Y);
-    for i := 0 to (PEMRPolyBezierTo16(R)^.cpts div 3)-1 do
-      E.Canvas.CurveToCI(PEMRPolyBezierTo16(R)^.apts[i*3].X,PEMRPolyBezierTo16(R)^.apts[i*3].Y,
-        PEMRPolyBezierTo16(R)^.apts[i*3+1].X,PEMRPolyBezierTo16(R)^.apts[i*3+1].Y,
-        PEMRPolyBezierTo16(R)^.apts[i*3+2].X,PEMRPolyBezierTo16(R)^.apts[i*3+2].Y);
-    with PEMRPolyBezierTo16(R)^.apts[PEMRPolyBezierTo16(R)^.cpts-1] do begin
-      Position.X := X;
-      Position.Y := Y;
+    if PEMRPolyBezierTo16(R)^.cpts>0 then begin
+      for i := 0 to (PEMRPolyBezierTo16(R)^.cpts div 3)-1 do
+        E.Canvas.CurveToCI(PEMRPolyBezierTo16(R)^.apts[i*3].X,PEMRPolyBezierTo16(R)^.apts[i*3].Y,
+          PEMRPolyBezierTo16(R)^.apts[i*3+1].X,PEMRPolyBezierTo16(R)^.apts[i*3+1].Y,
+          PEMRPolyBezierTo16(R)^.apts[i*3+2].X,PEMRPolyBezierTo16(R)^.apts[i*3+2].Y);
+      with PEMRPolyBezierTo16(R)^.apts[PEMRPolyBezierTo16(R)^.cpts-1] do begin
+        Position.X := X;
+        Position.Y := Y;
+      end;
     end;
     Moved := false;
     if not E.Canvas.FNewPath then
@@ -9590,10 +9631,13 @@ begin
         E.Canvas.MoveToI(Position.X,Position.Y);
     end;
     if R^.iType=EMR_POLYLINETO then begin
-      for i := 0 to PEMRPolyLineTo(R)^.cptl-1 do
-        E.Canvas.LineToI(PEMRPolyLineTo(R)^.aptl[i].X,PEMRPolyLineTo(R)^.aptl[i].Y);
-      Position := PEMRPolyLineTo(R)^.aptl[PEMRPolyLineTo(R)^.cptl-1];
-    end else begin // EMR_POLYLINETO16
+      if PEMRPolyLineTo(R)^.cptl>0 then begin
+        for i := 0 to PEMRPolyLineTo(R)^.cptl-1 do
+          E.Canvas.LineToI(PEMRPolyLineTo(R)^.aptl[i].X,PEMRPolyLineTo(R)^.aptl[i].Y);
+        Position := PEMRPolyLineTo(R)^.aptl[PEMRPolyLineTo(R)^.cptl-1];
+      end;
+    end else // EMR_POLYLINETO16
+    if PEMRPolyLineTo16(R)^.cpts>0 then begin
       for i := 0 to PEMRPolyLineTo16(R)^.cpts-1 do
         E.Canvas.LineToI(PEMRPolyLineTo16(R)^.apts[i].X,PEMRPolyLineTo16(R)^.apts[i].Y);
       with PEMRPolyLineTo16(R)^.apts[PEMRPolyLineTo16(R)^.cpts-1] do begin
@@ -9607,7 +9651,8 @@ begin
         E.Canvas.Stroke else
         E.Canvas.NewPath;
   end;
-  EMR_POLYDRAW: begin
+  EMR_POLYDRAW:
+  if PEMRPolyDraw(R)^.cptl>0 then begin
     if not pen.null then
       E.NeedPen;
     polytypes := @PEMRPolyDraw(R)^.aptl[PEMRPolyDraw(R)^.cptl];
@@ -9646,7 +9691,8 @@ begin
         E.Canvas.Stroke else
         E.Canvas.NewPath;
   end;
-  EMR_POLYDRAW16: begin
+  EMR_POLYDRAW16:
+  if PEMRPolyDraw16(R)^.cpts>0 then begin
     if not pen.null then
       E.NeedPen;
     polytypes := @PEMRPolyDraw16(R)^.apts[PEMRPolyDraw16(R)^.cpts];
@@ -9748,12 +9794,14 @@ begin
     with PEMRModifyWorldTransform(R)^ do
       E.ScaleMatrix(@PEMRModifyWorldTransform(R)^.xform, iMode);
   EMR_EXTCREATEPEN: // approx. - fast solution
-    with PEMRExtCreatePen(R)^, E.obj[ihPen-1] do begin
-      kind := OBJ_PEN;
-      PenColor := elp.elpColor;
-      PenWidth := elp.elpWidth;
-      PenStyle := elp.elpPenStyle and (PS_STYLE_MASK or PS_ENDCAP_MASK);
-    end;
+    with PEMRExtCreatePen(R)^ do
+    if ihPen-1<cardinal(length(E.Obj)) then
+      with E.obj[ihPen-1] do begin
+        kind := OBJ_PEN;
+        PenColor := elp.elpColor;
+        PenWidth := elp.elpWidth;
+        PenStyle := elp.elpPenStyle and (PS_STYLE_MASK or PS_ENDCAP_MASK);
+      end;
   EMR_SETMITERLIMIT:
     if PEMRSetMiterLimit(R)^.eMiterLimit>0.1 then
       E.Canvas.SetMiterLimit(PEMRSetMiterLimit(R)^.eMiterLimit);
@@ -9947,18 +9995,18 @@ begin
   GetTextMetrics(destDC,TM);
   SelectObject(destDC,Old);
   DeleteObject(HF);
-
-  with obj[aLogFont^.ihFont-1] do begin
-    kind := OBJ_FONT;
-    MoveFast(aLogFont^.elfw.elfLogFont,LogFont,sizeof(LogFont));
-    LogFont.lfPitchAndFamily := TM.tmPitchAndFamily;
-    if LogFont.lfOrientation<>0 then
-      FontSpec.angle := LogFont.lfOrientation div 10 else // -360..+360
-      FontSpec.angle := LogFont.lfEscapement div 10;
-    FontSpec.ascent := TM.tmAscent;
-    FontSpec.descent := TM.tmDescent;
-    FontSpec.cell := TM.tmHeight-TM.tmInternalLeading;
-  end;
+  if aLogFont^.ihFont-1<cardinal(length(obj)) then
+    with obj[aLogFont^.ihFont-1] do begin
+      kind := OBJ_FONT;
+      MoveFast(aLogFont^.elfw.elfLogFont,LogFont,sizeof(LogFont));
+      LogFont.lfPitchAndFamily := TM.tmPitchAndFamily;
+      if LogFont.lfOrientation<>0 then
+        FontSpec.angle := LogFont.lfOrientation div 10 else // -360..+360
+        FontSpec.angle := LogFont.lfEscapement div 10;
+      FontSpec.ascent := TM.tmAscent;
+      FontSpec.descent := TM.tmDescent;
+      FontSpec.cell := TM.tmHeight-TM.tmInternalLeading;
+    end;
 end;
 
 procedure TPdfEnum.DrawBitmap(xs, ys, ws, hs, xd, yd, wd, hd, usage: integer;
@@ -10174,10 +10222,20 @@ begin
           brush.null := false;
         end;
         NULL_PEN: begin
+          if fInLined and ((pen.style<>PS_NULL) or not pen.null) then begin
+            fInLined := False;
+            if not pen.null then
+              Canvas.Stroke;
+          end;
           pen.style := PS_NULL;
           pen.null := true;
         end;
         WHITE_PEN, BLACK_PEN: begin
+          if fInLined and ((pen.color<>STOCKPENCOLOR[iObject]) or not pen.null) then begin
+            fInLined := False;
+            if not pen.null then
+              Canvas.Stroke;
+          end;
           pen.color := STOCKPENCOLOR[iObject];
           pen.null := false;
         end;
@@ -10928,7 +10986,7 @@ begin
           for y := 0 to fPixelHeight-1 do
             FWriter.AddRGB(B.ScanLine[y],PInc,fPixelWidth);
           if (PInc=3) and (B.TransparentMode=tmFixed) then begin
-            // [ min1 max1 … minn maxn ]
+            // [ min1 max1 ... minn maxn ]
             TransparentColor := B.TransparentColor;
             FAttributes.AddItem('Mask',TPdfArray.CreateReals(nil,
               [(TransparentColor and $ff), (TransparentColor and $ff),
@@ -11207,7 +11265,6 @@ end;
 procedure TPdfEncryptionRC4MD5.EncodeBuffer(const BufIn; var BufOut; Count: cardinal);
 // see http://www.cs.cmu.edu/~dst/Adobe/Gallery/anon21jul01-pdf-encryption.txt
 // see "Algorithm 3.1 Encryption of data" in PDF Reference document
-var RC4: TRC4;
   procedure ComputeNewRC4Key;
   const KEYSIZE:  array[elRC4_40..elRC4_128] of integer = (10,16);
   var MD5: TMD5;
@@ -11218,17 +11275,16 @@ var RC4: TRC4;
     MD5.Update(fDoc.fCurrentObjectNumber,3);
     MD5.Update(fDoc.fCurrentGenerationNumber,2);
     MD5.Final(Digest);
-    RC4.Init(Digest,KEYSIZE[fLevel]);
-    RC4.SaveKey(fLastRC4Key); // a lot of string encodings have the same context
+    fLastRC4Key.Init(Digest,KEYSIZE[fLevel]);
     fLastObjectNumber := fDoc.fCurrentObjectNumber;
     fLastGenerationNumber := fDoc.fCurrentGenerationNumber;
   end;
 begin
   if (fDoc.fCurrentObjectNumber<>fLastObjectNumber) or
      (fDoc.fCurrentGenerationNumber<>fLastGenerationNumber) then
-    ComputeNewRC4Key else
-    RC4.RestoreKey(fLastRC4Key);
-  RC4.Encrypt(BufIn,BufOut,Count); // RC4 allows in-place encryption :)
+    // a lot of string encodings have the same context
+    ComputeNewRC4Key;
+  fLastRC4Key.Encrypt(BufIn,BufOut,Count); // RC4 allows in-place encryption :)
 end;
 
 {$endif USE_PDFSECURITY}

@@ -9,7 +9,7 @@ unit SynGdiPlus;
 {
     This file is part of Synopse framework.
 
-    Synopse framework. Copyright (C) 2017 Arnaud Bouchez
+    Synopse framework. Copyright (C) 2019 Arnaud Bouchez
       Synopse Informatique - https://synopse.info
 
   *** BEGIN LICENSE BLOCK *****
@@ -28,7 +28,7 @@ unit SynGdiPlus;
 
   The Initial Developer of the Original Code is Arnaud Bouchez.
 
-  Portions created by the Initial Developer are Copyright (C) 2017
+  Portions created by the Initial Developer are Copyright (C) 2019
   the Initial Developer. All Rights Reserved.
 
   Contributor(s):
@@ -135,7 +135,7 @@ uses
   LResources,
   SynFPCMetaFile,
   {$endif}
-  Classes, 
+  Classes,
   SysUtils,
   {$ifdef ISDELPHIXE2}
   VCL.Graphics,
@@ -414,6 +414,7 @@ type
       CompressionQuality: integer=80; IfBitmapSetResolution: single=0): TGdipStatus;
   public
     constructor CreateFromFile(const FileName: string);
+    constructor CreateFromBuffer(Buffer: pointer; Len: integer);
     destructor Destroy; override;
     {$ifdef FPC}
     procedure Clear; override;
@@ -756,6 +757,10 @@ procedure GdipLock;
 /// leave global critical section for safe use of SynGdiPlus from multiple threads
 procedure GdipUnlock;
 
+var
+  /// mutex used by GdipLock/GdipUnlock
+  GdipCS: TRTLCriticalSection;
+
 
 implementation
 
@@ -969,30 +974,23 @@ type
   TImageCodecInfoArray = array[byte] of TImageCodecInfo;
 
 
-function StrWCompAnsi(Str1: PWideChar; Str2: PAnsiChar): integer; assembler;
+function StrWCompAnsi(Str1: PWord; Str2: PByte): integer;
 asm // to avoid widestring usage + compatibility with Delphi 2009/2010/XE
-        MOV     ECX,EAX
-        XOR     EAX,EAX
-        CMP     ECX,EDX
-        JE      @Exit2  // same string or both nil
-        OR      ECX,ECX
-        MOV     AL,1
-        JZ      @Exit2  // Str1=''
-        OR      EDX,EDX
-        JE      @min
-@1:     MOV     AL,[ECX] // rough Ansi compare value of PWideChar
-        ADD     ECX,2
-        MOV     AH,[EDX]
-        INC     EDX
-        TEST    AL,AL
-        JE      @Exit
-        CMP     AL,AH
-        JE      @1
-@Exit:  XOR     EDX,EDX
-        XCHG    AH,DL
-        SUB     EAX,EDX
-@Exit2: RET
-@min:   OR      EAX,-1
+  if Str1<>Str2 then
+  if Str1<>nil then
+  if Str2<>nil then begin
+    if Str1^=Str2^ then
+      repeat
+        if Str1^=0 then break;
+        inc(Str1);
+        inc(Str2);
+      until Str1^<>Str2^;
+    result := Str1^-Str2^;
+    exit;
+  end else
+  result := 1 else  // Str2=''
+  result := -1 else // Str1=''
+  result := 0;      // Str1=Str2
 end;
 
 function TGDIPlus.GetEncoderClsid(format: PAnsiChar; out pClsid: TGUID): integer;
@@ -1010,7 +1008,7 @@ begin
   if GetImageEncoders(num, size, P)<>stOk then
     exit;
   for result := 0 to num-1 do
-    if StrWCompAnsi(P^[result].MimeType,format)=0 then begin
+    if StrWCompAnsi(pointer(P^[result].MimeType),pointer(format))=0 then begin
       pClsid := P^[result].Clsid;
       exit;
     end;
@@ -1224,6 +1222,12 @@ constructor TSynPicture.CreateFromFile(const FileName: string);
 begin
   inherited Create;
   LoadFromFile(FileName);
+end;
+
+constructor TSynPicture.CreateFromBuffer(Buffer: pointer; Len: integer);
+begin
+  inherited Create;
+  LoadFromBuffer(Buffer,Len);
 end;
 
 destructor TSynPicture.Destroy;
@@ -1527,7 +1531,7 @@ begin
   try
     fStream.Read(tmp,Len,nil);
     fStream := nil; // release ASAP
-    Stream.Write(tmp^,Len);
+    Stream.WriteBuffer(tmp^,Len);
   finally
     Freemem(tmp);
   end;
@@ -1542,7 +1546,7 @@ begin
   if (fGlobal<>0) and not fAssignedFromBitmap then begin
     // e.g. for a true .jpg file -> just save as it was loaded :)
     P := GlobalLock(fGlobal);
-    Stream.Write(P^,fGlobalLen);
+    Stream.WriteBuffer(P^,fGlobalLen);
     GlobalUnLock(fGlobal);
   end else begin
     // should come from a bitmap -> save in the expected format
@@ -1580,7 +1584,12 @@ begin
     result.PixelFormat := pf24bit; // create as DIB (device-independent bitmap)
     result.Width := Width;
     result.Height := Height;
-    result.Canvas.Draw(0,0,self);
+    result.Canvas.Lock;
+    try
+      result.Canvas.Draw(0,0,self);
+    finally
+      result.Canvas.Unlock;
+    end;
   end;
 end;
 
@@ -1685,7 +1694,12 @@ begin
           R := Pic.RectNotBiggerThan(MaxPixelsForBiggestSide);
           Bmp.Width := R.Right;
           Bmp.Height := R.Bottom;
-          Pic.Draw(Bmp.Canvas,R);
+          Bmp.Canvas.Lock;
+          try
+            Pic.Draw(Bmp.Canvas,R);
+          finally
+            Bmp.Canvas.Unlock;
+          end;
           SynGdiPlus.SaveAs(Bmp,Stream,Format,CompressionQuality,0,BitmapSetResolution);
         finally
           Bmp.Free;
@@ -2874,9 +2888,6 @@ begin
     end;
   Int64(aObjFont) := 0;
 end;
-
-var
-  GdipCS: TRTLCriticalSection;
 
 procedure GdipLock;
 begin
