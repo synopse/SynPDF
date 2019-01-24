@@ -6051,9 +6051,10 @@ begin
   result := CreateAnnotation(asLink,ARect,BorderStyle,BorderWidth);
   aURIObj := TPdfDictionary.Create(FXref);
   aURIObj.FSaveAtTheEnd := true;
+  aURIObj.AddItem('Type', 'Action');
   aURIObj.AddItem('S', 'URI');
   aURIObj.AddItemTextUTF8('URI', url);
-  FXref.AddObject(aURIObj);
+  result.AddItem('A', aURIObj);
 end;
 
 function TPdfDocument.CreateDestination: TPdfDestination;
