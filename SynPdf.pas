@@ -1539,6 +1539,9 @@ type
     /// wrapper to create a hyper-link, with a specific URL value
     function CreateHyperLink(const ARect: TPdfRect; const url: RawUTF8;
       BorderStyle: TPdfAnnotationBorder=abSolid; BorderWidth: integer=0): TPdfDictionary;
+    /// wrapper to create a link to a local file, with a specific file name and path value
+    function CreateFileLink(const ARect: TPdfRect; const fileName: RawUTF8;
+      BorderStyle: TPdfAnnotationBorder=abSolid; BorderWidth: integer=0): TPdfDictionary;
     /// create an Outline entry at a specified position of the current page
     // - the outline tree is created from the specified numerical level (0=root),
     // just after the item added via the previous CreateOutline call
@@ -6055,6 +6058,20 @@ begin
   aURIObj.AddItem('S', 'URI');
   aURIObj.AddItemTextUTF8('URI', url);
   result.AddItem('A', aURIObj);
+end;
+
+function TPdfDocument.CreateFileLink(const ARect: TPdfRect; const fileName : RawUTF8;
+  BorderStyle: TPdfAnnotationBorder; BorderWidth: integer): TPdfDictionary;
+var aFileObj: TPdfDictionary;
+begin
+    result := CreateAnnotation(asLink,ARect,BorderStyle,BorderWidth);
+    aFileObj := TPdfDictionary.Create(FXref);
+    aFileObj.FSaveAtTheEnd := true;
+    aFileObj.AddItem('Type', 'Filespec');
+    aFileObj.AddItem('S', 'Launch');
+    aFileObj.AddItemTextUTF8('F', fileName);
+    aFileObj.AddItemTextUTF8('UF', fileName);
+    result.AddItem('A', aFileObj);
 end;
 
 function TPdfDocument.CreateDestination: TPdfDestination;
