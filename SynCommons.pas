@@ -10730,7 +10730,9 @@ type
     // - will handle vtPointer/vtClass/vtObject/vtVariant kind of arguments,
     // appending class name for any class or object, the hexa value for a
     // pointer, or the JSON representation of any supplied TDocVariant
-    constructor CreateLastOSError(const Format: RawUTF8; const Args: array of const);
+    // NOTE Dummy parameter isn't used, just exists solve the confusion between
+    // this constructor and the CreateUTF8() above while c++ headers are generated
+    constructor CreateLastOSError(const Format: RawUTF8; const Args: array of const; Dummy: Boolean = False);
     {$ifndef NOEXCEPTIONINTERCEPT}
     /// can be used to customize how the exception is logged
     // - this default implementation will call the DefaultSynLogExceptionToStr()
@@ -62885,7 +62887,7 @@ begin
   inherited Create(msg);
 end;
 
-constructor ESynException.CreateLastOSError(const Format: RawUTF8; const Args: array of const);
+constructor ESynException.CreateLastOSError(const Format: RawUTF8; const Args: array of const; Dummy: Boolean);
 var tmp: RawUTF8;
     error: integer;
 begin
