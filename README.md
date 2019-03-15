@@ -29,7 +29,7 @@ Features
   * Used in a lot of applications, with regular enhancements, mainly from active end-users;
   * Licensed under a [MPL/GPL/LGPL tri-license](https://synopse.info/forum/viewtopic.php?id=27).
 
-Sample code
+Sample Code
 -----------
 
 In fact, you have at least three ways of generating pdfs using the library:
@@ -39,6 +39,13 @@ In fact, you have at least three ways of generating pdfs using the library:
 
 The 2nd and 3rd ways are preferred, for most applications.
 
+Relevant Forks
+--------------
+
+Some users did fork the project, and add some nice features, useful for some particular needs, but which were not merged yet to ease maintenance and ensure backward compatibility.
+
+  * EvaF made a [texture-based fork](https://github.com/Eva-F/SynPDF/tree/Eva-F-texture-pattern) - see [this forum thread](https://synopse.info/forum/viewtopic.php?id=4932) and [the documents sub-folder](https://github.com/Eva-F/SynPDF/tree/Eva-F-texture-pattern/documents).
+
 Documentation
 -------------
 
@@ -46,7 +53,7 @@ For detailed documentation of the unit, see the corresponding pages in the "[Sof
 
 Including the report generation pages within the "*SynFile Main Demo*" description.
 
-Dedicated blog and forum
+Dedicated Blog and Forum
 ------------------------
 
 A blog is available at http://blog.synopse.info, and will notify any evolution of this component.
