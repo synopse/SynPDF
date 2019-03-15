@@ -159,6 +159,10 @@
 // enable low-level logging of SQlite3 virtual table query planner costs
 // -> to be used only for internal debugging
 
+{.$define DDDNOSYNDB}
+// SynDB / external SQL DB won't be linked to the executable by dddInfraSettings
+{.$define DDDNOMONGODB}
+// Mongo DB client won't be linked to the executable by dddInfraSettings
 
 
 {$ifdef FPC}
@@ -284,6 +288,9 @@
     {$endif}
   {$endif}
 
+  {$ifdef LINUX}
+     {$define FPCLINUX}
+  {$endif}
   {$ifdef FPC_PIC}
     {$define PUREPASCAL} // most asm code is not PIC-safe with global constants
   {$endif}
@@ -598,12 +605,12 @@
   {$ifdef CPU64}
     {$define NOSQLITE3STATIC}
   {$endif}
-{$endif}
+{$endif FPC}
 
 {$ifdef NOSQLITE3STATIC}
   // our proprietary crypto expects a statically linked custom sqlite3.c
   {$define NOSQLITE3ENCRYPT}
-{$endif}
+{$endif NOSQLITE3STATIC}
 
 {$ifdef MSWINDOWS}
   {$define USEWININET}         // publish TWinINet/TWinHttp/TWinHttpAPI classes
@@ -616,6 +623,11 @@
     {$define USELIBCURL}
     // for Android, consider using https://github.com/gcesarmza/curl-android-ios
     // static libraries and force USELIBCURL in the project conditionals
-  {$endif}
-{$endif}
+  {$endif ANDROID}
+{$endif MSWINDOWS}
+
+{$ifdef USELIBCURL}
+  {.$define LIBCURLMULTI}
+  // enable https://curl.haxx.se/libcurl/c/libcurl-multi.html interface
+{$endif USELIBCURL}
 
