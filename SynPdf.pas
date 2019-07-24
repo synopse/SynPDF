@@ -5823,6 +5823,8 @@ begin
   aURIObj.AddItem('S', 'URI');
   aURIObj.AddItemTextUTF8('URI', url);
   FXref.AddObject(aURIObj);
+
+  result.AddItem('A', aURIObj);
 end;
 
 function TPdfDocument.CreateDestination: TPdfDestination;
