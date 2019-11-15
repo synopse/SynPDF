@@ -1,6 +1,6 @@
 /// fast cryptographic routines (hashing and cypher)
 // - implements AES,XOR,ADLER32,MD5,RC4,SHA1,SHA256,SHA384,SHA512,SHA3 and JWT
-// - optimized for speed (tuned assembler and AES-NI / PADLOCK support)
+// - optimized for speed (tuned assembler and SSE3/SSE4/AES-NI/PADLOCK support)
 // - this unit is a part of the freeware Synopse mORMot framework,
 // licensed under a MPL/GPL/LGPL tri-license; version 1.18
 unit SynCrypto;
@@ -247,7 +247,7 @@ unit SynCrypto;
 
 interface
 
-{$I Synopse.inc} // define HASINLINE USETYPEINFO CPU32 CPU64 OWNNORMTOUPPER
+{$I Synopse.inc} // define HASINLINE CPU32 CPU64 OWNNORMTOUPPER
 
 {.$define USEPADLOCK}
 
@@ -443,10 +443,8 @@ type
     function EncryptInit(const Key; KeySize: cardinal): boolean;
     /// encrypt an AES data block into another data block
     procedure Encrypt(const BI: TAESBlock; var BO: TAESBlock); overload;
-      {$ifdef FPC}inline;{$endif}
     /// encrypt an AES data block
     procedure Encrypt(var B: TAESBlock); overload;
-      {$ifdef FPC}inline;{$endif}
 
     /// Initialize AES contexts for uncypher
     // - first method to call before using this object for decryption
@@ -457,10 +455,8 @@ type
       const Key; KeySize: cardinal): boolean;
     /// decrypt an AES data block
     procedure Decrypt(var B: TAESBlock); overload;
-      {$ifdef FPC}inline;{$endif}
     /// decrypt an AES data block into another data block
     procedure Decrypt(const BI: TAESBlock; var BO: TAESBlock); overload;
-      {$ifdef FPC}inline;{$endif}
 
     /// Finalize AES contexts for both cypher and uncypher
     // - would fill the TAES instance with zeros, for safety
@@ -2280,6 +2276,7 @@ function CryptDataForCurrentUserDPAPI(const Data,AppSecret: RawByteString; Encry
 // !  end;
 function CryptDataForCurrentUser(const Data,AppSecret: RawByteString; Encrypt: boolean): RawByteString;
 
+
 const
   SHA1DIGESTSTRLEN = sizeof(TSHA1Digest)*2;
   SHA256DIGESTSTRLEN = sizeof(TSHA256Digest)*2;
@@ -2990,6 +2987,63 @@ begin
 end;
 {$endif}
 
+procedure AESBlockToShortString(const block: TAESBlock; out result: short32);
+begin
+  result[0] := #32;
+  SynCommons.BinToHex(@block,@result[1],16);
+end;
+
+function AESBlockToShortString(const block: TAESBlock): short32;
+begin
+  AESBlockToShortString(block,result);
+end;
+
+function AESBlockToString(const block: TAESBlock): RawUTF8;
+begin
+  FastSetString(result,nil,32);
+  SynCommons.BinToHex(@block,pointer(result),16);
+end;
+
+function MD5DigestToString(const D: TMD5Digest): RawUTF8;
+begin
+  BinToHexLower(@D,sizeof(D),result);
+end;
+
+function MD5StringToDigest(const Source: RawUTF8; out Dest: TMD5Digest): boolean;
+begin
+  result := SynCommons.HexToBin(pointer(Source), @Dest, sizeof(Dest));
+end;
+
+function SHA1DigestToString(const D: TSHA1Digest): RawUTF8;
+begin
+  BinToHexLower(@D,sizeof(D),result);
+end;
+
+function SHA1StringToDigest(const Source: RawUTF8; out Dest: TSHA1Digest): boolean;
+begin
+  result := SynCommons.HexToBin(pointer(Source), @Dest, sizeof(Dest));
+end;
+
+function SHA256DigestToString(const D: TSHA256Digest): RawUTF8;
+begin
+  BinToHexLower(@D,sizeof(D),result);
+end;
+
+function SHA256StringToDigest(const Source: RawUTF8; out Dest: TSHA256Digest): boolean;
+begin
+  result := SynCommons.HexToBin(pointer(Source), @Dest, sizeof(Dest));
+end;
+
+function SHA512DigestToString(const D: TSHA512Digest): RawUTF8;
+begin
+  BinToHexLower(@D, sizeof(D), result);
+end;
+
+function SHA384DigestToString(const D: TSHA384Digest): RawUTF8;
+begin
+  BinToHexLower(@D, sizeof(D), result);
+end;
+
 {$ifdef USEPADLOCK}
 
 const
@@ -3162,16 +3216,18 @@ const
 type
   TKeyArray = packed array[0..AESMaxRounds] of TAESBlock;
 
+  /// low-level content of TAES.Context (AESContextSize bytes)
+  // - is defined privately in the implementation section
+  // - don't change the structure below: it is fixed in the asm code
+  // -> use PUREPASCAL if you really have to change it
   TAESContext = packed record
-    // don't change the structure below: it is fixed in the asm code
-    // -> use PUREPASCAL if you really have to change it
     RK: TKeyArray;   // Key (encr. or decr.)
     IV: TAESBlock;   // IV or CTR
     buf: TAESBlock;  // Work buffer
     {$ifdef USEPADLOCK}
     ViaCtx: pointer; // padlock_*() context
     {$endif}
-    DoBlock: procedure(const ctxt, source, dest);
+    DoBlock: procedure(const ctxt, source, dest); // main AES function
     {$ifdef USEAESNI32}AesNi32: pointer;{$endif}
     Initialized: boolean;
     Rounds: byte;    // Number of rounds
@@ -11720,63 +11776,6 @@ begin
   MD5.Full(@Buffer,Len,result);
 end;
 
-function AESBlockToShortString(const block: TAESBlock): short32;
-begin
-  AESBlockToShortString(block,result);
-end;
-
-procedure AESBlockToShortString(const block: TAESBlock; out result: short32);
-begin
-  result[0] := #32;
-  SynCommons.BinToHex(@block,@result[1],16);
-end;
-
-function AESBlockToString(const block: TAESBlock): RawUTF8;
-begin
-  FastSetString(result,nil,32);
-  SynCommons.BinToHex(@block,pointer(result),16);
-end;
-
-function MD5DigestToString(const D: TMD5Digest): RawUTF8;
-begin
-  BinToHexLower(@D,sizeof(D),result);
-end;
-
-function MD5StringToDigest(const Source: RawUTF8; out Dest: TMD5Digest): boolean;
-begin
-  result := SynCommons.HexToBin(pointer(Source), @Dest, sizeof(Dest));
-end;
-
-function SHA1DigestToString(const D: TSHA1Digest): RawUTF8;
-begin
-  BinToHexLower(@D,sizeof(D),result);
-end;
-
-function SHA1StringToDigest(const Source: RawUTF8; out Dest: TSHA1Digest): boolean;
-begin
-  result := SynCommons.HexToBin(pointer(Source), @Dest, sizeof(Dest));
-end;
-
-function SHA256DigestToString(const D: TSHA256Digest): RawUTF8;
-begin
-  BinToHexLower(@D,sizeof(D),result);
-end;
-
-function SHA256StringToDigest(const Source: RawUTF8; out Dest: TSHA256Digest): boolean;
-begin
-  result := SynCommons.HexToBin(pointer(Source), @Dest, sizeof(Dest));
-end;
-
-function SHA512DigestToString(const D: TSHA512Digest): RawUTF8;
-begin
-  BinToHexLower(@D, sizeof(D), result);
-end;
-
-function SHA384DigestToString(const D: TSHA384Digest): RawUTF8;
-begin
-  BinToHexLower(@D, sizeof(D), result);
-end;
-
 function htdigest(const user, realm, pass: RawByteString): RawUTF8;
 // apache-compatible: agent007:download area:8364d0044ef57b3defcfa141e8f77b65
 //    hash=`echo -n "$user:$realm:$pass" | md5sum | cut -b -32`
@@ -14980,12 +14979,12 @@ initialization
   ComputeAesStaticTables;
 {$ifdef USEPADLOCK}
   PadlockInit;
-{$endif}
-{$ifdef CRC32C_X64} // use SSE4.2+pclmulqdq instructions
-  if (cfSSE42 in CpuFeatures) and (cfAesNi in CpuFeatures) then
-    crc32c := @crc32c_sse42_aesni;
-{$endif}
+{$endif USEPADLOCK}
 {$ifdef CPUX64}
+  {$ifdef CRC32C_X64} // use SSE4.2+pclmulqdq instructions
+    if (cfSSE42 in CpuFeatures) and (cfAesNi in CpuFeatures) then
+      crc32c := @crc32c_sse42_aesni;
+  {$endif CRC32C_X64}
   if cfSSE41 in CpuFeatures then begin // optimized Intel's sha256_sse4.asm ?
     if K256AlignedStore='' then
       GetMemAligned(K256AlignedStore,@K256,SizeOf(K256),K256Aligned);
@@ -15017,15 +15016,15 @@ finalization
 {$ifdef USEPADLOCKDLL}
   if PadLockLibHandle<>0 then
     FreeLibrary(PadLockLibHandle); // same on Win+Linux, thanks to SysUtils
-{$endif}
+{$endif USEPADLOCKDLL}
   FillZero(__h);
 {$ifdef MSWINDOWS}
   if CryptoAPI.Handle<>0 then begin
     {$ifdef USE_PROV_RSA_AES}
     if (CryptoAPIAESProvider<>nil) and (CryptoAPIAESProvider<>HCRYPTPROV_NOTTESTED) then
       CryptoAPI.ReleaseContext(CryptoAPIAESProvider,0);
-    {$endif}
+    {$endif USE_PROV_RSA_AES}
     FreeLibrary(CryptoAPI.Handle);
   end;
-{$endif}
+{$endif MSWINDOWS}
 end.

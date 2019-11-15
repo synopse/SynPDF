@@ -55,7 +55,7 @@ unit SynTable;
 
 interface
 
-{$I Synopse.inc} // define HASINLINE USETYPEINFO CPU32 CPU64
+{$I Synopse.inc} // define HASINLINE CPU32 CPU64
 
 uses
   {$ifdef MSWINDOWS}
@@ -1791,6 +1791,85 @@ function CompareOperator(FieldType: TSynTableFieldType; SBF, SBFEnd: PUTF8Char;
 procedure ToSBFStr(const Value: RawByteString; out Result: TSBFString);
 
 
+{ ************ high-level storage classes ************************* }
+
+type
+  /// implement a cache of some key/value pairs, e.g. to improve reading speed
+  // - used e.g. by TSQLDataBase for caching the SELECT statements results in an
+  // internal JSON format (which is faster than a query to the SQLite3 engine)
+  // - internally make use of an efficient hashing algorithm for fast response
+  // (i.e. TSynNameValue will use the TDynArrayHashed wrapper mechanism)
+  // - this class is thread-safe if you use properly the associated Safe lock
+  TSynCache = class(TSynPersistentLock)
+  protected
+    /// last index in fNameValue.List[] if was added by Find()
+    // - contains -1 if no previous immediate call to Find()
+    fFindLastAddedIndex: integer;
+    fFindLastKey: RawUTF8;
+    fNameValue: TSynNameValue;
+    fRamUsed: cardinal;
+    fMaxRamUsed: cardinal;
+    fTimeoutSeconds: cardinal;
+    fTimeoutTix: cardinal;
+    procedure ResetIfNeeded;
+  public
+    /// initialize the internal storage
+    // - aMaxCacheRamUsed can set the maximum RAM to be used for values, in bytes
+    // (default is 16 MB), after which the cache is flushed
+    // - by default, key search is done case-insensitively, but you can specify
+    // another option here
+    // - by default, there is no timeout period, but you may specify a number of
+    // seconds of inactivity (i.e. no Add call) after which the cache is flushed
+    constructor Create(aMaxCacheRamUsed: cardinal=16 shl 20;
+      aCaseSensitive: boolean=false; aTimeoutSeconds: cardinal=0); reintroduce;
+    /// find a Key in the cache entries
+    // - return '' if nothing found: you may call Add() just after to insert
+    // the expected value in the cache
+    // - return the associated Value otherwise, and the associated integer tag
+    // if aResultTag address is supplied
+    // - this method is not thread-safe, unless you call Safe.Lock before
+    // calling Find(), and Safe.Unlock after calling Add()
+    function Find(const aKey: RawUTF8; aResultTag: PPtrInt=nil): RawUTF8;
+    /// add a Key and its associated value (and tag) to the cache entries
+    // - you MUST always call Find() with the associated Key first
+    // - this method is not thread-safe, unless you call Safe.Lock before
+    // calling Find(), and Safe.Unlock after calling Add()
+    procedure Add(const aValue: RawUTF8; aTag: PtrInt);
+    /// add a Key/Value pair in the cache entries
+    // - returns true if aKey was not existing yet, and aValue has been stored
+    // - returns false if aKey did already exist in the internal cache, and
+    // its entry has been updated with the supplied aValue/aTag
+    // - this method is thread-safe, using the Safe locker of this instance
+    function AddOrUpdate(const aKey, aValue: RawUTF8; aTag: PtrInt): boolean;
+    /// called after a write access to the database to flush the cache
+    // - set Count to 0
+    // - release all cache memory
+    // - returns TRUE if was flushed, i.e. if there was something in cache
+    // - this method is thread-safe, using the Safe locker of this instance
+    function Reset: boolean;
+    /// number of entries in the cache
+    function Count: integer;
+    /// access to the internal locker, for thread-safe process
+    // - Find/Add methods calls should be protected as such:
+    // ! cache.Safe.Lock;
+    // ! try
+    // !   ... cache.Find/cache.Add ...
+    // ! finally
+    // !   cache.Safe.Unlock;
+    // ! end;
+    property Safe: PSynLocker read fSafe;
+    /// the current global size of Values in RAM cache, in bytes
+    property RamUsed: cardinal read fRamUsed;
+    /// the maximum RAM to be used for values, in bytes
+    // - the cache is flushed when ValueSize reaches this limit
+    // - default is 16 MB (16 shl 20)
+    property MaxRamUsed: cardinal read fMaxRamUsed;
+    /// after how many seconds betwen Add() calls the cache should be flushed
+    // - equals 0 by default, meaning no time out
+    property TimeoutSeconds: cardinal read fTimeoutSeconds;
+  end;
+
+
 { ************ low-level buffer processing functions ************************* }
 
 type
@@ -2492,8 +2571,7 @@ type
   protected
     fPassWord: RawUTF8;
     fKey: cardinal;
-    function GetKey: cardinal;
-      {$ifdef HASINLINE}inline;{$endif}
+    function GetKey: cardinal; {$ifdef HASINLINE}inline;{$endif}
     function GetPassWordPlain: RawUTF8;
     function GetPassWordPlainInternal(AppSecret: RawUTF8): RawUTF8;
     procedure SetPassWordPlain(const Value: RawUTF8);
@@ -2519,8 +2597,7 @@ type
     /// low-level function used to identify if a given field is a Password
     // - this method is used e.g. by TJSONSerializer.WriteObject to identify the
     // password field, since its published name is set by the inherited classes
-    function GetPasswordFieldAddress: pointer;
-      {$ifdef HASINLINE}inline;{$endif}
+    function GetPasswordFieldAddress: pointer; {$ifdef HASINLINE}inline;{$endif}
     /// the private key used to cypher the password storage on serialization
     // - application can override the default 0 value at runtime
     property Key: cardinal read GetKey write fKey;
@@ -3920,7 +3997,7 @@ begin
   if P1<>P2 then
     if P1<>nil then
       if P2<>nil then begin
-        V := PDouble(P1)^-PDouble(P2)^;
+        V := unaligned(PDouble(P1)^)-unaligned(PDouble(P2)^);
         if V<0 then
           result := -1 else
         if V=0 then
@@ -4491,15 +4568,15 @@ begin
       if i in fFieldIsVarString then begin
         // inlined result := GotoNextVarString(result);
         if PByte(result)^<=$7f then
-          inc(PtrUInt(result),PByte(result)^+1) else begin
+          inc(PByte(result),PByte(result)^+1) else begin
           PB := result;
-          inc(PtrUInt(result),FromVarUInt32High(PB)+PtrUInt(PB)-PtrUInt(result));
+          inc(PByte(result),FromVarUInt32High(PB)+PtrUInt(PB)-PtrUInt(result));
         end;
       end else
       if not (i in fFieldIsExternal) then begin
         // inlined result := GotoNextVarInt(result)
-        while PByte(result)^>$7f do inc(PtrUInt(result));
-        inc(PtrUInt(result));
+        while PByte(result)^>$7f do inc(PByte(result));
+        inc(PByte(result));
       end;
   end;
 end;
@@ -4602,9 +4679,7 @@ var data: TSynTableData absolute result;
 begin
   if SynTableVariantType=nil then
     SynTableVariantType := SynRegisterCustomVariantType(TSynTableVariantType);
-  {$ifndef FPC}
-  if data.VType and VTYPE_STATIC<>0 then
-  {$endif}
+  {$ifndef FPC}if data.VType and VTYPE_STATIC<>0 then{$endif}
     VarClear(result);
   data.VType := SynTableVariantType.VarType;
   data.VID := aID;
@@ -4647,7 +4722,7 @@ begin // in practice, this data processing is very fast (thanks to WR speed)
       // add previous field content: will handle any field offset change in record
       aSize := Getlength(Data);
       WR.Write(Data,aSize);
-      inc(PtrUInt(Data),aSize);
+      inc(PByte(Data),aSize);
     end else
       // add default field content for a newly added field
       WR.Write(Pointer(fDefaultFieldData),fDefaultFieldLength);
@@ -4764,7 +4839,7 @@ begin
   tftCurrency:
     W.AddCurr64(PInt64(FieldBuffer)^);
   tftDouble:
-    W.AddDouble(PDouble(FieldBuffer)^);
+    W.AddDouble(unaligned(PDouble(FieldBuffer)^));
   // some variable-size field value
   tftVarUInt32:
     W.Add(FromVarUInt32(PByte(FieldBuffer)));
@@ -4858,7 +4933,7 @@ begin
   tftCurrency:
     result := PCurrency(FieldBuffer)^;
   tftDouble:
-    result := PDouble(FieldBuffer)^;
+    result := unaligned(PDouble(FieldBuffer)^);
   // some variable-size field value
   tftVarUInt32:
     result := FromVarUInt32(PB);
@@ -4915,7 +4990,7 @@ begin
   case FieldType of
   // fixed-sized field value
   tftBoolean:
-    JSONBoolean(PBoolean(FieldBuffer)^,result);
+    result := BOOL_UTF8[PBoolean(FieldBuffer)^];
   tftUInt8:
     UInt32ToUtf8(PB^,result);
   tftUInt16:
@@ -4930,7 +5005,7 @@ begin
   tftCurrency:
     Curr64ToStr(PInt64(FieldBuffer)^,result);
   tftDouble:
-    ExtendedToStr(PDouble(FieldBuffer)^,DOUBLE_PRECISION,result);
+    ExtendedToStr(unaligned(PDouble(FieldBuffer)^),DOUBLE_PRECISION,result);
   // some variable-size field value
   tftVarUInt32:
     UInt32ToUtf8(FromVarUInt32(PB),result);
@@ -5470,7 +5545,7 @@ begin
     result := 0 else
     case FieldType of
     tftDouble:
-      result := PDouble(Owner.GetData(RecordBuffer,self))^;
+      result := unaligned(PDouble(Owner.GetData(RecordBuffer,self))^);
     else
       result := GetInt64(RecordBuffer);
     end;
@@ -5551,10 +5626,10 @@ begin
       tftInt32:
         result := PInteger(P1)^-PInteger(P2)^;
       tftDouble: begin
-        PDouble(@SortCompareTmp)^ := PDouble(P1)^-PDouble(P2)^;
-        if PDouble(@SortCompareTmp)^<0 then
+        unaligned(PDouble(@SortCompareTmp)^) := unaligned(PDouble(P1)^)-unaligned(PDouble(P2)^);
+        if unaligned(PDouble(@SortCompareTmp)^)<0 then
           goto minus else
-        if PDouble(@SortCompareTmp)^>0 then
+        if unaligned(PDouble(@SortCompareTmp)^)>0 then
           goto plus else
           goto zer;
       end;
@@ -5744,12 +5819,12 @@ begin
   if SBF<>nil then
   repeat
     case Oper of
-      soEqualTo:              if PDouble(SBF)^=Value then exit;
-      soNotEqualTo:           if PDouble(SBF)^<>Value then exit;
-      soLessThan:             if PDouble(SBF)^<Value then exit;
-      soLessThanOrEqualTo:    if PDouble(SBF)^<=Value then exit;
-      soGreaterThan:          if PDouble(SBF)^>Value then exit;
-      soGreaterThanOrEqualTo: if PDouble(SBF)^>=Value then exit;
+      soEqualTo:              if unaligned(PDouble(SBF)^)=Value then exit;
+      soNotEqualTo:           if unaligned(PDouble(SBF)^)<>Value then exit;
+      soLessThan:             if unaligned(PDouble(SBF)^)<Value then exit;
+      soLessThanOrEqualTo:    if unaligned(PDouble(SBF)^)<=Value then exit;
+      soGreaterThan:          if unaligned(PDouble(SBF)^)>Value then exit;
+      soGreaterThanOrEqualTo: if unaligned(PDouble(SBF)^)>=Value then exit;
       else break;
     end;
     // not found: go to next value
@@ -6796,7 +6871,7 @@ begin
     end
     else if aText > txtend then
       break;
-    if (PtrInt(PtrUInt(txtretry))> 0) and (txtretry <= txtend + 1) then begin
+    if (PtrInt(PtrUInt(txtretry)) > 0) and (txtretry <= txtend + 1) then begin
       aText := txtretry;
       inc(txtretry);
       pat := patretry;
@@ -7101,7 +7176,7 @@ begin
               else
                 Search := SearchContains1;
             end;
-            '?':
+            '?': // ?something*
               if aCaseInsensitive then
                 Search := SearchNoRangeU
               else
@@ -7899,6 +7974,137 @@ begin
 end;
 
 
+{ ************ high-level storage classes ************************* }
+
+{ TSynCache }
+
+constructor TSynCache.Create(aMaxCacheRamUsed: cardinal; aCaseSensitive: boolean;
+  aTimeoutSeconds: cardinal);
+begin
+  inherited Create;
+  fNameValue.Init(aCaseSensitive);
+  fNameValue.DynArray.Capacity := 200; // some space for future cached entries
+  fMaxRamUsed := aMaxCacheRamUsed;
+  fFindLastAddedIndex := -1;
+  fTimeoutSeconds := aTimeoutSeconds;
+end;
+
+procedure TSynCache.ResetIfNeeded;
+var tix: cardinal;
+begin
+  if fRamUsed>fMaxRamUsed then
+    Reset;
+  if fTimeoutSeconds>0 then begin
+    tix := {$ifdef FPCLINUX}SynFPCLinux.{$endif}GetTickCount64 shr 10;
+    if fTimeoutTix>tix then
+      Reset;
+    fTimeoutTix := tix+fTimeoutSeconds;
+  end;
+end;
+
+procedure TSynCache.Add(const aValue: RawUTF8; aTag: PtrInt);
+begin
+  if (self=nil) or (fFindLastAddedIndex<0) or (fFindLastKey='') then
+    // fFindLastAddedIndex should have been set by a previous call to Find()
+    exit;
+  ResetIfNeeded;
+  inc(fRamUsed,length(aValue));
+  if fFindLastAddedIndex<0 then // Reset occurred in ResetIfNeeded
+    fNameValue.Add(fFindLastKey,aValue,aTag) else
+    with fNameValue.List[fFindLastAddedIndex] do begin // at Find() position
+      Name := fFindLastKey;
+      Value := aValue;
+      Tag := aTag;
+      fFindLastAddedIndex := -1;
+      fFindLastKey := '';
+    end;
+end;
+
+function TSynCache.Find(const aKey: RawUTF8; aResultTag: PPtrInt): RawUTF8;
+var added: boolean;
+begin
+  result := '';
+  if self=nil then
+    exit;
+  if aKey='' then
+    fFindLastAddedIndex := -1 else begin
+    fFindLastAddedIndex := fNameValue.DynArray.FindHashedForAdding(aKey,added);
+    if added then
+      // expect a further call to Add()
+      fFindLastKey := aKey else
+      // match key found
+      with fNameValue.List[fFindLastAddedIndex] do begin
+        result := Value;
+        if aResultTag<>nil then
+          aResultTag^ := Tag;
+        fFindLastAddedIndex := -1;
+      end;
+  end;
+end;
+
+function TSynCache.AddOrUpdate(const aKey, aValue: RawUTF8; aTag: PtrInt): boolean;
+var ndx: integer;
+begin
+  result := false;
+  if self=nil then
+    exit; // avoid GPF
+  fSafe.Lock;
+  try
+    ResetIfNeeded;
+    ndx := fNameValue.DynArray.FindHashedForAdding(aKey,result);
+    with fNameValue.List[ndx] do begin
+      Name := aKey;
+      dec(fRamUsed,length(Value));
+      Value := aValue;
+      inc(fRamUsed,length(Value));
+      Tag := aTag;
+    end;
+  finally
+    fSafe.Unlock;
+  end;
+end;
+
+function TSynCache.Reset: boolean;
+begin
+  result := false;
+  if self=nil then
+    exit; // avoid GPF
+  fSafe.Lock;
+  try
+    if Count<>0 then begin
+      if fRamUsed<131072 then // no capacity change for small cache content
+        fNameValue.Count := 0 else
+        with fNameValue.DynArray{$ifdef UNDIRECTDYNARRAY}.InternalDynArray{$endif} do begin
+          Capacity := 0;   // force free all fNameValue.List[] key/value pairs
+          Capacity := 200; // then reserve some space for future cached entries
+        end;
+      fNameValue.DynArray.ReHash;
+      result := true; // mark something was flushed
+    end;
+    fFindLastAddedIndex := -1; // fFindLastKey should remain untouched for Add()
+    fRamUsed := 0;
+    fTimeoutTix := 0;
+  finally
+    fSafe.Unlock;
+  end;
+end;
+
+function TSynCache.Count: integer;
+begin
+  if self=nil then begin
+    result := 0;
+    exit;
+  end;
+  fSafe.Lock;
+  try
+    result := fNameValue.Count;
+  finally
+    fSafe.Unlock;
+  end;
+end;
+
+
+
 { ************ low-level buffer processing functions************************* }
 
 { TSynBloomFilter }
@@ -8068,7 +8274,7 @@ begin
     exit;
   Safe.Lock;
   try
-    fFalsePositivePercent := PDouble(P)^; inc(P,8);
+    fFalsePositivePercent := unaligned(PDouble(P)^); inc(P,8);
     if (fFalsePositivePercent<=0) or (fFalsePositivePercent>100) then
       exit;
     fSize := PCardinal(P)^; inc(P,4);
@@ -11210,7 +11416,7 @@ begin
     repeat
       inc(P);
     until (P = PEnd) or not(P^ in IS_UTF8_WORD);
-    aTextLen := P - aText;
+    aTextLen := P - aText; // now aText/aTextLen point to a word
     n := fWordCount;
     repeat
       dec(n);
@@ -11756,7 +11962,7 @@ begin
   n := 0;
   fTaskLock.Lock;
   try
-    variant(fTaskLock.Padding[0]) := true;
+    variant(fTaskLock.Padding[0]) := true; // = fTaskLock.LockedBool[0]
     try
       for i := 0 to length(fTask)-1 do begin
         t := @fTask[i];
