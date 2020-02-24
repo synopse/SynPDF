@@ -9,7 +9,7 @@ unit SynGdiPlus;
 {
     This file is part of Synopse framework.
 
-    Synopse framework. Copyright (C) 2019 Arnaud Bouchez
+    Synopse framework. Copyright (C) 2020 Arnaud Bouchez
       Synopse Informatique - https://synopse.info
 
   *** BEGIN LICENSE BLOCK *****
@@ -28,7 +28,7 @@ unit SynGdiPlus;
 
   The Initial Developer of the Original Code is Arnaud Bouchez.
 
-  Portions created by the Initial Developer are Copyright (C) 2019
+  Portions created by the Initial Developer are Copyright (C) 2020
   the Initial Developer. All Rights Reserved.
 
   Contributor(s):
@@ -1654,10 +1654,9 @@ begin
   Clear;
   if not Gdip.Exists or (Stream=nil) then
     exit;
-  fGlobalLen := Stream.Size;
+  fGlobalLen := Stream.Size - Stream.Position;
   if fGlobalLen=0 then
     exit;
-  Stream.Seek(0,soFromBeginning);
   fGlobal := GlobalAlloc(GMEM_MOVEABLE,fGlobalLen);
   if fGlobal=0 then
     exit;

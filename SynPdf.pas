@@ -6,7 +6,7 @@ unit SynPdf;
 {
     This file is part of Synopse framework.
 
-    Synopse framework. Copyright (C) 2019 Arnaud Bouchez
+    Synopse framework. Copyright (C) 2020 Arnaud Bouchez
       Synopse Informatique - https://synopse.info
 
   *** BEGIN LICENSE BLOCK *****
@@ -25,7 +25,7 @@ unit SynPdf;
 
   The Initial Developer of the Original Code is Arnaud Bouchez.
 
-  Portions created by the Initial Developer are Copyright (C) 2019
+  Portions created by the Initial Developer are Copyright (C) 2020
   the Initial Developer. All Rights Reserved.
 
   Contributor(s):
@@ -5556,9 +5556,9 @@ begin
   Result:= StrToIntDef(Buffer, GetACP);
 end;
 
-constructor TPdfDocument.Create(AUseOutlines: Boolean=false; ACodePage: integer=0;
-  APDFA1: boolean=false{$ifdef USE_PDFSECURITY}; AEncryption: TPdfEncryption=nil{$endif});
-var LFont: TLogFontW; // either TLogFontA or TLogFontW idem as TRawUTF8List
+constructor TPdfDocument.Create(AUseOutlines: Boolean; ACodePage: integer;
+  APDFA1: boolean{$ifdef USE_PDFSECURITY}; AEncryption: TPdfEncryption{$endif});
+var LFont: TLogFontW; // TLogFontW to add to FTrueTypeFonts array as UTF-8
     i: integer;
 begin
   fPDFA1 := APDFA1;
@@ -5582,7 +5582,7 @@ begin
   EnumFontFamiliesExW(FDC, LFont, @EnumFontsProcW, PtrInt(@FTrueTypeFonts), 0);
   QuickSortRawUTF8(FTrueTypeFonts,length(FTrueTypeFonts),nil,@StrIComp);
   FCompressionMethod := cmFlateDecode; // deflate by default
-  fBookMarks := TRawUTF8List.Create;
+  fBookMarks := TRawUTF8List.Create([fCaseSensitive,fNoDuplicate]);
   fMissingBookmarks := TRawUTF8List.Create;
   FUseOutlines := AUseOutlines;
   fUseFontFallBack := true;
@@ -5768,8 +5768,7 @@ function TPdfDocument.CreateLink(const ARect: TPdfRect; const aBookmarkName: Raw
 var aDest: TPdfDestination;
 begin
   result := CreateAnnotation(asLink,ARect,BorderStyle,BorderWidth);
-  with fBookmarks do
-    aDest := TPdfDestination(Objects[IndexOf(aBookmarkName)]);
+  aDest := fBookmarks.GetObjectFrom(aBookmarkName);
   if aDest=nil then
     fMissingBookmarks.AddObject(aBookmarkName,result) else
     result.AddItem('Dest',aDest.GetValue);
@@ -5808,11 +5807,11 @@ begin
   aDest.Top := Round(TopPosition);
   fBookMarks.AddObject(aBookmarkName,aDest);
   with fMissingBookmarks do
-  for i := Count-1 downto 0 do
-    if Get(i)=aBookmarkName then begin
-      TPdfDictionary(Objects[i]).AddItem('Dest',aDest.GetValue);
-      Delete(i);
-    end;
+    for i := Count-1 downto 0 do
+      if Strings[i]=aBookmarkName then begin
+        TPdfDictionary(Objects[i]).AddItem('Dest',aDest.GetValue);
+        Delete(i);
+      end;
 end;
 
 procedure TPdfDocument.NewDoc;
@@ -6210,7 +6209,7 @@ end;
 function TPdfDocument.GetEmbeddedTTFIgnore: TRawUTF8List;
 begin
   if fEmbeddedTTFIgnore=nil then
-    fEmbeddedTTFIgnore := TRawUTF8List.Create;
+    fEmbeddedTTFIgnore := TRawUTF8List.Create([fCaseSensitive,fNoDuplicate]);
   result := fEmbeddedTTFIgnore;
 end;
 
@@ -9771,7 +9770,6 @@ begin
   else
     R^.iType := R^.iType; // for debug purpose (breakpoint)
   end;
-
   case R^.iType of
     EMR_RESTOREDC,
     EMR_SETWINDOWEXTEX,
@@ -10233,7 +10231,6 @@ begin
     if not DC[nDC].pen.null then
       Canvas.Stroke;
   end;
-
   with DC[nDC], Canvas do begin
     FViewSize := ViewSize;
     FViewOrg := ViewOrg;
@@ -10302,7 +10299,6 @@ begin
       MM_ANISOTROPIC:
         ;  // TBD
     end;
-
     if FWinSize.cx=0 then // avoid EZeroDivide
       FFactorX := 1.0 else
       FFactorX := Abs(FViewSize.cx / FWinSize.cx);
@@ -10322,7 +10318,6 @@ begin
           WorldTransform := Custom^;
       end;
     end;
-
     // use transformation
     ScaleXForm := WorldTransform;
     FWorldFactorX := WorldTransform.eM11;
@@ -11196,8 +11191,8 @@ end;
 
 initialization
   {$ifdef USE_SYNGDIPLUS}
-  // initialize the Gdi+ library if necessary
-  if Gdip=nil then
+  // initialize Gdi+ if necessary (and possible, i.e. not from a dll)
+  if (Gdip=nil) and not IsLibrary then
     Gdip := TGDIPlus.Create('gdiplus.dll');
   {$endif}
 

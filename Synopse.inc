@@ -1,7 +1,7 @@
 {
     This file is part of Synopse framework.
 
-    Synopse framework. Copyright (C) 2011 Arnaud Bouchez
+    Synopse framework. Copyright (C) 2020 Arnaud Bouchez
       Synopse Informatique - https://synopse.info
 
   *** BEGIN LICENSE BLOCK *****
@@ -20,7 +20,7 @@
 
   The Initial Developer of the Original Code is Arnaud Bouchez.
 
-  Portions created by the Initial Developer are Copyright (C) 2019
+  Portions created by the Initial Developer are Copyright (C) 2020
   the Initial Developer. All Rights Reserved.
 
   Contributor(s):
@@ -210,7 +210,7 @@
   {$define HASUINT64}
   {$define HASINLINENOTX86}
   {$define NODELPHIASM}   // ignore low-level System.@LStrFromPCharLen calls
-  {$define HASAESNI} // should be commented to test project with valgrind
+  {$define HASAESNI}    // should be commented to test project with valgrind
   {$define HASTTHREADSTART}
   {$define HASINTERFACEASTOBJECT}
   {$define EXTENDEDTOSTRING_USESTR} // FloatToText uses str() in FPC
@@ -218,6 +218,7 @@
   {$define FPC_OR_PUREPASCAL}
   {$define FPC_OR_KYLIX}
   {$define FPC_OR_UNICODE}
+  {$define FPC_OR_DELPHIXE}
   {$define FPC_ENUMHASINNER}
 
   // $if FPC_FULLVERSION>20700 breaks Delphi 6-7 and SynProject :(
@@ -296,7 +297,7 @@
     {$define LINUX} // not true, but a POSIX/BSD system - see LINUXNOTBSD
     {$ifdef DARWIN}
       {$define FPCSQLITE3STATIC} // we supply Darwin static libs
-      {$ifdef CPUX86}
+      {$ifdef CPUINTEL}
         {$define FPC_PIC} // may have not be defined by the compiler options
       {$endif}
       {$undef FORCE_STRSSE42}  // fails otherwise for sure
@@ -314,6 +315,9 @@
   {$ifdef LINUX}
      {$undef FORCE_STRSSE42}  // avoid fatal SIGABRT/SIGSEGV on POSIX systems
      {$define FPCLINUX}
+     {$ifdef CPUX64}
+       {$define CPUX64LINUX}  // e.g. for tuned server-side asm
+     {$endif CPUX64}
   {$endif}
   {$ifdef FPC_PIC}
     {$define PUREPASCAL} // most asm code is not PIC-safe with global constants
@@ -325,8 +329,11 @@
     {$ifdef CPUX64}
       {$define CPUINTEL}
       {$define FPC_CPUINTEL}
-      {$define FPC_X64}
-      {$ASMMODE INTEL} // as Delphi expects
+      {$ifndef DARWIN}
+        {$define CPUX64ASM} // Delphi XE4 SSE asm is buggy :(
+      {$endif DARWIN}
+      {$define FPC_X64}   // supports AVX/AVX2/AVX512 - which Delphi doesn't
+      {$ASMMODE INTEL}    // to share asm code with Delphi
     {$endif CPUX64}
   {$else}
     {$define FPC_32}
@@ -498,9 +505,12 @@
         {$define ISDELPHI2007ANDUP} // Delphi 2007 or newer
       {$ifend}
       {$if CompilerVersion = 20}
-        {$define ISDELPHI2009} // Delphi 2009 has specific compilation issues :(
-        // for Delphi 2009 and up, use UNICODE conditional :)
+        {$define ISDELPHI20092010} // specific compilation issues
+        // for Delphi 2009 and up, use UNICODE conditional
         {$define FPC_OR_UNICODE}
+      {$ifend}
+      {$if CompilerVersion = 21}
+        {$define ISDELPHI20092010} //specific compilation issues
       {$ifend}
       {$if CompilerVersion >= 21.0}
         {$define ISDELPHI2010}
@@ -515,6 +525,7 @@
         {$endif NEWRTTINOTUSED}
       {$ifend}
       {$if CompilerVersion >= 22.0}
+        {$define FPC_OR_DELPHIXE} // Delphi 2007/2009/2010 inlining bugs
         {$define ISDELPHIXE}
       {$ifend}
       {$if CompilerVersion >= 23.0}
@@ -542,6 +553,9 @@
       {$ifend}
       {$if CompilerVersion >= 28.0}
         {$define ISDELPHIXE7}
+        {$ifdef CPU64}
+          {$define CPUX64ASM} // e.g. Delphi XE4 SSE asm is buggy :(
+        {$endif}
       {$ifend}
       {$if CompilerVersion >= 29.0}
         {$define ISDELPHIXE8}
@@ -655,10 +669,12 @@
     {$define NOSQLITE3STATIC}
   {$endif}
 {$else}
-  // only Win32+Win64 are supported yet with Delphi anyway
-  {$ifndef MSWINDOWS}
-    {$define NOSQLITE3STATIC}
-  {$endif}
+  // there is a linking bug with Delphi XE4 on Win64
+  {$ifdef CPUX64}
+    {$if CompilerVersion = 25.0} // exactly XE4
+      {$define NOSQLITE3STATIC}
+    {$ifend}
+  {$endif} // other Win32/Win64 Delphi platforms should work as expected
 {$endif FPC}
 
 {$ifdef NOSQLITE3STATIC}

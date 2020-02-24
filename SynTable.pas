@@ -5,7 +5,7 @@ unit SynTable;
 (*
     This file is part of Synopse framework.
 
-    Synopse framework. Copyright (C) 2019 Arnaud Bouchez
+    Synopse framework. Copyright (C) 2020 Arnaud Bouchez
       Synopse Informatique - https://synopse.info
 
   *** BEGIN LICENSE BLOCK *****
@@ -24,7 +24,7 @@ unit SynTable;
 
   The Initial Developer of the Original Code is Arnaud Bouchez.
 
-  Portions created by the Initial Developer are Copyright (C) 2019
+  Portions created by the Initial Developer are Copyright (C) 2020
   the Initial Developer. All Rights Reserved.
 
   Contributor(s):
@@ -701,8 +701,9 @@ type
   TSQLParamTypeDynArray = array of TSQLParamType;
 
   /// simple writer to a Stream, specialized for the JSON format and SQL export
-  // - use an internal buffer, faster than string+string
-  TJSONWriter = class(TTextWriter)
+  // - i.e. define some property/method helpers to export SQL resultset as JSON
+  // - see mORMot.pas for proper class serialization via TJSONSerializer.WriteObject
+  TJSONWriter = class(TTextWriterWithEcho)
   protected
     /// used to store output format
     fExpand: boolean;
@@ -1049,6 +1050,10 @@ type
     // - e.g. funcCountStar for the special Count(*) expression or
     // funcDistinct, funcMax for distinct(...)/max(...) aggregation
     FunctionKnown: (funcNone, funcCountStar, funcDistinct, funcMax);
+    /// MongoDB-like sub field e.g. 'mainfield.subfield1.subfield2'
+    // - still identifying 'mainfield' in Field index, and setting
+    // SubField='.subfield1.subfield2'
+    SubField: RawUTF8;
   end;
 
   /// the recognized SELECT expressions for TSynTableStatement
@@ -1068,6 +1073,10 @@ type
     // - WhereField=0 for ID, 1 for field # 0, 2 for field #1,
     // and so on... (i.e. WhereField = RTTI field index +1)
     Field: integer;
+    /// MongoDB-like sub field e.g. 'mainfield.subfield1.subfield2'
+    // - still identifying 'mainfield' in Field index, and setting
+    // SubField='.subfield1.subfield2'
+    SubField: RawUTF8;
     /// the operator of the WHERE expression
     Operator: TSynTableStatementOperator;
     /// the SQL function name associated to a Field and Value
@@ -1109,7 +1118,7 @@ type
     fWhere: TSynTableStatementWhereDynArray;
     fOrderByField: TSQLFieldIndexDynArray;
     fGroupByField: TSQLFieldIndexDynArray;
-    fWhereHasParenthesis: boolean;
+    fWhereHasParenthesis, fHasSelectSubFields, fWhereHasSubFields: boolean;
     fOrderByDesc: boolean;
     fLimit: integer;
     fOffset: integer;
@@ -1129,7 +1138,10 @@ type
       SimpleFieldsBits: TSQLFieldBits=[0..MAX_SQLFIELDS-1];
       FieldProp: TSynTableFieldProperties=nil);
     /// compute the SELECT column bits from the SelectFields array
-    procedure SelectFieldBits(var Fields: TSQLFieldBits; var withID: boolean);
+    // - optionally set Select[].SubField into SubFields[Select[].Field]
+    // (e.g. to include specific fields from MongoDB embedded document)
+    procedure SelectFieldBits(var Fields: TSQLFieldBits; var withID: boolean;
+      SubFields: PRawUTF8Array=nil);
 
     /// the SELECT SQL statement parsed
     // - equals '' if the parsing failed
@@ -1140,10 +1152,14 @@ type
     property SelectFunctionCount: integer read fSelectFunctionCount;
     /// the retrieved table name
     property TableName: RawUTF8 read fTableName;
+    /// if any Select[].SubField was actually set
+    property HasSelectSubFields: boolean read fHasSelectSubFields;
     /// the WHERE clause of this SQL statement
     property Where: TSynTableStatementWhereDynArray read fWhere;
     /// if the WHERE clause contains any ( ) parenthesis expression
     property WhereHasParenthesis: boolean read fWhereHasParenthesis;
+    /// if the WHERE clause contains any Where[].SubField
+    property WhereHasSubFields: boolean read fWhereHasSubFields;
     /// recognize an GROUP BY clause with one or several fields
     // - here 0 = ID, otherwise RTTI field index +1
     property GroupByField: TSQLFieldIndexDynArray read fGroupByField;
@@ -1725,8 +1741,8 @@ type
   // - uses internally a TSynTableData object
   TSynTableVariantType = class(TSynInvokeableVariantType)
   protected
-    procedure IntGet(var Dest: TVarData; const V: TVarData; Name: PAnsiChar); override;
-    procedure IntSet(const V, Value: TVarData; Name: PAnsiChar); override;
+    procedure IntGet(var Dest: TVarData; const V: TVarData; Name: PAnsiChar; NameLen: PtrInt); override;
+    procedure IntSet(const V, Value: TVarData; Name: PAnsiChar; NameLen: PtrInt); override;
   public
     /// retrieve the SBF compact binary format representation of a record content
     class function ToSBF(const V: Variant): TSBFString;
@@ -2189,11 +2205,11 @@ type
     function NextSafe(out Data: Pointer; DataLen: PtrInt): boolean; {$ifdef HASINLINE}inline;{$endif}
     {$ifndef NOVARIANTS}
     /// read the next variant from the buffer
-    // - is a wrapper around VariantLoad(), so may suffer from buffer overflow
-    procedure NextVariant(var Value: variant; CustomVariantOptions: pointer);
+    // - is a wrapper around VariantLoad()
+    procedure NextVariant(var Value: variant; CustomVariantOptions: PDocVariantOptions);
     /// read the JSON-serialized TDocVariant from the buffer
     // - matches TFileBufferWriter.WriteDocVariantData format
-    procedure NextDocVariantData(out Value: variant; CustomVariantOptions: pointer);
+    procedure NextDocVariantData(out Value: variant; CustomVariantOptions: PDocVariantOptions);
     {$endif NOVARIANTS}
     /// copy data from the current position, and move ahead the specified bytes
     procedure Copy(out Dest; DataLen: PtrInt); {$ifdef HASINLINE}inline;{$endif}
@@ -3875,15 +3891,19 @@ begin
 end;
 
 procedure TSynTableVariantType.IntGet(var Dest: TVarData;
-  const V: TVarData; Name: PAnsiChar);
+  const V: TVarData; Name: PAnsiChar; NameLen: PtrInt);
+var aName: RawUTF8;
 begin
-  TSynTableData(V).GetFieldVariant(RawByteString(Name),variant(Dest));
+  FastSetString(aName,Name,NameLen);
+  TSynTableData(V).GetFieldVariant(aName,variant(Dest));
 end;
 
 procedure TSynTableVariantType.IntSet(const V, Value: TVarData;
-  Name: PAnsiChar);
+  Name: PAnsiChar; NameLen: PtrInt);
+var aName: RawUTF8;
 begin
-  TSynTableData(V).SetFieldValue(RawByteString(Name),Variant(Value));
+  FastSetString(aName,Name,NameLen);
+  TSynTableData(V).SetFieldValue(aName,Variant(Value));
 end;
 
 class function TSynTableVariantType.ToID(const V: Variant): integer;
@@ -4345,7 +4365,7 @@ begin
 end;
 
 procedure TSynTable.UpdateFieldData(RecordBuffer: PUTF8Char; RecordBufferLen,
-  FieldIndex: integer; var result: TSBFString; const NewFieldData: TSBFString='');
+  FieldIndex: integer; var result: TSBFString; const NewFieldData: TSBFString);
 var NewSize, DestOffset, OldSize: integer;
     F: TSynTableFieldProperties;
     NewData, Dest: PAnsiChar;
@@ -4375,7 +4395,7 @@ begin
   // update content
   OldSize :=  F.GetLength(Dest);
   dec(RecordBufferLen,OldSize);
-  SetLength(Result,RecordBufferLen+NewSize);
+  SetString(Result,nil,RecordBufferLen+NewSize);
   MoveFast(RecordBuffer^,PByteArray(result)[0],DestOffset);
   MoveFast(NewData^,PByteArray(result)[DestOffset],NewSize);
   MoveFast(Dest[OldSize],PByteArray(result)[DestOffset+NewSize],RecordBufferLen-DestOffset);
@@ -4762,7 +4782,7 @@ begin
   with TSynTableFieldProperties(fField.List[F]) do
     if F in AvailableFields then begin
       Len := Lens[F];
-      {$ifdef FPC}Move{$else}MoveFast{$endif}(P^,Dest^,Len);
+      MoveFast(P^,Dest^,Len);
       inc(P,Len);
       inc(Dest,Len);
     end else begin
@@ -5406,8 +5426,8 @@ begin
     Len := {$ifdef FPC}length(Value){$else}PInteger(PtrUInt(Value)-SizeOf(integer))^{$endif};
     Head := PAnsiChar(ToVarUInt32(Len,@tmp))-tmp;
     SetLength(Result,Len+Head);
-    {$ifdef FPC}Move{$else}MoveFast{$endif}(tmp,PByteArray(Result)[0],Head);
-    {$ifdef FPC}Move{$else}MoveFast{$endif}(pointer(Value)^,PByteArray(Result)[Head],Len);
+    MoveFast(tmp,PByteArray(Result)[0],Head);
+    MoveFast(pointer(Value)^,PByteArray(Result)[Head],Len);
   end;
 end;
 
@@ -5433,8 +5453,8 @@ begin
     result := #0 else begin // inlined ToSBFStr() code
     Head := PAnsiChar(ToVarUInt32(ValueLen,@tmp))-tmp;
     SetString(Result,nil,ValueLen+Head);
-    {$ifdef FPC}Move{$else}MoveFast{$endif}(tmp,PByteArray(Result)[0],Head);
-    {$ifdef FPC}Move{$else}MoveFast{$endif}(Value^,PByteArray(Result)[Head],ValueLen);
+    MoveFast(tmp,PByteArray(Result)[0],Head);
+    MoveFast(Value^,PByteArray(Result)[Head],ValueLen);
   end;
 end;
 
@@ -5913,7 +5933,7 @@ begin
           Cmp := high(tmp) else
           Cmp := L;
         tmp[Cmp] := #0; // TSynSoundEx expect the buffer to be #0 terminated
-        {$ifdef FPC}Move{$else}MoveFast{$endif}(SBF^,tmp,Cmp);
+        MoveFast(SBF^,tmp,Cmp);
         case FieldType of
         tftWinAnsi:
           if PSynSoundEx(Value)^.Ansi(tmp) then
@@ -5982,15 +6002,16 @@ function GetPropIndex: integer;
 begin
   if not GetNextFieldProp(P,Prop) then
     result := -1 else
-  if IsRowID(pointer(Prop)) then
-    result := 0 else begin // 0 = ID field
-    result := GetFieldIndex(Prop);
-    if result>=0 then // -1 = no valid field name
-      inc(result);  // otherwise: PropertyIndex+1
-  end;
+    if IsRowID(pointer(Prop)) then
+      result := 0 else begin // 0 = ID field
+      result := GetFieldIndex(Prop);
+      if result>=0 then // -1 = no valid field name
+        inc(result);  // otherwise: PropertyIndex+1
+    end;
 end;
 function SetFields: boolean;
 var select: TSynTableStatementSelect;
+    B: PUTF8Char;
 begin
   result := false;
   FillcharFast(select,SizeOf(select),0);
@@ -6017,7 +6038,15 @@ begin
     if P^<>')' then
       exit;
     P := GotoNextNotSpace(P+1);
-  end;
+  end else
+    if P^='.' then begin // MongoDB-like field.subfield1.subfield2
+      B := P;
+      repeat
+        inc(P);
+      until not(ord(P^) in IsJsonIdentifier);
+      FastSetString(select.SubField,B,P-B);
+      fHasSelectSubFields := true;
+    end;
   if P^ in ['+','-'] then begin
     select.ToBeAdded := GetNextItemInteger(P,' ');
     if select.ToBeAdded=0 then
@@ -6060,6 +6089,7 @@ begin
     {$ifndef NOVARIANTS}
     SetVariantNull(Where.ValueVariant);
     {$endif}
+    inc(P,4);
   end else begin
     // numeric statement or 'true' or 'false' (OK for NormalizeValue)
     B := P;
@@ -6132,12 +6162,22 @@ begin
 end;
 {$endif}
 function GetWhereExpression(FieldIndex: integer; var Where: TSynTableStatementWhere): boolean;
+var B: PUTF8Char;
 begin
   result := false;
   Where.ParenthesisBefore := whereBefore;
   Where.JoinedOR := whereWithOR;
   Where.NotClause := whereNotClause;
   Where.Field := FieldIndex; // 0 = ID, otherwise PropertyIndex+1
+  if P^='.' then begin // MongoDB-like field.subfield1.subfield2
+    B := P;
+    repeat
+      inc(P);
+    until not(ord(P^) in IsJsonIdentifier);
+    FastSetString(Where.SubField,B,P-B);
+    fWhereHasSubFields := true;
+    P := GotoNextNotSpace(P);
+  end;
   case P^ of
   '=': Where.Operator := opEqualTo;
   '>': if P[1]='=' then begin
@@ -6381,15 +6421,22 @@ lim2: if IdemPropNameU(Prop,'LIMIT') then
   fSQLStatement := SQL; // make a private copy e.g. for Where[].ValueSQL
 end;
 
-procedure TSynTableStatement.SelectFieldBits(var Fields: TSQLFieldBits; var withID: boolean);
+procedure TSynTableStatement.SelectFieldBits(var Fields: TSQLFieldBits;
+  var withID: boolean; SubFields: PRawUTF8Array);
 var i: integer;
+    f: ^TSynTableStatementSelect;
 begin
   FillcharFast(Fields,SizeOf(Fields),0);
   withID := false;
-  for i := 0 to Length(Select)-1 do
-    if Select[i].Field=0 then
+  f := pointer(Select);
+  for i := 1 to Length(Select) do begin
+    if f^.Field=0 then
       withID := true else
-      include(Fields,Select[i].Field-1);
+      include(Fields,f^.Field-1);
+    if (SubFields<>nil) and fHasSelectSubFields then
+      SubFields^[f^.Field] := f^.SubField;
+    inc(f);
+  end;
 end;
 
 
@@ -6494,7 +6541,7 @@ begin
   CheckVTableInitialized;
   if (aField.FieldSize>0) and (VValue<>'') then begin
     // fixed size content: fast in-place update
-    {$ifdef FPC}Move{$else}MoveFast{$endif}(pointer(Value)^,VValue[aField.Offset+1],aField.FieldSize)
+    MoveFast(pointer(Value)^,VValue[aField.Offset+1],aField.FieldSize)
     // VValue[F.Offset+1] above will call UniqueString(VValue), even under FPC
   end else begin
     // variable-length update
@@ -7226,8 +7273,8 @@ var
   m: PSBNDMQ2Mask absolute result;
   c: PCardinal;
 begin
-  SetLength(result, SizeOf(m^));
-  {$ifdef FPC}FillChar{$else}FillCharFast{$endif}(m^, SizeOf(m^), 0);
+  SetString(result, nil, SizeOf(m^));
+  FillCharFast(m^, SizeOf(m^), 0);
   for i := 0 to length(Pattern) - 1 do begin
     c := @m^[u[p[i]]]; // for FPC code generation
     c^ := c^ or (1 shl i);
@@ -7877,7 +7924,7 @@ begin
     InvalidTextLengthMin(MinLength,ErrorMsg) else
   if L>MaxLength then
     ErrorMsg := Format(sInvalidTextLengthMax,[MaxLength,Character01n(MaxLength)]) else begin
-    {$ifdef FPC}FillChar{$else}FillCharFast{$endif}(Min,SizeOf(Min),0);
+    FillCharFast(Min,SizeOf(Min),0);
     L := length(value);
     for i := 1 to L do
     case value[i] of
@@ -8516,7 +8563,7 @@ begin
     Len := FromVarUInt32(P);
     if D+Len>DEnd then
       break;
-    {$ifdef FPC}Move{$else}MoveFast{$endif}(P^,D^,Len);
+    MoveFast(P^,D^,Len);
     crc := crc32c(crc,D,Len);
     inc(P,Len);
     inc(D,Len);
@@ -8525,7 +8572,7 @@ begin
     Len := FromVarUInt32(P)+3;
     if D+Len>DEnd then
       break;
-    {$ifdef FPC}FillChar{$else}FillCharFast{$endif}(D^,Len,0);
+    FillCharFast(D^,Len,0);
     crc := crc32c(crc,@Len,SizeOf(Len));
     inc(D,Len);
   end;
@@ -8788,7 +8835,7 @@ begin
   until false;
   // 5. write remaining bytes
   if NewBufSize>0 then begin
-    {$ifdef FPC}Move{$else}MoveFast{$endif}(NewBuf^,pOut^,NewBufSize);
+    MoveFast(NewBuf^,pOut^,NewBufSize);
     inc(pOut,NewBufSize);
     inc(newBuf,NewBufSize);
   end;
@@ -8800,7 +8847,7 @@ begin
   PInteger(OutBuf+3)^ := h;
   OutBuf[6] := AnsiChar(curofssize);
   // 7. copy commands
-  {$ifdef FPC}Move{$else}MoveFast{$endif}(WorkBuf^,pOut^,h);
+  MoveFast(WorkBuf^,pOut^,h);
   result := pOut+h;
 end;
 
@@ -8833,7 +8880,7 @@ begin
     // copy leading bytes
     leading := FromVarUInt32(PByte(P));
     if leading<>0 then begin
-      {$ifdef FPC}Move{$else}MoveFast{$endif}(buf^,upd^,leading);
+      MoveFast(buf^,upd^,leading);
       inc(buf,leading);
       inc(upd,leading);
     end;
@@ -8841,7 +8888,7 @@ begin
     if srclen<>0 then begin
       if PtrUInt(upd-src)<srclen then
         movechars(src,upd,srclen) else
-        {$ifdef FPC}Move{$else}MoveFast{$endif}(src^,upd^,srclen);
+        MoveFast(src^,upd^,srclen);
       inc(upd,srclen);
     end;
   end;
@@ -8886,7 +8933,7 @@ var HTab, HList: PHTab;
     WriteByte(d,FLAG_COPIED); // block copied flag
     db := ToVarUInt32(NewSizeSave,db);
     WriteInt(d,crc32c(0,New,NewSizeSave));
-    {$ifdef FPC}Move{$else}MoveFast{$endif}(New^,d^,NewSizeSave);
+    MoveFast(New^,d^,NewSizeSave);
     inc(d,NewSizeSave);
     result := d-Delta;
   end;
@@ -8957,7 +9004,7 @@ begin
         if BufRead=0 then
           break;
         WriteInt(d,crc32c(0,New,BufRead));
-        {$ifdef FPC}Move{$else}MoveFast{$endif}(New^,d^,BufRead);
+        MoveFast(New^,d^,BufRead);
         inc(New,BufRead);
         inc(d,BufRead);
       end else begin
@@ -9023,7 +9070,7 @@ begin
         exit;
       end;
       inc(Delta,4);
-      {$ifdef FPC}Move{$else}MoveFast{$endif}(Delta^,New^,BufRead);
+      MoveFast(Delta^,New^,BufRead);
       if BufRead>=Len then
         exit; // if Old=nil -> only copy new
       inc(Delta,BufRead);
@@ -9046,13 +9093,13 @@ begin
         exit;
       end;
       inc(Delta,4);
-      {$ifdef FPC}Move{$else}MoveFast{$endif}(Old^,New^,OldRead);
+      MoveFast(Old^,New^,OldRead);
       inc(New,OldRead);
     end;
     FLAG_END: begin // block idem end flag
       if crc32c(0,Old,OldRead)<>PCardinal(Delta)^ then
         Result := dsCrcEnd;
-      {$ifdef FPC}Move{$else}MoveFast{$endif}(Old^,New^,OldRead);
+      MoveFast(Old^,New^,OldRead);
       inc(New,OldRead);
       break;
     end;
@@ -9204,7 +9251,7 @@ procedure TFastReader.Copy(out Dest; DataLen: PtrInt);
 begin
   if P+DataLen>Last then
     ErrorOverflow;
-  {$ifdef FPC}Move{$else}MoveFast{$endif}(P^,Dest,DataLen);
+  MoveFast(P^,Dest,DataLen);
   inc(P,DataLen);
 end;
 
@@ -9212,7 +9259,7 @@ function TFastReader.CopySafe(out Dest; DataLen: PtrInt): boolean;
 begin
   if P+DataLen>Last then
     result := false else begin
-    {$ifdef FPC}Move{$else}MoveFast{$endif}(P^,Dest,DataLen);
+    MoveFast(P^,Dest,DataLen);
     inc(P,DataLen);
     result := true;
   end;
@@ -9237,16 +9284,18 @@ begin
 end;
 
 {$ifndef NOVARIANTS}
-procedure TFastReader.NextVariant(var Value: variant; CustomVariantOptions: pointer);
+procedure TFastReader.NextVariant(var Value: variant;
+  CustomVariantOptions: PDocVariantOptions);
 begin
-  P := VariantLoad(Value,P,CustomVariantOptions);
+  P := VariantLoad(Value,P,CustomVariantOptions,Last);
   if P=nil then
     ErrorData('VariantLoad=nil',[]) else
   if P>Last then
     ErrorOverFlow;
 end;
 
-procedure TFastReader.NextDocVariantData(out Value: variant; CustomVariantOptions: pointer);
+procedure TFastReader.NextDocVariantData(out Value: variant;
+  CustomVariantOptions: PDocVariantOptions);
 var json: TValueResult;
     temp: TSynTempBuffer;
 begin
@@ -9257,7 +9306,7 @@ begin
   try
     if CustomVariantOptions=nil then
       CustomVariantOptions := @JSON_OPTIONS[true];
-    TDocVariantData(Value).InitJSONInPlace(temp.buf,PDocVariantOptions(CustomVariantOptions)^);
+    TDocVariantData(Value).InitJSONInPlace(temp.buf,CustomVariantOptions^);
   finally
     temp.Done;
   end;
@@ -9551,7 +9600,7 @@ end;
 
 procedure TFastReader.Read(var DA: TDynArray; NoCheckHash: boolean);
 begin
-  P := DA.LoadFrom(P,nil,NoCheckHash);
+  P := DA.LoadFrom(P,nil,NoCheckHash,Last);
   if P=nil then
     ErrorData('TDynArray.LoadFrom %',[DA.ArrayTypeShort^]);
 end;
@@ -9707,7 +9756,7 @@ function TSynPersistentStoreJson.SaveToJSON(reformat: TTextWriterJSONFormat): Ra
 var
   W: TTextWriter;
 begin
-  W := TTextWriter.CreateOwnedStream(65536);
+  W := DefaultTextWriterSerializer.CreateOwnedStream(65536);
   try
     W.Add('{');
     AddJSON(W);
@@ -9807,8 +9856,7 @@ begin
   SetLength(aDest,d+Position);
   v := pointer(Values);
   for i := 1 to Count do begin
-    {$ifdef FPC}Move{$else}MoveFast{$endif}(
-      pointer(v^.Value)^,PByteArray(aDest)[d+v^.Position],length(v^.Value));
+    MoveFast(pointer(v^.Value)^,PByteArray(aDest)[d+v^.Position],length(v^.Value));
     inc(v);
   end;
   Clear;
@@ -9833,8 +9881,7 @@ begin
     SetString(tmp,nil,Position);
     v := pointer(Values);
     for i := 1 to Count do begin
-      {$ifdef FPC}Move{$else}MoveFast{$endif}(
-        pointer(v^.Value)^,PByteArray(tmp)[v^.Position],length(v^.Value));
+      MoveFast(pointer(v^.Value)^,PByteArray(tmp)[v^.Position],length(v^.Value));
       {$ifdef FPC}Finalize(v^.Value){$else}v^.Value := ''{$endif}; // free chunks
       inc(v);
     end;
@@ -9855,8 +9902,7 @@ begin
   SetLength(result,Position);
   for i := 0 to Count-1 do
   with Values[i] do
-    {$ifdef FPC}Move{$else}MoveFast{$endif}(
-      pointer(Value)^,PByteArray(result)[Position],length(Value));
+    MoveFast(pointer(Value)^,PByteArray(result)[Position],length(Value));
 end;
 
 procedure TRawByteStringGroup.Write(W: TTextWriter; Escape: TTextWriterKind);
@@ -9998,7 +10044,7 @@ var P: pointer;
 begin
   P := Find(aPosition,aLength);
   if P<>nil then
-    {$ifdef FPC}Move{$else}MoveFast{$endif}(P^,aDest^,aLength);
+    MoveFast(P^,aDest^,aLength);
 end;
 
 
@@ -10172,7 +10218,7 @@ end;
 destructor TSynUniqueIdentifierGenerator.Destroy;
 begin
   fSafe.Done;
-  {$ifdef FPC}FillChar{$else}FillCharFast{$endif}(fCrypto,SizeOf(fCrypto),0);
+  FillCharFast(fCrypto,SizeOf(fCrypto),0);
   fCryptoCRC := 0;
   inherited Destroy;
 end;
@@ -10313,7 +10359,7 @@ begin
       i := PosExChar(':',fPassword);
       if i>0 then
         raise ESynException.CreateUTF8('%.GetPassWordPlain unable to retrieve the '+
-          'stored value: current user is "%", but password in % was encoded for "%"',
+          'stored value: current user is [%], but password in % was encoded for [%]',
           [self,ExeVersion.User,AppSecret,copy(fPassword,1,i-1)]);
     end;
   end;
@@ -10333,7 +10379,7 @@ begin
     fPassWord := '';
     exit;
   end;
-  SetString(tmp,PAnsiChar(value),Length(value)); // private copy
+  SetString(tmp,PAnsiChar(pointer(value)),Length(value)); // private copy
   SymmetricEncrypt(GetKey,tmp);
   fPassWord := BinToBase64(tmp);
 end;
@@ -10368,9 +10414,9 @@ end;
 constructor TSynAuthenticationAbstract.Create;
 begin
   fSafe.Init;
-  fTokenSeed := Random32;
+  fTokenSeed := Random32gsl;
   fSessionGenerator := abs(fTokenSeed*PPtrInt(self)^);
-  fTokenSeed := abs(fTokenSeed*Random32);
+  fTokenSeed := abs(fTokenSeed*Random32gsl);
 end;
 
 destructor TSynAuthenticationAbstract.Destroy;
@@ -10591,7 +10637,7 @@ begin
     PInt64Array(@Fields)^[2] := 0;
     PInt64Array(@Fields)^[3] := 0;
   end else
-    {$ifdef FPC}FillChar{$else}FillCharFast{$endif}(Fields,SizeOf(Fields),0);
+    FillCharFast(Fields,SizeOf(Fields),0);
 end;
 
 {$ifdef FPC}{$pop}{$else}{$WARNINGS ON}{$endif}
@@ -10636,7 +10682,7 @@ end;
 procedure FieldIndexToBits(const Index: TSQLFieldIndexDynArray; var Fields: TSQLFieldBits);
 var i: integer;
 begin
-  {$ifdef FPC}FillChar{$else}FillCharFast{$endif}(Fields,SizeOf(Fields),0);
+  FillCharFast(Fields,SizeOf(Fields),0);
   for i := 0 to Length(Index)-1 do
     if Index[i]>=0 then
       include(Fields,Index[i]);
@@ -10649,22 +10695,22 @@ end;
 
 function DateToSQL(Date: TDateTime): RawUTF8;
 begin
+  result := '';
   if Date<=0 then
-    result := '' else begin
-    SetLength(result,13);
-    PCardinal(pointer(result))^ := JSON_SQLDATE_MAGIC;
-    DateToIso8601PChar(Date,PUTF8Char(pointer(result))+3,True);
-  end;
+     exit;
+  FastSetString(result,nil,13);
+  PCardinal(pointer(result))^ := JSON_SQLDATE_MAGIC;
+  DateToIso8601PChar(Date,PUTF8Char(pointer(result))+3,True);
 end;
 
 function DateToSQL(Year,Month,Day: Cardinal): RawUTF8;
 begin
+  result := '';
   if (Year=0) or (Month-1>11) or (Day-1>30) then
-    result := '' else begin
-    SetLength(result,13);
-    PCardinal(pointer(result))^ := JSON_SQLDATE_MAGIC;
-    DateToIso8601PChar(PUTF8Char(pointer(result))+3,True,Year,Month,Day);
-  end;
+    exit;
+  FastSetString(result,nil,13);
+  PCardinal(pointer(result))^ := JSON_SQLDATE_MAGIC;
+  DateToIso8601PChar(PUTF8Char(pointer(result))+3,True,Year,Month,Day);
 end;
 
 var
@@ -10787,7 +10833,7 @@ var ppBeg: integer;
     wasNull: boolean;
 begin
   maxParam := 0;
-  {$ifdef FPC}FillChar{$else}FillCharFast{$endif}(Nulls,SizeOf(Nulls),0);
+  FillCharFast(Nulls,SizeOf(Nulls),0);
   ppBeg := PosEx(RawUTF8(':('),SQL,1);
   if (ppBeg=0) or (PosEx(RawUTF8('):'),SQL,ppBeg+2)=0) then begin
     // SQL code with no valid :(...): internal parameters -> leave maxParam=0
@@ -11062,7 +11108,7 @@ begin
   if P=nil then exit; // unexpected end
   // trim first row data
   if P^<>#0 then
-    {$ifdef FPC}Move{$else}MoveFast{$endif}(P^,PBegin^,PEnd-P); // erase content
+    MoveFast(P^,PBegin^,PEnd-P); // erase content
   fStream.Seek(PBegin-P,soCurrent); // adjust current stream position
 end;
 
@@ -11566,17 +11612,17 @@ end;
 procedure TSynBackgroundThreadAbstract.WaitForNotExecuting(maxMS: integer);
 var endtix: Int64;
 begin
-  if fExecute = exRun then begin
+  if fExecute=exRun then begin
     endtix := SynCommons.GetTickCount64+maxMS;
     repeat
-      Sleep(1); // wait for Execute to finish
-    until (fExecute <> exRun) or (SynCommons.GetTickCount64>=endtix);
+      SleepHiRes(1); // wait for Execute to finish
+    until (fExecute<>exRun) or (SynCommons.GetTickCount64>=endtix);
   end;
 end;
 
 destructor TSynBackgroundThreadAbstract.Destroy;
 begin
-  if fExecute = exRun then begin
+  if fExecute=exRun then begin
     Terminate;
     WaitForNotExecuting(100);
   end;
@@ -11682,7 +11728,7 @@ begin
                 {$ifdef DELPHI5OROLDER}
                 on E: Exception do
                   fBackgroundException := ESynException.CreateUTF8(
-                    'Redirected %: "%"',[E,E.Message]);
+                    'Redirected % [%]',[E,E.Message]);
                 {$else}
                 E := AcquireExceptionObject;
                 if E.InheritsFrom(Exception) then
@@ -11776,7 +11822,7 @@ begin
       break; // we acquired the background thread
     end;
     case OnIdleProcessNotify(start) of // Windows.GetTickCount64 res is 10-16 ms
-    0..20:    SleepHiRes(0);
+    0..20:    SleepHiRes(0); // 10 microsec delay on POSIX
     21..100:  SleepHiRes(1);
     101..900: SleepHiRes(5);
     else      SleepHiRes(50);
@@ -12198,7 +12244,7 @@ begin
         flagIdle:
           break; // acquired (should always be the case)
         end;
-        Sleep(1);
+        SleepHiRes(1);
         if Assigned(OnMainThreadIdle) then
           OnMainThreadIdle(self);
       until false;
@@ -12366,7 +12412,7 @@ begin
       someWaiting := true;
     end;
   if someWaiting then
-    sleep(10); // propagate the pending evTimeOut to the WaitFor threads
+    SleepHiRes(10); // propagate the pending evTimeOut to the WaitFor threads
   fPool.Free;
   inherited;
 end;
@@ -12482,7 +12528,7 @@ begin
      current := GetTickCount64;
      elapsed := current-start;
      if elapsed=0 then
-       sched_yield else
+       usleep(1) else
      if elapsed>TimeOut then begin
        result := wrTimeOut;
        break;
@@ -12592,6 +12638,7 @@ end;
 function EnumAllProcesses(out Count: Cardinal): TCardinalDynArray;
 var n: cardinal;
 begin
+  result := nil;
   n := 2048;
   repeat
     SetLength(result, n);
@@ -12632,7 +12679,7 @@ end;
 
 function TProcessInfo.Init: boolean;
 begin
-  {$ifdef FPC}FillChar{$else}FillCharFast{$endif}(self,SizeOf(self),0);
+  FillCharFast(self,SizeOf(self),0);
   result := Assigned(GetSystemTimes) and Assigned(GetProcessTimes) and
     Assigned(GetProcessMemoryInfo); // no monitoring API under oldest Windows
 end;
@@ -12666,7 +12713,7 @@ var
   mem: TProcessMemoryCounters;
 begin
   result := false;
-  {$ifdef FPC}FillChar{$else}FillCharFast{$endif}(Data,SizeOf(Data),0);
+  FillCharFast(Data,SizeOf(Data),0);
   h := OpenProcess(OpenProcessAccess,false,PID);
   if h<>0 then
     try
@@ -12681,7 +12728,7 @@ begin
         end;
         PrevKernel := pkrn;
         PrevUser := pusr;
-        {$ifdef FPC}FillChar{$else}FillCharFast{$endif}(mem,SizeOf(mem),0);
+        FillCharFast(mem,SizeOf(mem),0);
         mem.cb := SizeOf(mem);
         if GetProcessMemoryInfo(h,mem,SizeOf(mem)) then begin
           Data.WorkKB := mem.WorkingSetSize shr 10;
@@ -12711,7 +12758,7 @@ end;
 {$else} // not implemented yet (use /proc ?)
 function TProcessInfo.Init: boolean;
 begin
-  {$ifdef FPC}FillChar{$else}FillCharFast{$endif}(self,SizeOf(self),0);
+  FillCharFast(self,SizeOf(self),0);
   result := false;
 end;
 
@@ -12886,7 +12933,7 @@ begin
       fSafe.UnLock;
     end;
   end;
-  {$ifdef FPC}FillChar{$else}FillCharFast{$endif}(aData,SizeOf(aData),0);
+  FillCharFast(aData,SizeOf(aData),0);
 end;
 
 function TSystemUse.Data(aProcessID: integer): TSystemUseData;
@@ -12958,6 +13005,7 @@ function TSystemUse.History(aProcessID,aDepth: integer): TSingleDynArray;
 var i,n: integer;
     data: TSystemUseDataDynArray;
 begin
+  result := nil;
   data := HistoryData(aProcessID,aDepth);
   n := length(data);
   SetLength(result,n);
@@ -13294,7 +13342,7 @@ begin
 {$else}
 {$ifdef BSD}
 begin
-  {$ifdef FPC}FillChar{$else}FillCharFast{$endif}(info,SizeOf(info),0);
+  FillCharFast(info,SizeOf(info),0);
   info.memtotal := fpsysctlhwint({$ifdef DARWIN}HW_MEMSIZE{$else}HW_PHYSMEM{$endif});
   info.memfree := info.memtotal-fpsysctlhwint(HW_USERMEM);
   if info.memtotal<>0 then // avoid div per 0 exception
