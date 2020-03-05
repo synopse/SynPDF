@@ -39,38 +39,6 @@
   the terms of any one of the MPL, the GPL or the LGPL.
 
   ***** END LICENSE BLOCK *****
-
-  Version 1.7
-  - first public release, corresponding to SQLite3 Framework 1.7
-
-  Version 1.8
-  - force no Range Checking and other compilation settings
-
-  Version 1.10
-  - code modifications to support Delphi 5 / Delphi 6 compilers
-
-  Version 1.11
-  - allow to fix Delphi 2009 specific compilation issues :(
-
-  Version 1.13
-  - updated conditionals for FPC
-  - code modifications for Delphi 5 compiler
-  - new WITHLOG conditional (defined by default)
-
-  Version 1.15
-  - now handles Delphi XE2 (32 Bit)
-
-  Version 1.16
-  - added USEPACKAGES conditional to help compiling the unit within packages
-  - added ISDELPHIXE conditional for fixing some compilation warnings
-  - added DOPATCHTRTL conditional (not set by default, for compatibility)
-
-  Version 1.18
-  - added NEWRTTINOTUSED conditional (unset by default, for compatibility) - see
-    https://synopse.info/forum/viewtopic.php?id=1394
-  - enhanced FPC compatibility
-  - now handles Delphi XE3 and up (32 and 64 bit)
-
 }
 
 
@@ -219,6 +187,7 @@
   {$define FPC_OR_KYLIX}
   {$define FPC_OR_UNICODE}
   {$define FPC_OR_DELPHIXE}
+  {$define FPC_OR_DELPHIXE4}
   {$define FPC_ENUMHASINNER}
 
   // $if FPC_FULLVERSION>20700 breaks Delphi 6-7 and SynProject :(
@@ -289,7 +258,11 @@
     {$ifdef CPUARM}
       {$define FPCSQLITE3STATIC} // use static/arm-linux\sqlite3.o
     {$endif}
-    // note: problems with current static/aarch64-linux\sqlite3.o
+    {$ifdef CPUAARCH64}
+      {$ifdef ANDROID}
+        {$define FPCSQLITE3STATIC} // note: problems with current static/aarch64-linux\sqlite3.o
+      {$endif}
+    {$endif}
   {$endif}
 
   {$ifdef BSD}
@@ -335,10 +308,14 @@
       {$define FPC_X64}   // supports AVX/AVX2/AVX512 - which Delphi doesn't
       {$ASMMODE INTEL}    // to share asm code with Delphi
     {$endif CPUX64}
+    {$ifdef CPUAARCH64}
+      {$define CPUARM3264}
+    {$endif CPUAARCH64}
   {$else}
     {$define FPC_32}
     {$ifdef CPUARM}
       {$define PUREPASCAL} // ARM32
+      {$define CPUARM3264}
     {$endif CPUARM}
     {$ifdef CPUX86}
       {$define CPUINTEL}
@@ -540,6 +517,7 @@
       {$ifend}
       {$if CompilerVersion >= 25.0}
         {$define ISDELPHIXE4}
+        {$define FPC_OR_DELPHIXE4} // circumvent Internal Error: C2130 on XE3
         {$define HASAESNI}
       {$ifend}
       {$if CompilerVersion >= 26.0}
