@@ -789,7 +789,8 @@ type
   // - all Init() methods will allocate 16 more bytes, for a trailing #0 and
   // to ensure our fast JSON parsing won't trigger any GPF (since it may read
   // up to 4 bytes ahead via its PInteger() trick) or any SSE4.2 function
-  TSynTempBuffer = object
+  {$ifdef USERECORDWITHMETHODS}TSynTempBuffer = record
+    {$else}TSynTempBuffer = object{$endif}
   public
     /// the text/binary length, in bytes, excluding the trailing #0
     len: PtrInt;
@@ -3698,7 +3699,7 @@ type
   {$A-}
   /// file found result item, as returned by FindFiles()
   // - Delphi "object" is buggy on stack -> also defined as record with methods
-  {$ifdef FPC_OR_UNICODE}TFindFiles = record
+  {$ifdef USERECORDWITHMETHODS}TFindFiles = record
     {$else}TFindFiles = object{$endif}
   public
     /// the matching file name, including its folder name
@@ -4554,7 +4555,7 @@ function FromU64(const Values: array of QWord): TQWordDynArray;
 type
   /// used to store and retrieve Words in a sorted array
   // - Delphi "object" is buggy on stack -> also defined as record with methods
-  {$ifdef FPC_OR_UNICODE}TSortedWordArray = record
+  {$ifdef USERECORDWITHMETHODS}TSortedWordArray = record
     {$else}TSortedWordArray = object{$endif}
   public
     /// the actual 16-bit word storage
@@ -4573,7 +4574,7 @@ type
 
   /// used to store and retrieve Integers in a sorted array
   // - Delphi "object" is buggy on stack -> also defined as record with methods
-  {$ifdef FPC_OR_UNICODE}TSortedIntegerArray = record
+  {$ifdef USERECORDWITHMETHODS}TSortedIntegerArray = record
     {$else}TSortedIntegerArray = object{$endif}
   public
     /// the actual 32-bit integers storage
@@ -5740,7 +5741,7 @@ type
   // maintain a hash table over an existing dynamic array: several TDynArrayHasher
   // could be applied to a single TDynArray wrapper
   // - TDynArrayHashed will use a TDynArrayHasher for its own store
-  {$ifdef FPC_OR_UNICODE}TDynArrayHasher = record private
+  {$ifdef USERECORDWITHMETHODS}TDynArrayHasher = record private
   {$else}TDynArrayHasher = object protected{$endif}
     DynArray: PDynArray;
     HashElement: TDynArrayHashOne;
@@ -6428,7 +6429,7 @@ type
 
   /// used to store one list of hashed RawUTF8 in TRawUTF8Interning pool
   // - Delphi "object" is buggy on stack -> also defined as record with methods
-  {$ifdef FPC_OR_UNICODE}TRawUTF8InterningSlot = record
+  {$ifdef USERECORDWITHMETHODS}TRawUTF8InterningSlot = record
     {$else}TRawUTF8InterningSlot = object{$endif}
   public
     /// actual RawUTF8 storage
@@ -6554,7 +6555,7 @@ type
   // - is defined as an object, not as a class: you can use this in any
   // class, without the need to destroy the content
   // - Delphi "object" is buggy on stack -> also defined as record with methods
-  {$ifdef FPC_OR_UNICODE}TSynNameValue = record private
+  {$ifdef USERECORDWITHMETHODS}TSynNameValue = record private
   {$else}TSynNameValue = object protected{$endif}
     fOnAdd: TSynNameValueNotify;
     function GetBlobData: RawByteString;
@@ -14257,7 +14258,7 @@ type
   // former will handle internal variant redirection (varByRef), e.g. from late
   // binding or assigned another TDocVariant
   // - Delphi "object" is buggy on stack -> also defined as record with methods
-  {$ifdef FPC_OR_UNICODE}TDocVariantData = record private
+  {$ifdef USERECORDWITHMETHODS}TDocVariantData = record private
   {$else}TDocVariantData = object protected{$endif}
     VType: TVarType;
     VOptions: TDocVariantOptions;
@@ -20556,13 +20557,14 @@ end;
 
 {$ifdef HASALIGNTYPEDATA}
 function FPCTypeInfoOverName(P: pointer): pointer; inline;
-{$ifdef FPC_REQUIRES_PROPER_ALIGNMENT}
-var
-  diff: PtrUInt;
-{$endif}
+{$ifdef FPC_REQUIRES_PROPER_ALIGNMENT} {$ifdef CPUARM3264}
+const diff=SizeOf(QWord);// always on these two CPU's
+{$else} var diff: PtrUInt; {$endif} {$endif}
 begin
   {$ifdef FPC_REQUIRES_PROPER_ALIGNMENT}
+    {$ifndef CPUARM3264}
     diff := PtrUInt(@PTypeInfo(P)^.NameFirst)-PtrUInt(@PTypeInfo(P)^.Kind);
+    {$endif}
     result := AlignTypeData(P+2+PByte(P+1)^);
     dec(PByte(result),diff);
   {$else}
@@ -29913,38 +29915,40 @@ end;
 
 function SynchFolders(const Reference, Dest: TFileName;
   SubFolder,ByContent,WriteFileNameToConsole: boolean): integer;
-var s,d: TFileName;
-    f,f2: TSearchRec;
-    idem: boolean;
-    buf: RawByteString;
+var ref,dst: TFileName;
+    fref,fdst: TSearchRec;
+    reftime: TDateTime;
+    s: RawByteString;
 begin
   result := 0;
-  s := IncludeTrailingPathDelimiter(Reference);
-  d := IncludeTrailingPathDelimiter(Dest);
-  if DirectoryExists(s) and (FindFirst(d+FILES_ALL,faAnyFile,f)=0) then begin
+  ref := IncludeTrailingPathDelimiter(Reference);
+  dst := IncludeTrailingPathDelimiter(Dest);
+  if DirectoryExists(ref) and (FindFirst(dst+FILES_ALL,faAnyFile,fdst)=0) then begin
     repeat
-      if SearchRecValidFile(f) then begin
-        if not ByContent then begin
-          if FindFirst(s+f.Name,faAnyFile,f2)<>0 then
-            continue;
-          idem := (f.Size=f2.Size) and (f.Time=f2.Time);
-          FindClose(f2);
-          if idem then
-            continue;
-        end else if not FileExists(s+f.Name) then
+      if SearchRecValidFile(fdst) then begin
+        if ByContent then
+          reftime := FileAgeToDateTime(ref+fdst.Name) else
+          if FindFirst(ref+fdst.Name,faAnyFile,fref)=0 then begin
+            reftime := SearchRecToDateTime(fref);
+            if (fdst.Size=fref.Size) and (SearchRecToDateTime(fdst)=reftime) then
+              reftime := 0;
+            FindClose(fref);
+          end else
+            reftime := 0; // "continue" trigger unexpected warning on Delphi
+        if reftime=0 then
+          continue; // skip if no reference file to copy from
+        s := StringFromFile(ref+fdst.Name);
+        if (s='') or (ByContent and (length(s)=fdst.Size) and
+           (DefaultHasher(0,pointer(s),fdst.Size)=HashFile(dst+fdst.Name))) then
           continue;
-        buf := StringFromFile(s+f.Name);
-        if (buf<>'') and ((not ByContent) or (length(buf)<>f.Size) or
-            (DefaultHasher(0,pointer(buf),length(buf))<>HashFile(d+f.Name))) then begin
-          FileFromString(buf,d+f.Name,false,FileAgeToDateTime(s+f.Name));
-          inc(result);
-          if WriteFileNameToConsole then
-            {$I-} writeln('synched ',d,f.name); {$I+}
-        end;
-      end else if SubFolder and SearchRecValidFolder(f) then
-        SynchFolders(s+f.Name,d+f.Name,SubFolder,ByContent,WriteFileNameToConsole);
-    until FindNext(f)<>0;
-    FindClose(f);
+        FileFromString(s,dst+fdst.Name,false,reftime);
+        inc(result);
+        if WriteFileNameToConsole then
+          {$I-} writeln('synched ',dst,fdst.name); {$I+}
+      end else if SubFolder and SearchRecValidFolder(fdst) then
+        SynchFolders(ref+fdst.Name,dst+fdst.Name,SubFolder,ByContent,WriteFileNameToConsole);
+    until FindNext(fdst)<>0;
+    FindClose(fdst);
   end;
 end;
 
@@ -46211,13 +46215,13 @@ begin
 end;
 
 type
-  {$ifdef FPC_OR_UNICODE}TQuickSortDocVariantValuesByField = record
+  {$ifdef USERECORDWITHMETHODS}TQuickSortDocVariantValuesByField = record
     {$else}TQuickSortDocVariantValuesByField = object{$endif}
-    Lookup: array of PVariant;
-    Compare: TVariantCompare;
-    Doc: PDocVariantData;
-    Reverse: boolean;
-    procedure Sort(L, R: PtrInt);
+   Lookup: array of PVariant;
+   Compare: TVariantCompare;
+   Doc: PDocVariantData;
+   Reverse: boolean;
+   procedure Sort(L, R: PtrInt);
   end;
 
 procedure TQuickSortDocVariantValuesByField.Sort(L, R: PtrInt);
