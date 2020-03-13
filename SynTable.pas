@@ -1968,9 +1968,6 @@ type
   // - this class is thread-safe if you use properly the associated Safe lock
   TSynCache = class(TSynPersistentLock)
   protected
-    /// last index in fNameValue.List[] if was added by Find()
-    // - contains -1 if no previous immediate call to Find()
-    fFindLastAddedIndex: integer;
     fFindLastKey: RawUTF8;
     fNameValue: TSynNameValue;
     fRamUsed: cardinal;
@@ -3443,7 +3440,7 @@ type
   TBlockingProcessPool = class(TSynPersistent)
   protected
     fClass: TBlockingProcessPoolItemClass;
-    fPool: TObjectListLocked;
+    fPool: TSynObjectListLocked;
     fCallCounter: TBlockingProcessPoolCall; // set TBlockingProcessPoolItem.Call
   public
     /// initialize the pool, for a given implementation class
@@ -4569,9 +4566,9 @@ type
     // - you should call OrderedIndexRefresh method to ensure it is sorted
     OrderedIndexNotSorted: boolean;
     /// all TSynValidate instances registered per each field
-    Filters: TObjectList;
+    Filters: TSynObjectList;
     /// all TSynValidate instances registered per each field
-    Validates: TObjectList;
+    Validates: TSynObjectList;
     /// low-level binary comparison used by IDSort and TSynTable.IterateJSONValues
     // - P1 and P2 must point to the values encoded in our SBF compact binary format
     {$ifdef SORTCOMPAREMETHOD}
@@ -6854,12 +6851,12 @@ begin
 end;
 
 function TSynTableFieldProperties.AddFilterOrValidate(aFilter: TSynFilterOrValidate): TSynFilterOrValidate;
-procedure Add(var List: TObjectList);
-begin
-  if List=nil then
-    List := TObjectList.Create;
-  List.Add(result);
-end;
+  procedure Add(var List: TSynObjectList);
+  begin
+    if List=nil then
+      List := TSynObjectList.Create;
+    List.Add(result);
+  end;
 begin
   result := aFilter;
   if (self=nil) or (result=nil) then
@@ -12398,9 +12395,7 @@ constructor TSynCache.Create(aMaxCacheRamUsed: cardinal; aCaseSensitive: boolean
 begin
   inherited Create;
   fNameValue.Init(aCaseSensitive);
-  fNameValue.DynArray.Capacity := 200; // some space for future cached entries
   fMaxRamUsed := aMaxCacheRamUsed;
-  fFindLastAddedIndex := -1;
   fTimeoutSeconds := aTimeoutSeconds;
 end;
 
@@ -12419,41 +12414,30 @@ end;
 
 procedure TSynCache.Add(const aValue: RawUTF8; aTag: PtrInt);
 begin
-  if (self=nil) or (fFindLastAddedIndex<0) or (fFindLastKey='') then
-    // fFindLastAddedIndex should have been set by a previous call to Find()
+  if (self=nil) or (fFindLastKey='') then
     exit;
   ResetIfNeeded;
   inc(fRamUsed,length(aValue));
-  if fFindLastAddedIndex<0 then // Reset occurred in ResetIfNeeded
-    fNameValue.Add(fFindLastKey,aValue,aTag) else
-    with fNameValue.List[fFindLastAddedIndex] do begin // at Find() position
-      Name := fFindLastKey;
-      Value := aValue;
-      Tag := aTag;
-      fFindLastAddedIndex := -1;
-      fFindLastKey := '';
-    end;
+  fNameValue.Add(fFindLastKey,aValue,aTag);
+  fFindLastKey := '';
 end;
 
 function TSynCache.Find(const aKey: RawUTF8; aResultTag: PPtrInt): RawUTF8;
-var added: boolean;
+var ndx: integer;
 begin
   result := '';
   if self=nil then
     exit;
+  fFindLastKey := aKey;
   if aKey='' then
-    fFindLastAddedIndex := -1 else begin
-    fFindLastAddedIndex := fNameValue.DynArray.FindHashedForAdding(aKey,added);
-    if added then
-      // expect a further call to Add()
-      fFindLastKey := aKey else
-      // match key found
-      with fNameValue.List[fFindLastAddedIndex] do begin
-        result := Value;
-        if aResultTag<>nil then
-          aResultTag^ := Tag;
-        fFindLastAddedIndex := -1;
-      end;
+    exit;
+  ndx := fNameValue.Find(aKey);
+  if ndx<0 then
+    exit;
+  with fNameValue.List[ndx] do begin
+    result := Value;
+    if aResultTag<>nil then
+      aResultTag^ := Tag;
   end;
 end;
 
@@ -12487,16 +12471,10 @@ begin
   fSafe.Lock;
   try
     if Count<>0 then begin
-      if fRamUsed<131072 then // no capacity change for small cache content
-        fNameValue.Count := 0 else
-        with fNameValue.DynArray{$ifdef UNDIRECTDYNARRAY}.InternalDynArray{$endif} do begin
-          Capacity := 0;   // force free all fNameValue.List[] key/value pairs
-          Capacity := 200; // then reserve some space for future cached entries
-        end;
+      fNameValue.DynArray.Clear;
       fNameValue.DynArray.ReHash;
       result := true; // mark something was flushed
     end;
-    fFindLastAddedIndex := -1; // fFindLastKey should remain untouched for Add()
     fRamUsed := 0;
     fTimeoutTix := 0;
   finally
@@ -15875,7 +15853,7 @@ begin
   if aClass=nil then
     fClass := TBlockingProcessPoolItem else
     fClass := aClass;
-  fPool := TObjectListLocked.Create(true);
+  fPool := TSynObjectListLocked.Create;
 end;
 
 const
@@ -17092,7 +17070,7 @@ end;
 procedure TSynTimeZone.LoadFromBuffer(const Buffer: RawByteString);
 begin
   fZones.LoadFromBinary(AlgoSynLZ.Decompress(Buffer),{nohash=}true);
-  fZones.ReHash(false);
+  fZones.ReHash;
   FreeAndNil(fIds);
   FreeAndNil(fDisplays);
 end;
