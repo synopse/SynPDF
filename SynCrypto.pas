@@ -131,7 +131,10 @@ uses
   SynCommons,
   SynTable; // for TSynUniqueIdentifierGenerator
 
-
+{$ifdef ABSOLUTEPASCAL}
+  {$define AES_PASCAL}
+  {$define SHA3_PASCAL}
+{$else}
 {$ifdef DELPHI5OROLDER}
   {$define AES_PASCAL} // Delphi 5 internal asm is buggy :(
   {$define SHA3_PASCAL}
@@ -179,6 +182,7 @@ uses
     {$define SHA3_PASCAL}
   {$endif CPUINTEL}
 {$endif}
+{$endif}
 
 {$ifdef AES_PASCAL}
   {$define AESPASCAL_OR_CPU64}
@@ -220,10 +224,11 @@ type
   /// class of Exceptions raised by this unit
   ESynCrypto = class(ESynException);
 
-  PAESBlock = ^TAESBlock;
-
   /// 128 bits memory block for AES data cypher/uncypher
   TAESBlock = THash128;
+
+  /// points to a 128 bits memory block, as used for AES data cypher/uncypher
+  PAESBlock = ^TAESBlock;
 
   /// 256 bits memory block for maximum AES key storage
   TAESKey = THash256;
@@ -711,12 +716,29 @@ type
     procedure Decrypt(BufIn, BufOut: pointer; Count: cardinal); override;
   end;
 
-  /// handle AES cypher/uncypher with Counter mode (CTR)
+  /// handle AES cypher/uncypher with 64-bit Counter mode (CTR)
+  // - the CTR will use a counter in bytes 7..0 by default - which is safe
+  // but not standard - call ComposeIV() to change e.g. to NIST behavior
   // - this class will use AES-NI hardware instructions, e.g.
   // ! CTR256: 28.13ms in x86 optimized code, 10.63ms with AES-NI
   // - expect IV to be set before process, or IVAtBeginning=true
   TAESCTR = class(TAESAbstractEncryptOnly)
+  protected
+    fCTROffset, fCTROffsetMin: PtrInt;
   public
+    /// Initialize AES context for cypher
+    // - will pre-generate the encryption key (aKeySize in bits, i.e. 128,192,256)
+    constructor Create(const aKey; aKeySize: cardinal); override;
+    /// defines how the IV is set and updated in CTR mode
+    // - default (if you don't call this method) uses a Counter in bytes 7..0
+    // - you can specify startup Nonce and Counter, and the Counter position
+    // - NonceLen + CounterLen should be 16 - otherwise it fails and returns false
+    function ComposeIV(Nonce, Counter: PAESBlock; NonceLen, CounterLen: integer;
+      LSBCounter: boolean): boolean; overload;
+    /// defines how the IV is set and updated in CTR mode
+    // - you can specify startup Nonce and Counter, and the Counter position
+    // - Nonce + Counter lengths should add to 16 - otherwise returns false
+    function ComposeIV(const Nonce, Counter: TByteDynArray; LSBCounter: boolean): boolean; overload;
     /// perform the AES cypher in the CTR mode
     procedure Encrypt(BufIn, BufOut: pointer; Count: cardinal); override;
     /// perform the AES un-cypher in the CTR mode
@@ -3318,6 +3340,8 @@ asm {$else} asm .noframe {$endif}
         bswap   eax
         mov     dword ptr[d + 16], eax
 end;
+
+// see http://nicst.de/crc.pdf
 
 function gf2_multiply(x,y,m,bits: PtrUInt): PtrUInt; {$ifdef FPC} nostackframe; assembler;
 asm {$else} asm .noframe {$endif}
@@ -13038,28 +13062,54 @@ end;
 
 { TAESCTR }
 
-procedure TAESCTR.Decrypt(BufIn, BufOut: pointer; Count: cardinal);
+constructor TAESCTR.Create(const aKey; aKeySize: cardinal);
 begin
-  Encrypt(BufIn, BufOut, Count); // by definition
+  inherited Create(aKey, aKeySize);
+  fCTROffset := 7; // counter is in the lower 64 bits, nonce in the upper 64 bits
+end;
+
+function TAESCTR.ComposeIV(Nonce, Counter: PAESBlock; NonceLen, CounterLen: integer;
+  LSBCounter: boolean): boolean;
+begin
+  result := (NonceLen + CounterLen = 16) and (CounterLen > 0);
+  if result then
+    if LSBCounter then begin
+      MoveFast(Nonce[0], fIV[0], NonceLen);
+      MoveFast(Counter[0], fIV[NonceLen], CounterLen);
+      fCTROffset := 15;
+      fCTROffsetMin := 16-CounterLen;
+    end else begin
+      MoveFast(Counter[0], fIV[0], CounterLen);
+      MoveFast(Nonce[0], fIV[CounterLen], NonceLen);
+      fCTROffset := CounterLen-1;
+      fCTROffsetMin := 0;
+    end;
+end;
+
+function TAESCTR.ComposeIV(const Nonce, Counter: TByteDynArray;
+  LSBCounter: boolean): boolean;
+begin
+  result := ComposeIV(pointer(Nonce), pointer(Counter),
+    length(Nonce), length(Counter), LSBCounter);
 end;
 
 procedure TAESCTR.Encrypt(BufIn, BufOut: pointer; Count: cardinal);
-var i,j: integer;
+var i: integer;
+    offs: PtrInt;
     tmp: TAESBlock;
 begin
   inherited; // CV := IV + set fIn,fOut
   for i := 1 to Count shr 4 do begin
     TAESContext(AES.Context).DoBlock(AES.Context,fCV,tmp);
-    inc(fCV[7]); // counter is in the lower 64 bits, nonce in the upper 64 bits
-    if fCV[7]=0 then begin // manual big-endian increment
-      j := 6;
+    offs := fCTROffset;
+    inc(fCV[offs]);
+    if fCV[offs]=0 then // manual big-endian increment
       repeat
-        inc(fCV[j]);
-        if (fCV[j]<>0) or (j=0) then
+        dec(offs);
+        inc(fCV[offs]);
+        if (fCV[offs]<>0) or (offs=fCTROffsetMin) then
           break;
-        dec(j);
       until false;
-    end;
     XorBlock16(pointer(fIn),pointer(fOut),pointer(@tmp));
     inc(fIn);
     inc(fOut);
@@ -13069,6 +13119,11 @@ begin
     TAESContext(AES.Context).DoBlock(AES.Context,fCV,tmp);
     XorMemory(pointer(fOut),pointer(fIn),@tmp,Count);
   end;
+end;
+
+procedure TAESCTR.Decrypt(BufIn, BufOut: pointer; Count: cardinal);
+begin
+  Encrypt(BufIn, BufOut, Count); // by definition
 end;
 
 
@@ -13361,7 +13416,7 @@ var ext: TSynExtended;
   begin
     SynCommons.FillRandom(@data.Hi,8); // QueryPerformanceCounter+8*Random32
     sha3.Update(@data,sizeof(data));
-    CreateGUID(g); // not random, but genuine
+    CreateGUID(g); // not random, but genuine (at least on Windows)
     sha3.Update(@g,sizeof(g));
   end;
 begin
@@ -13936,13 +13991,13 @@ function THash128History.Exists(const hash: THash128): boolean;
 begin
   if Count = 0 then
     result := false else
-    result := HashFound(pointer(Previous),Count,THash128Rec(hash));
+    result := Hash128Index(pointer(Previous),Count,@hash)>=0;
 end;
 
 function THash128History.Add(const hash: THash128): boolean;
 var n: integer;
 begin
-  result := not HashFound(pointer(Previous),Count,THash128Rec(hash));
+  result := Hash128Index(pointer(Previous),Count,@hash)<0;
   if not result then
     exit;
   Previous[Index].b := hash;
