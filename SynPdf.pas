@@ -8763,18 +8763,16 @@ begin
   for i := 0 to fRawPages.Count-1 do begin
     P := fRawPages.List[i];
     P.FlushVCLCanvas;
-    if P.fVCLMetaFileCompressed<>'' then begin
-      P.SetVCLCurrentMetaFile;
-      try
-        FCanvas.SetPage(P);
-        FCanvas.RenderMetaFile(P.fVCLCurrentMetaFile,1,1,0,0,
-          fUseMetaFileTextPositioning,KerningHScaleBottom,KerningHScaleTop,
-          fUseMetaFileTextClipping);
-      finally
-        FreeAndNil(P.fVCLCurrentMetaFile);
-      end;
-      inherited SaveToStreamDirectPageFlush;
+    P.SetVCLCurrentMetaFile;
+    try
+      FCanvas.SetPage(P);
+      FCanvas.RenderMetaFile(P.fVCLCurrentMetaFile,1,1,0,0,
+        fUseMetaFileTextPositioning,KerningHScaleBottom,KerningHScaleTop,
+        fUseMetaFileTextClipping);
+    finally
+      FreeAndNil(P.fVCLCurrentMetaFile);
     end;
+    inherited SaveToStreamDirectPageFlush;
   end;
   // finish to write PDF content to destination stream
   SaveToStreamDirectEnd;
