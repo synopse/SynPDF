@@ -76,6 +76,8 @@
 // - it will avoid error like "[DCC Error] E2201 Need imported data reference ($G)
 //   to access 'VarCopyProc' from unit 'SynCommons'"
 // - shall be set at the package options level, and left untouched by default
+// - note: you should probably also set "Generate DCUs only" in Project Options
+// -> Delphi Compiler -> Output C/C++ -> C/C++ output file generation
 
 {.$define DOPATCHTRTL}
 // if defined, some low-level patches are applied to Delphi or FPC RTL
@@ -423,7 +425,7 @@
     {$define OWNNORMTOUPPER} // NormToUpper[] exists only in our enhanced RTL
     {$define NOVARIANTS} // LVCL does not support variants
     {$define EXTENDEDTOSHORT_USESTR} // no FloatToText implemented in LVCL
-  {$endif}
+  {$endif LVCL}
 
   {$ifdef UNICODE}
     {$undef ENHANCEDRTL} // Delphi 2009 and up don't have our Enhanced Runtime library
@@ -435,7 +437,7 @@
       since TDynArrayHashed = object(TDynArray) fails to initialize
       http://blog.synopse.info/post/2011/01/29/record-and-object-issue-in-Delphi-2010 }
     {$define UNDIRECTDYNARRAY}
-  {$endif}
+  {$endif UNICODE}
 
   {$ifndef PUREPASCAL}
     {$define CPUINTEL} // Delphi only for Intel by now

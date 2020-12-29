@@ -1818,7 +1818,14 @@ procedure ResourceSynLZToRawByteString(const ResName: string;
 // - implemented using x86 asm, if possible
 // - this Trim() is seldom used, but this RawUTF8 specific version is needed
 // e.g. by Delphi 2009+, to avoid two unnecessary conversions into UnicodeString
+// - in the middle of VCL code, consider using TrimU() which won't have name
+// collision ambiguity as with SysUtils' homonymous function
 function Trim(const S: RawUTF8): RawUTF8;
+
+/// fast dedicated RawUTF8 version of Trim()
+// - could be used if overloaded Trim() from SysUtils.pas is ambiguous
+function TrimU(const S: RawUTF8): RawUTF8;
+  {$ifdef HASINLINE}inline;{$endif}
 
 {$define OWNNORMTOUPPER} { NormToUpper[] exists only in our enhanced RTL }
 
@@ -9237,6 +9244,8 @@ type
     // - excluding the bytes in the internal buffer
     // - see TextLength for the total number of bytes, on both disk and memory
     property WrittenBytes: PtrUInt read fTotalFileSize;
+    /// low-level access to the current indentation level
+    property HumanReadableLevel: integer read fHumanReadableLevel write fHumanReadableLevel;
     /// the last char appended is canceled
     // - only one char cancelation is allowed at the same position: don't call
     // CancelLastChar/CancelLastComma more than once without appending text inbetween
@@ -12382,6 +12391,7 @@ type
   TDateTimeMSDynArray = array of TDateTimeMS;
   PDateTimeMSDynArray = ^TDateTimeMSDynArray;
 
+  {$A-}
   /// a simple way to store a date as Year/Month/Day
   // - with no needed computation as with TDate/TUnixTime values
   // - consider using TSynSystemTime if you need to handle both Date and Time
@@ -12389,7 +12399,10 @@ type
   // is safe to be used
   // - DayOfWeek field is not handled by its methods by default, but could be
   // filled on demand via ComputeDayOfWeek - making this record 64-bit long
-  TSynDate = object
+  // - some Delphi revisions have trouble with "object" as own method parameters
+  // (e.g. IsEqual) so we force to use "record" type if possible
+  {$ifdef USERECORDWITHMETHODS}TSynDate = record{$else}
+  TSynDate = object{$endif}
     Year, Month, DayOfWeek, Day: word;
     /// set all fields to 0
     procedure Clear; {$ifdef HASINLINE}inline;{$endif}
@@ -12433,7 +12446,10 @@ type
   // for fast conversion from TDateTime to its ready-to-display members
   // - DayOfWeek field is not handled by most methods by default, but could be
   // filled on demand via ComputeDayOfWeek
-  TSynSystemTime = object
+  // - some Delphi revisions have trouble with "object" as own method parameters
+  // (e.g. IsEqual) so we force to use "record" type if possible
+  {$ifdef USERECORDWITHMETHODS}TSynSystemTime = record{$else}
+  TSynSystemTime = object{$endif}
   public
     Year, Month, DayOfWeek, Day,
     Hour, Minute, Second, MilliSecond: word;
@@ -12505,6 +12521,7 @@ type
     procedure IncrementMS(ms: integer);
   end;
   PSynSystemTime = ^TSynSystemTime;
+  {$A+}
 
   /// fast bit-encoded date and time value
   // - faster than Iso-8601 text and TDateTime, e.g. can be used as published
@@ -16858,20 +16875,6 @@ function SynLZDecompressBody(P,Body: PAnsiChar; PLen,BodyLen: integer;
 function SynLZDecompressPartial(P,Partial: PAnsiChar; PLen,PartialLen: integer): integer;
 
 
-resourcestring
-  sInvalidIPAddress = '"%s" is an invalid IP v4 address';
-  sInvalidEmailAddress = '"%s" is an invalid email address';
-  sInvalidPattern = '"%s" does not match the expected pattern';
-  sCharacter01n = 'character,character,characters';
-  sInvalidTextLengthMin = 'Expect at least %d %s';
-  sInvalidTextLengthMax = 'Expect up to %d %s';
-  sInvalidTextChar = 'Expect at least %d %s %s,Expect up to %d %s %s,'+
-    'alphabetical,digital,punctuation,lowercase,uppercase,space,'+
-    'Too much spaces on the left,Too much spaces on the right';
-  sValidationFailed = '"%s" rule failed';
-  sValidationFieldVoid = 'An unique key field must not be void';
-  sValidationFieldDuplicate = 'Value already used for this unique key field';
-
 
 implementation
 
@@ -17075,9 +17078,6 @@ function TSynAnsiConvert.AnsiBufferToUnicode(Dest: PWideChar;
   Source: PAnsiChar; SourceChars: Cardinal; NoTrailingZero: boolean): PWideChar;
 var c: cardinal;
 {$ifndef MSWINDOWS}
-{$ifdef FPC}
-    tmp: UnicodeString;
-{$endif}
 {$ifdef KYLIX3}
     ic: iconv_t;
     DestBegin: PAnsiChar;
@@ -17121,10 +17121,8 @@ begin
       fCodePage,MB_PRECOMPOSED,Source,SourceChars,Dest,SourceChars);
     {$else}
     {$ifdef FPC}
-    widestringmanager.Ansi2UnicodeMoveProc(Source,
-      {$ifdef ISFPC27}fCodePage,{$endif}tmp,SourceChars);
-    MoveFast(Pointer(tmp)^,Dest^,length(tmp)*2);
-    result := Dest+length(tmp);
+    // uses our SynFPCLinux ICU API helper
+    result := Dest+AnsiToWideICU(fCodePage,Source,Dest,SourceChars);
     {$else}
     {$ifdef KYLIX3}
     result := Dest; // makes compiler happy
@@ -17176,7 +17174,8 @@ begin
   if SourceChars=0 then
     result := Dest else begin
     U := AnsiBufferToUnicode(tmp.Init(SourceChars*3),Source,SourceChars);
-    result := Dest+RawUnicodeToUtf8(Dest,SourceChars*3,tmp.buf,(PtrUInt(U)-PtrUInt(tmp.buf))shr 1,[ccfNoTrailingZero]);
+    result := Dest+RawUnicodeToUtf8(Dest,SourceChars*3,tmp.buf,
+      (PtrUInt(U)-PtrUInt(tmp.buf))shr 1,[ccfNoTrailingZero]);
     tmp.Done;
   end;
   if not NoTrailingZero then
@@ -17303,9 +17302,6 @@ function TSynAnsiConvert.UnicodeBufferToAnsi(Dest: PAnsiChar;
   Source: PWideChar; SourceChars: Cardinal): PAnsiChar;
 var c: cardinal;
 {$ifndef MSWINDOWS}
-{$ifdef FPC}
-    tmp: RawByteString;
-{$endif}
 {$ifdef KYLIX3}
     ic: iconv_t;
     DestBegin: PAnsiChar;
@@ -17348,10 +17344,8 @@ begin
       fCodePage,0,Source,SourceChars,Dest,SourceChars*3,@DefaultCharVar,nil);
     {$else}
     {$ifdef FPC}
-    widestringmanager.Unicode2AnsiMoveProc(Source,tmp,
-      {$ifdef ISFPC27}fCodePage,{$endif}SourceChars);
-    MoveFast(Pointer(tmp)^,Dest^,length(tmp));
-    result := Dest+length(tmp);
+    // uses our SynFPCLinux ICU API helper
+    result := Dest+WideToAnsiICU(fCodePage,Source,Dest,SourceChars);
     {$else}
     {$ifdef KYLIX3}
     result := Dest; // makes compiler happy
@@ -19525,7 +19519,7 @@ smlu32: Res.Text := pointer(SmallUInt32UTF8[result]);
     vtPointer,vtInterface: begin
       Res.Text := @Res.Temp;
       Res.Len := SizeOf(pointer)*2;
-      BinToHexDisplayLower(V.VPointer,@Res.Temp,SizeOf(Pointer));
+      BinToHexDisplayLower(@V.VPointer,@Res.Temp,SizeOf(Pointer));
       result := SizeOf(pointer)*2;
       exit;
     end;
@@ -23667,11 +23661,11 @@ begin
   L := Length(S);
   I := 1;
   while (I<=L) and (S[I]<=' ') do inc(I);
-  if I>L then
+  if I>L then // void string
     result := '' else
-  if (I=1) and (S[L]>' ') then
+  if (I=1) and (S[L]>' ') then // nothing to trim
     result := S else begin
-    while S[L]<=' ' do dec(L);
+    while S[L]<=' ' do dec(L); // allocated trimmed
     result := Copy(S,I,L-I+1);
   end;
 end;
@@ -24027,6 +24021,11 @@ begin
   if Value=0 then
     result := SmallUInt32UTF8[0] else
     FastSetString(result,@tmp[1],DoubleToShort(tmp,Value));
+end;
+
+function TrimU(const S: RawUTF8): RawUTF8;
+begin
+  result := Trim(s);
 end;
 
 function FormatUTF8(const Format: RawUTF8; const Args: array of const): RawUTF8;
@@ -29181,37 +29180,45 @@ begin
   Dest.Add(');'#13#10'  %_LEN = SizeOf(%);'#13#10,[ConstName,ConstName]);
 end;
 
+{$ifdef KYLIX3}
 function UpperCaseUnicode(const S: RawUTF8): RawUTF8;
-{$ifdef MSWINDOWS}
-var tmp: RawUnicode;
-    TmpLen: integer;
-{$endif}
 begin
-{$ifdef MSWINDOWS} // no temporary WideString involved
-  tmp := Utf8DecodeToRawUnicodeUI(S,@TmpLen);
-  TmpLen := TmpLen shr 1;
-  CharUpperBuffW(pointer(tmp),TmpLen);
-  RawUnicodeToUtf8(pointer(tmp),TmpLen,result);
-{$else}
   result := WideStringToUTF8(WideUpperCase(UTF8ToWideString(S)));
-{$endif}
 end;
 
 function LowerCaseUnicode(const S: RawUTF8): RawUTF8;
-{$ifdef MSWINDOWS}
-var tmp: RawUnicode;
-    TmpLen: integer;
-{$endif}
 begin
-{$ifdef MSWINDOWS} // no temporary WideString involved
-  tmp := Utf8DecodeToRawUnicodeUI(S,@TmpLen);
-  TmpLen := TmpLen shr 1;
-  CharLowerBuffW(pointer(tmp),TmpLen);
-  RawUnicodeToUtf8(pointer(tmp),TmpLen,result);
-{$else}
   result := WideStringToUTF8(WideLowerCase(UTF8ToWideString(S)));
-{$endif}
 end;
+{$else}
+function UpperCaseUnicode(const S: RawUTF8): RawUTF8;
+var tmp: TSynTempBuffer;
+    len: integer;
+begin
+  if S='' then begin
+    result := '';
+    exit;
+  end;
+  tmp.Init(length(s)*2);
+  len := UTF8ToWideChar(tmp.buf,pointer(S),length(S)) shr 1;
+  RawUnicodeToUtf8(tmp.buf,CharUpperBuffW(tmp.buf,len),result);
+  tmp.Done;
+end;
+
+function LowerCaseUnicode(const S: RawUTF8): RawUTF8;
+var tmp: TSynTempBuffer;
+    len: integer;
+begin
+  if S='' then begin
+    result := '';
+    exit;
+  end;
+  tmp.Init(length(s)*2);
+  len := UTF8ToWideChar(tmp.buf,pointer(S),length(S)) shr 1;
+  RawUnicodeToUtf8(tmp.buf,CharLowerBuffW(tmp.buf,len),result);
+  tmp.Done;
+end;
+{$endif KYLIX3}
 
 function IsCaseSensitive(const S: RawUTF8): boolean;
 begin
@@ -34021,7 +34028,6 @@ begin
       result := FindIniNameValueW(P,UpperName);
   end;
 end;
-
 {$endif UNICODE}
 
 function IdemPCharAndGetNextItem(var source: PUTF8Char; const searchUp: RawUTF8;
@@ -37689,7 +37695,8 @@ begin
       exit; // avoid integer overflow e.g. if '0000' is an invalid date
     Div100(Y,d100);
     unaligned(result) := (146097*d100.d) shr 2 + (1461*d100.m) shr 2 +
-          (153*M+2) div 5+D-693900;
+          (153*M+2) div 5+D;
+    unaligned(result) := unaligned(result)-693900; // as float: avoid sign issue
     if L<15 then
       exit; // not enough space to retrieve the time
   end;
@@ -38270,7 +38277,8 @@ begin // faster version by AB
       else exit; // Month <= 0
     Div100(Year,d100);
     Date := (146097*d100.D) shr 2+(1461*d100.M) shr 2+
-            (153*Month+2) div 5+Day-693900;
+            (153*Month+2) div 5+Day;
+    Date := Date-693900; // should be separated to avoid sign issues
     result := true;
   end;
 end;
@@ -54768,7 +54776,7 @@ begin
   '{': begin
     repeat inc(JSON) until (JSON^=#0) or (JSON^>' ');
     if JSON^='}' then
-      repeat inc(JSON) until (JSON^=#0) or (JSON^>' ');
+      repeat inc(JSON) until (JSON^=#0) or (JSON^>' ') else begin
       repeat
         Name := GetJSONPropName(JSON);
         if Name=nil then
@@ -54785,6 +54793,7 @@ begin
           Add('>');
         end;
       until objEnd='}';
+    end;
   end;
   else begin
     Value := GetJSONField(JSON,result,nil,EndOfObject); // let wasString=nil
@@ -56254,7 +56263,7 @@ begin
         exclude(fCustomOptions,twoBufferIsExternal) else
         FreeMem(fTempBuf); // with big content comes bigger buffer
       GetMem(fTempBuf,fTempBufSize);
-      BEnd := fTempBuf+(fTempBufSize-2);
+      BEnd := fTempBuf+(fTempBufSize-16);
     end;
   end;
   B := fTempBuf-1;
@@ -62619,8 +62628,9 @@ var name: RawUTF8;
 begin
   FormatUTF8(Format,Args,name);
   name := StringReplaceAll(name,['TSQLRest','', 'TSQL','', 'TWebSocket','WS',
-    'TSyn','', 'Thread','', 'Process','', 'Background','Bgd', 'Server','Svr',
-    'Client','Clt', 'WebSocket','WS', 'Timer','Tmr', 'Thread','Thd']);
+    'TServiceFactory','SF', 'TSyn','', 'Thread','', 'Process','',
+    'Background','Bgd', 'Server','Svr', 'Client','Clt', 'WebSocket','WS',
+    'Timer','Tmr', 'Thread','Thd']);
   SetThreadNameInternal(ThreadID,name);
 end;
 
