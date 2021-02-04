@@ -6,7 +6,7 @@ unit SynPdf;
 {
     This file is part of Synopse framework.
 
-    Synopse framework. Copyright (C) 2020 Arnaud Bouchez
+    Synopse framework. Copyright (C) 2021 Arnaud Bouchez
       Synopse Informatique - https://synopse.info
 
   *** BEGIN LICENSE BLOCK *****
@@ -25,7 +25,7 @@ unit SynPdf;
 
   The Initial Developer of the Original Code is Arnaud Bouchez.
 
-  Portions created by the Initial Developer are Copyright (C) 2020
+  Portions created by the Initial Developer are Copyright (C) 2021
   the Initial Developer. All Rights Reserved.
 
   Contributor(s):
@@ -2946,11 +2946,11 @@ implementation
 
 const
   // those constants are not defined in earlier Delphi revisions
-  cPI: Single = 3.141592654;
-  cPIdiv180: Single = 0.017453292;
-  c180divPI: Single = 57.29577951;
-  c2PI: Single = 6.283185307;
-  cPIdiv2: Single = 1.570796326;
+  cPI: single = 3.141592654;
+  cPIdiv180: single = 0.017453292;
+  c180divPI: single = 57.29577951;
+  c2PI: double = 6.283185307;
+  cPIdiv2: double = 1.570796326;
 
 function RGBA(r, g, b, a: cardinal): COLORREF; {$ifdef HASINLINE}inline;{$endif}
 begin
@@ -10986,12 +10986,14 @@ procedure TPdfEncryptionRC4MD5.EncodeBuffer(const BufIn; var BufOut; Count: card
     fLastObjectNumber := fDoc.fCurrentObjectNumber;
     fLastGenerationNumber := fDoc.fCurrentGenerationNumber;
   end;
+var work: TRC4; // Encrypt() changes the RC4 state -> local copy for reuse
 begin
   if (fDoc.fCurrentObjectNumber<>fLastObjectNumber) or
      (fDoc.fCurrentGenerationNumber<>fLastGenerationNumber) then
     // a lot of string encodings have the same context
     ComputeNewRC4Key;
-  fLastRC4Key.Encrypt(BufIn,BufOut,Count); // RC4 allows in-place encryption :)
+  work := fLastRC4Key;
+  work.Encrypt(BufIn,BufOut,Count); // RC4 allows in-place encryption :)
 end;
 
 {$endif USE_PDFSECURITY}
