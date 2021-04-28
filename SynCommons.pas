@@ -3112,9 +3112,9 @@ function TrimLeft(const S: RawUTF8): RawUTF8;
 // newline, space, and tab characters
 function TrimRight(const S: RawUTF8): RawUTF8;
 
-// single-allocation (therefore faster) alternative to Trim(copy())
+/// single-allocation (therefore faster) alternative to Trim(copy())
 procedure TrimCopy(const S: RawUTF8; start,count: PtrInt;
-  out result: RawUTF8);
+  var result: RawUTF8);
 
 /// fast WinAnsi comparison using the NormToUpper[] array for all 8 bits values
 function AnsiIComp(Str1, Str2: pointer): PtrInt;
@@ -10634,9 +10634,10 @@ function JSONRetrieveStringField(P: PUTF8Char; out Field: PUTF8Char;
 /// efficient JSON field in-place decoding, within a UTF-8 encoded buffer
 // - this function decodes in the P^ buffer memory itself (no memory allocation
 // or copy), for faster process - so take care that P^ is not shared
-// - PDest points to the next field to be decoded, or nil when end is reached
+// - PDest points to the next field to be decoded, or nil on JSON parsing error
 // - EndOfObject (if not nil) is set to the JSON value char (',' ':' or '}' e.g.)
 // - optional wasString is set to true if the JSON value was a JSON "string"
+// - returns a PUTF8Char to the decoded value, with its optional length in Len^
 // - '"strings"' are decoded as 'strings', with wasString=true, properly JSON
 // unescaped (e.g. any \u0123 pattern would be converted into UTF-8 content)
 // - null is decoded as nil, with wasString=false
@@ -12059,9 +12060,7 @@ procedure FillZero(var secret: RawUTF8); overload;
   {$ifdef FPC}inline;{$endif}
 
 /// fill all bytes of a memory buffer with zero
-// - is expected to be used with a constant count from SizeOf() so that
-// inlining make it more efficient than FillCharFast(..,...,0):
-// ! FillZero(variable,SizeOf(variable));
+// - just redirect to FillCharFast(..,...,0)
 procedure FillZero(var dest; count: PtrInt); overload;
   {$ifdef HASINLINE}inline;{$endif}
 
@@ -13801,6 +13800,7 @@ function IsRowIDShort(const FieldName: shortstring): boolean;
 
 /// retrieve the next SQL-like identifier within the UTF-8 buffer
 // - will also trim any space (or line feeds) and trailing ';'
+// - any comment like '/*nocache*/' will be ignored
 // - returns true if something was set to Prop
 function GetNextFieldProp(var P: PUTF8Char; var Prop: RawUTF8): boolean;
 
@@ -20016,8 +20016,6 @@ begin
   UniqueText(aResult);
 end;
 
-{$ifndef NOVARIANTS}
-
 procedure ClearVariantForString(var Value: variant); {$ifdef HASINLINE} inline; {$endif}
 var v: TVarData absolute Value;
 begin
@@ -20030,6 +20028,8 @@ begin
       v.VString := nil; // to avoid GPF when assign a RawByteString
     end;
 end;
+
+{$ifndef NOVARIANTS}
 
 procedure TRawUTF8Interning.UniqueVariant(var aResult: variant; const aText: RawUTF8);
 begin
@@ -29341,27 +29341,30 @@ begin
   FastSetString(result,pointer(S),i);
 end;
 
-procedure TrimCopy(const S: RawUTF8; start,count: PtrInt;
-  out result: RawUTF8);
+procedure TrimCopy(const S: RawUTF8; start, count: PtrInt;
+  var result: RawUTF8);
 var L: PtrInt;
 begin
-  if count<=0 then
-    exit;
-  if start<=0 then
-    start := 1;
-  L := Length(S);
-  while (start<=L) and (S[start]<=' ') do begin
-    inc(start); dec(count); end;
-  dec(start);
-  dec(L,start);
-  if count<L then
-    L := count;
-  while L>0 do
-    if S[start+L]<=' ' then
-      dec(L) else
-      break;
-  if L>0 then
-    FastSetString(result,@PByteArray(S)[start],L);
+  if count>0 then begin
+    if start<=0 then
+      start := 1;
+    L := Length(S);
+    while (start<=L) and (S[start]<=' ') do begin
+      inc(start); dec(count); end;
+    dec(start);
+    dec(L,start);
+    if count<L then
+      L := count;
+    while L>0 do
+      if S[start+L]<=' ' then
+        dec(L) else
+        break;
+    if L>0 then begin
+      FastSetString(result,@PByteArray(S)[start],L);
+      exit;
+    end;
+  end;
+  result := '';
 end;
 
 type
@@ -49925,7 +49928,7 @@ end;
 procedure TDynArray.LoadFromStream(Stream: TCustomMemoryStream);
 var P: PAnsiChar;
 begin
-  P := PAnsiChar(Stream.Memory)+Stream.Seek(0,soFromCurrent);
+  P := PAnsiChar(Stream.Memory)+Stream.Seek(0,soCurrent);
   Stream.Seek(LoadFrom(P,nil,false,PAnsiChar(Stream.Memory)+Stream.Size)-P,soCurrent);
 end;
 
@@ -50271,7 +50274,7 @@ begin // code below must match TTextWriter.AddDynArrayJSON()
     end;
     exit;
   end;
-  inc(P);
+  repeat inc(P) until not(P^ in [#1..' ']);
   n := JSONArrayCount(P);
   if n<0 then
     exit; // invalid array content
@@ -54002,8 +54005,12 @@ begin
 end;
 
 procedure TTextWriter.Add(Value: boolean);
+var PS: PShortString;
 begin
-  AddShort(BOOL_STR[Value]);
+  if Value then // normalize: boolean may not be in the expected [0,1] range
+    PS := @BOOL_STR[true] else
+    PS := @BOOL_STR[false];
+  AddShort(PS^);
 end;
 
 procedure TTextWriter.AddFloatStr(P: PUTF8Char);
@@ -56253,7 +56260,7 @@ begin
     end;
   if aStream<>nil then begin
     fStream := aStream;
-    fInitialStreamPosition := fStream.Seek(0,soFromCurrent);
+    fInitialStreamPosition := fStream.Seek(0,soCurrent);
     fTotalFileSize := fInitialStreamPosition;
   end;
 end;
@@ -56801,7 +56808,9 @@ label slash,num,lit;
 begin // see http://www.ietf.org/rfc/rfc4627.txt
   if wasString<>nil then
     wasString^ := false; // not a string by default
-  PDest := nil; // PDest=nil indicates error or unexpected end (#0)
+  if Len<>nil then
+    Len^ := 0; // avoid buffer overflow on parsing error
+  PDest := nil; // PDest=nil indicates parsing error (e.g. unexpected #0 end)
   result := nil;
   if P=nil then exit;
   if P^<=' ' then repeat inc(P); if P^=#0 then exit; until P^>' ';
@@ -61072,16 +61081,33 @@ begin
        ord('I')+ord('D')shl 8));
 end;
 
+function GotoNextSqlIdentifier(P: PUtf8Char; tab: PTextCharSet): PUtf8Char;
+  {$ifdef HASINLINE} inline; {$endif}
+begin
+  while tcCtrlNot0Comma in tab[P^] do inc(P); // in [#1..' ', ';']
+  if PWord(P)^=ord('/')+ord('*') shl 8 then begin // ignore e.g. '/*nocache*/'
+    repeat
+      inc(P);
+      if PWord(P)^ = ord('*')+ord('/') shl 8 then begin
+        inc(P, 2);
+        break;
+      end;
+    until P^ = #0;
+    while tcCtrlNot0Comma in tab[P^] do inc(P);
+  end;
+  result := P;
+end;
+
 function GetNextFieldProp(var P: PUTF8Char; var Prop: RawUTF8): boolean;
 var B: PUTF8Char;
     tab: PTextCharSet;
 begin
   tab := @TEXT_CHARS;
-  while tcCtrlNot0Comma in tab[P^] do inc(P);
+  P := GotoNextSqlIdentifier(P, tab);
   B := P;
   while tcIdentifier in tab[P^] do inc(P); // go to end of field name
   FastSetString(Prop,B,P-B);
-  while tcCtrlNot0Comma in tab[P^] do inc(P);
+  P := GotoNextSqlIdentifier(P, tab);
   result := Prop<>'';
 end;
 
@@ -61398,7 +61424,7 @@ begin
       exit;
     if Source.InheritsFrom(TCustomMemoryStream) then begin
       S := PAnsiChar(TCustomMemoryStream(Source).Memory)+PtrUInt(sourcePosition);
-      Source.Seek(Head.CompressedSize,soFromCurrent);
+      Source.Seek(Head.CompressedSize,soCurrent);
     end else begin
       if Head.CompressedSize>length(Buf) then
         SetString(Buf,nil,Head.CompressedSize);
