@@ -1,7 +1,7 @@
 {
     This file is part of Synopse framework.
 
-    Synopse framework. Copyright (C) 2020 Arnaud Bouchez
+    Synopse framework. Copyright (C) 2021 Arnaud Bouchez
       Synopse Informatique - https://synopse.info
 
   *** BEGIN LICENSE BLOCK *****
@@ -20,7 +20,7 @@
 
   The Initial Developer of the Original Code is Arnaud Bouchez.
 
-  Portions created by the Initial Developer are Copyright (C) 2020
+  Portions created by the Initial Developer are Copyright (C) 2021
   the Initial Developer. All Rights Reserved.
 
   Contributor(s):
@@ -76,6 +76,8 @@
 // - it will avoid error like "[DCC Error] E2201 Need imported data reference ($G)
 //   to access 'VarCopyProc' from unit 'SynCommons'"
 // - shall be set at the package options level, and left untouched by default
+// - note: you should probably also set "Generate DCUs only" in Project Options
+// -> Delphi Compiler -> Output C/C++ -> C/C++ output file generation
 
 {.$define DOPATCHTRTL}
 // if defined, some low-level patches are applied to Delphi or FPC RTL
@@ -162,6 +164,7 @@
 
   {$INLINE ON}
   {$MINENUMSIZE 1}
+  {$PACKRECORDS DEFAULT} // force normal alignment
   {$PACKSET 1}
   {$PACKENUM 1}
   {$CODEPAGE UTF8} // otherwise unexpected behavior occurs in most cases
@@ -210,11 +213,15 @@
     {$define ISFPC27}
     {$define ISFPC30}
     {$define ISFPC32}
+    {$ifdef VER3_2_2}
+      {$define HASTTHREADTERMINATESET} // introduced TThread.TerminateSet
+    {$endif VER3_2_2}
   {$endif}
   {$ifdef VER3_3} // trunk before 3.4
     {$define ISFPC27}
     {$define ISFPC30}
     {$define ISFPC32}
+    {$define HASTTHREADTERMINATESET} // introduced TThread.TerminateSet
   {$endif}
   {$ifdef VER3_4}
     {$define ISFPC27}
@@ -222,6 +229,7 @@
     {$define ISFPC32}
     {$define ISFPC34}
     {$define FPC_PROVIDE_ATTR_TABLE} // introducing TTypeData.AttributeTable
+    {$define HASTTHREADTERMINATESET} // introduced TThread.TerminateSet
   {$endif}
   {$if not defined(VER3_0) and not defined(VER3_2) and not defined(VER2)}
     {.$define FPC_PROVIDE_ATTR_TABLE} // to be defined since SVN 42356-42411
@@ -272,11 +280,17 @@
       {$define BSDNOTDARWIN}   // OSX has some non-standard API calls
     {$endif}
     {$ifdef FREEBSD}
+      {$ifdef CPUX86}
+        {$define FPCSQLITE3STATIC} // we supply i386 static libs
+      {$endif CPUX86}
       {$ifdef CPUX64}
         {$define FPCSQLITE3STATIC} // we supply x64 static libs
       {$endif CPUX64}
     {$endif}
     {$ifdef OPENBSD}
+      {$ifdef CPUX86}
+        {$define FPCSQLITE3STATIC} // we supply i386 static libs
+      {$endif CPUX86}
       {$ifdef CPUX64}
         {$define FPCSQLITE3STATIC} // we supply x64 static libs
       {$endif CPUX64}
@@ -298,6 +312,14 @@
   {$ifdef FPC_PIC}
     {$define PUREPASCAL} // most asm code is not PIC-safe with global constants
   {$endif}
+
+  {$ifdef MSWINDOWS}
+    {$ifdef FPC_X64MM}
+      {$ifndef FPC_X64MM_WIN} // SynFPCx64MM not yet fully validated on Windows
+         {$undef FPC_X64MM}
+      {$endif FPC_X64MM_WIN}
+    {$endif FPC_X64MM}
+  {$endif MSWINDOWS}
 
   {$ifdef CPU64}
     {$define FPC_64}
@@ -331,6 +353,9 @@
       {$ifndef FPC_PIC}
         {$define CPUX86NOTPIC} // use "absolute" instead of local register
       {$endif FPC_PIC}
+      {$ifndef OPENBSD}
+        {$define FPC_X86ASM} // if assembler knows popcnt/crc32c opcodes
+      {$endif OPENBSD}
     {$endif CPUX86}
   {$endif CPU64}
 
@@ -397,12 +422,15 @@
 
   {$define DELPHI_OR_FPC_OLDRTTI}
   {$define USE_VTYPE_STATIC} // "and VTYPE_STATIC" test before VarClear()
+  {$undef FPC_X64MM} // this is a FPC-specific memory manager
+
+  {$A+} // force normal alignment
 
   {$ifdef LVCL}
     {$define OWNNORMTOUPPER} // NormToUpper[] exists only in our enhanced RTL
     {$define NOVARIANTS} // LVCL does not support variants
     {$define EXTENDEDTOSHORT_USESTR} // no FloatToText implemented in LVCL
-  {$endif}
+  {$endif LVCL}
 
   {$ifdef UNICODE}
     {$undef ENHANCEDRTL} // Delphi 2009 and up don't have our Enhanced Runtime library
@@ -414,7 +442,7 @@
       since TDynArrayHashed = object(TDynArray) fails to initialize
       http://blog.synopse.info/post/2011/01/29/record-and-object-issue-in-Delphi-2010 }
     {$define UNDIRECTDYNARRAY}
-  {$endif}
+  {$endif UNICODE}
 
   {$ifndef PUREPASCAL}
     {$define CPUINTEL} // Delphi only for Intel by now
@@ -567,6 +595,9 @@
       {$if CompilerVersion >= 33.0}
         {$define ISDELPHI103}
       {$ifend}
+      {$if CompilerVersion >= 34.0}
+        {$define ISDELPHI104}
+      {$ifend}
     {$ifend CompilerVersion >= 17}
     {$ifopt O-} // if we don't expect fast code, don't optimize the framework
       {$undef ENHANCEDRTL}
@@ -640,6 +671,7 @@
 {$ifdef ABSOLUTEPASCAL}
   {$define ABSOLUTEORPUREPASCAL}
   {$define ABSOLUTEPASCALORNOTINTEL}
+  {$define PUREPASCAL}
 {$endif ABSOLUTEPASCAL}
 {$ifdef PUREPASCAL}
   {$define ABSOLUTEORPUREPASCAL}
@@ -661,6 +693,7 @@
   {$ifdef CPUX64}
     {$if CompilerVersion = 25.0} // exactly XE4
       {$define NOSQLITE3STATIC}
+      // :( to avoid "Fatal: F2084 Internal Error: AV004A7B1F-R03BDA7B0-0"
     {$ifend}
   {$endif} // other Win32/Win64 Delphi platforms should work as expected
 {$endif FPC}

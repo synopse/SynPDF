@@ -5,7 +5,7 @@ unit SynLZ;
 {
     This file is part of Synopse SynLZ Compression.
 
-    Synopse SynLZ Compression. Copyright (C) 2020 Arnaud Bouchez
+    Synopse SynLZ Compression. Copyright (C) 2021 Arnaud Bouchez
       Synopse Informatique - https://synopse.info
 
   *** BEGIN LICENSE BLOCK *****
@@ -24,7 +24,7 @@ unit SynLZ;
 
   The Initial Developer of the Original Code is Arnaud Bouchez.
 
-  Portions created by the Initial Developer are Copyright (C) 2020
+  Portions created by the Initial Developer are Copyright (C) 2021
   the Initial Developer. All Rights Reserved.
 
   Contributor(s):
@@ -199,6 +199,7 @@ end;
 // using direct x86 jmp also circumvents Internal Error C11715 for Delphi 5
 {$ifdef CPUX86}
 function SynLZcompress1(src: PAnsiChar; size: integer; dst: PAnsiChar): integer;
+  {$ifdef FPC} nostackframe; assembler; {$endif}
 asm
         push    ebp
         push    ebx
@@ -737,6 +738,7 @@ end;
 {$ifdef CPUX86}
 // using direct x86 jmp also circumvents Internal Error C11715 for Delphi 5
 function SynLZdecompress1(src: PAnsiChar; size: integer; dst: PAnsiChar): integer;
+  {$ifdef FPC} nostackframe; assembler; {$endif}
 asm
         push    ebp
         push    ebx

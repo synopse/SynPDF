@@ -6,7 +6,7 @@ unit SynPdf;
 {
     This file is part of Synopse framework.
 
-    Synopse framework. Copyright (C) 2020 Arnaud Bouchez
+    Synopse framework. Copyright (C) 2021 Arnaud Bouchez
       Synopse Informatique - https://synopse.info
 
   *** BEGIN LICENSE BLOCK *****
@@ -25,7 +25,7 @@ unit SynPdf;
 
   The Initial Developer of the Original Code is Arnaud Bouchez.
 
-  Portions created by the Initial Developer are Copyright (C) 2020
+  Portions created by the Initial Developer are Copyright (C) 2021
   the Initial Developer. All Rights Reserved.
 
   Contributor(s):
@@ -41,6 +41,7 @@ unit SynPdf;
    Harald Simon
    Josh Kelley (joshkel)
    Karel (vandrovnik)
+   Kukhtin Igor
    LoukaO
    Marsh
    MChaos
@@ -69,7 +70,7 @@ unit SynPdf;
   Sponsors: https://synopse.info/fossil/wiki?name=HelpDonate
   Ongoing development and maintenance of the SynPDF library was sponsored
   in part by:
-   http://www.helpndoc.com
+   https://www.helpndoc.com
     Easy to use yet powerful help authoring environment which can generate
     various documentation formats from a single source.
   Thanks for your contribution!
@@ -1510,24 +1511,24 @@ type
     // the index in Text, not the glyphs index
     function MeasureText(const Text: PDFString; Width: Single): integer;
   public
-    /// retrieve or set the word Space attribute
+    /// retrieve or set the word Space attribute, in PDF coordinates of 1/72 inch
     property WordSpace: Single read FWordSpace write SetWordSpace;
-    /// retrieve or set the Char Space attribute
+    /// retrieve or set the Char Space attribute, in PDF coordinates of 1/72 inch
     property CharSpace: Single read FCharSpace write SetCharSpace;
-    /// retrieve or set the Horizontal Scaling attribute
+    /// retrieve or set the Horizontal Scaling attribute, in PDF coordinates of 1/72 inch
     property HorizontalScaling: Single read FHorizontalScaling write SetHorizontalScaling;
-    /// retrieve or set the text Leading attribute
+    /// retrieve or set the text Leading attribute, in PDF coordinates of 1/72 inch
     property Leading: Single read FLeading write SetLeading;
-    /// retrieve or set the font Size attribute
+    /// retrieve or set the font Size attribute, in system TFont.Size units
     property FontSize: Single read FFontSize write SetFontSize;
     /// retrieve the current used font
     // - for TPdfFontTrueType, this points not always to the WinAnsi version of
     // the Font, but can also point to the Unicode Version, if the last
     // drawn character by ShowText() was unicode - see TPdfWrite.AddUnicodeHexText
     property Font: TPdfFont read FFont write FFont;
-    /// retrieve or set the current page width
+    /// retrieve or set the current page width, in PDF coordinates of 1/72 inch
     property PageWidth: integer read GetPageWidth write SetPageWidth;
-    /// retrieve or set the current page height
+    /// retrieve or set the current page height, in PDF coordinates of 1/72 inch
     property PageHeight: integer read GetPageHeight write SetPageHeight;
     /// retrieve or set the paper orientation
     property PageLandscape: Boolean read GetPageLandscape write SetPageLandscape;
@@ -1580,7 +1581,8 @@ type
     // = XOff,YOff parameters specified in RenderMetaFile()
     FOffsetXDef, FOffsetYDef: Single;
     // WorldTransform factor and offs
-    FWorldFactorX, FWorldFactorY, FWorldOffsetX, FWorldOffsetY: single;
+    FWorldFactorX, FWorldFactorY, FWorldOffsetX, FWorldOffsetY, FAngle,
+    FWorldCos, FWorldSin: single;
     FDevScaleX, FDevScaleY: single;
     FWinSize, FViewSize: TSize;
     FWinOrg, FViewOrg: TPoint;
@@ -2019,7 +2021,7 @@ type
   // - use the GDIComment*() functions to append the corresponding
   // EMR_GDICOMMENT message to a metafile content
   TPdfGDIComment =
-    (pgcOutline, pgcBookmark, pgcLink, pgcLinkNoBorder);
+    (pgcOutline, pgcBookmark, pgcLink, pgcLinkNoBorder, pgcJpegDirect);
 
   /// a dictionary wrapper class for the PDF document information fields
   // - all values use the generic VCL string type, and will be encoded
@@ -2659,6 +2661,8 @@ procedure GDICommentOutline(MetaHandle: HDC; const aTitle: RawUTF8; aLevel: Inte
 procedure GDICommentLink(MetaHandle: HDC; const aBookmarkName: RawUTF8; const aRect: TRect;
   NoBorder: boolean);
 
+/// append a EMR_GDICOMMENT message for adding jpeg direct
+procedure GDICommentJpegDirect(MetaHandle: HDC; const aFileName: RawUTF8; const aRect: TRect);
 
 {$ifdef USE_PDFSECURITY}
 const
@@ -2942,6 +2946,13 @@ function ScriptApplyDigitSubstitution(
 
 implementation
 
+const
+  // those constants are not defined in earlier Delphi revisions
+  cPI: single = 3.141592654;
+  cPIdiv180: single = 0.017453292;
+  c180divPI: single = 57.29577951;
+  c2PI: double = 6.283185307;
+  cPIdiv2: double = 1.570796326;
 
 function RGBA(r, g, b, a: cardinal): COLORREF; {$ifdef HASINLINE}inline;{$endif}
 begin
@@ -3118,6 +3129,20 @@ begin // high(TPdfGDIComment)<$47 so it will never begin with GDICOMMENT_IDENTIF
   Windows.GdiComment(MetaHandle,L+(1+sizeof(TRect)),D);
 end;
 
+procedure GDICommentJpegDirect(MetaHandle: HDC; const aFileName: RawUTF8; const aRect: TRect);
+var Data: RawByteString;
+    D: PAnsiChar;
+    L: integer;
+begin // high(TPdfGDIComment)<$47 so it will never begin with GDICOMMENT_IDENTIFIER
+  L := length(aFileName);
+  SetLength(Data,L+(1+sizeof(TRect)));
+  D := pointer(Data);
+  D^ := AnsiChar(pgcJpegDirect);
+  PRect(D+1)^ := aRect;
+  MoveFast(pointer(aFileName)^,D[1+sizeof(TRect)],L);
+  Windows.GdiComment(MetaHandle,L+(1+sizeof(TRect)),D);
+end;
+
 {$ifndef DELPHI5OROLDER}
 // used by TPdfFontTrueType.PrepareForSaving()
 function GetTTCIndex(const FontName: RawUTF8; var ttcIndex: Word;
@@ -3234,7 +3259,6 @@ type
   TCoeff = array[0..3] of double;
   TCoeffArray = array[0..1, 0..3] of TCoeff;
 const
-  twoPi = 2 * PI;
   // coefficients for error estimation
   // while using cubic Bezier curves for approximation
   // 0 < b/a < 1/4
@@ -3292,11 +3316,11 @@ begin
   feta1 := ArcTan2(sin(lambda1) / fbRad, cos(lambda1) / faRad);
   feta2 := ArcTan2(sin(lambda2) / fbRad, cos(lambda2) / faRad);
   // make sure we have eta1 <= eta2 <= eta1 + 2 PI
-  feta2 := feta2 - (twoPi * floor((feta2 - feta1) / twoPi));
+  feta2 := feta2 - (c2PI * floor((feta2 - feta1) / c2PI));
   // the preceding correction fails if we have exactly et2 - eta1 = 2 PI
   // it reduces the interval to zero length
   if SameValue(feta1, feta2) then
-    feta2 := feta2 + twoPi;
+    feta2 := feta2 + c2PI;
   // start point
   fx1 := fcx + (faRad * cos(feta1));
   fy1 := fcy + (fbRad * sin(feta1));
@@ -3360,7 +3384,7 @@ begin
   n := 1;
   while (not found) and (n < 1024) do begin
     dEta := (feta2 - feta1) / n;
-    if dEta <= 0.5 * PI then begin
+    if dEta <= cPIdiv2 then begin
       etaB := feta1;
       found := true;
       for i := 0 to n - 1 do begin
@@ -4206,7 +4230,7 @@ function _PdfDateToDateTime(const AText: TPdfDate): TDateTime;
 var Y,M,D, H,MI,SS: cardinal;
 begin
   if Length(AText)<16 then
-    EConvertError.CreateRes(@SDateEncodeError);
+    raise EConvertError.CreateRes(@SDateEncodeError);
   Y := ord(AText[3])*1000+ord(AText[4])*100+ord(AText[5])*10+ord(AText[6])
     -(48+480+4800+48000);
   M := ord(AText[7])*10+ord(AText[8])-(48+480);
@@ -4218,7 +4242,7 @@ begin
   if (H<24) and (MI<60) and (SS<60) then // inlined EncodeTime()
     result := result + (H * (MinsPerHour * SecsPerMin * MSecsPerSec) +
       MI * (SecsPerMin * MSecsPerSec) + SS * MSecsPerSec) / MSecsPerDay else
-    EConvertError.CreateRes(@SDateEncodeError);
+    raise EConvertError.CreateRes(@SDateEncodeError);
 end;
 
 function _HasMultiByteString(Value: PAnsiChar): boolean;
@@ -5073,7 +5097,7 @@ constructor TPdfWrite.Create(Destination: TPdfDocument; DestStream: TStream);
 begin
   fDoc := Destination;
   fDestStream := DestStream;
-  fDestStreamPosition := fDestStream.Seek(0,soFromCurrent);
+  fDestStreamPosition := fDestStream.Seek(0,soCurrent);
   fCodePage := fDoc.CodePage;
   B := @Tmp;
   Bend := B+high(Tmp);
@@ -5103,7 +5127,7 @@ begin
     Save;
     result := '';
     SetLength(result,fDestStreamPosition);
-    fDestStream.Seek(0,soFromBeginning);
+    fDestStream.Seek(0,soBeginning);
     fDestStream.Read(pointer(result)^,fDestStreamPosition);
   end;
 end;
@@ -6664,7 +6688,7 @@ begin
   if ALogFont.lfWeight>=FW_SEMIBOLD then
     include(AStyle,pfsBold);
   result := SetFont(AName,ASize,AStyle,ALogFont.lfCharSet,-1,
-    (ALogFont.lfPitchAndFamily and 3) = FIXED_PITCH);
+    ALogFont.lfPitchAndFamily and TMPF_FIXED_PITCH=0);
 end;
 
 procedure TPdfCanvas.TextOut(X, Y: Single; const Text: PDFString);
@@ -9922,6 +9946,9 @@ end;
 procedure TPdfEnum.HandleComment(Kind: TPdfGDIComment; P: PAnsiChar; Len: integer);
 var Text: RawUTF8;
     W: integer;
+    Img: TPdfImage;
+    ImgName: PDFString;
+    ImgRect: TPdfRect;
 begin
   try
     case Kind of
@@ -9942,6 +9969,18 @@ begin
           W := 1 else
           W := 0;
         Canvas.Doc.CreateLink(Canvas.RectI(PRect(P)^,true),Text,abSolid,W);
+      end;
+      pgcJpegDirect:
+      if Len>Sizeof(TRect) then begin
+        SetString(Text,P+SizeOf(TRect),Len-SizeOf(TRect));
+        ImgName := 'SynImgJpg'+PDFString(crc32cUTF8ToHex(Text));
+        if Canvas.Doc.GetXObject(ImgName) = nil then
+        begin
+          Img := TPdfImage.CreateJpegDirect(Canvas.Doc,UTF8ToString(Text));
+          Canvas.Doc.RegisterXObject(Img,ImgName);
+        end;
+        ImgRect := Canvas.RectI(PRect(P)^,true);
+        Canvas.DrawXObject(ImgRect.Left,ImgRect.Top,ImgRect.Right-ImgRect.Left,ImgRect.Bottom-ImgRect.Top,ImgName);
       end;
     end;
   except
@@ -10107,10 +10146,40 @@ begin
     end;
     // use transformation
     ScaleXForm := WorldTransform;
-    FWorldFactorX := WorldTransform.eM11;
-    FWorldFactorY := WorldTransform.eM22;
-    FWorldOffsetX := WorldTransform.eDx;
-    FWorldOffsetY := WorldTransform.eDy;
+    if (ScaleXForm.eM11 > 0) and
+       (ScaleXForm.eM22 > 0) and
+       (ScaleXForm.eM12 = 0) and
+       (ScaleXForm.eM21 = 0) then
+    begin // Scale
+      FWorldFactorX := ScaleXForm.eM11;
+      FWorldFactorY := ScaleXForm.eM22;
+      FWorldOffsetX := WorldTransform.eDx;
+      FWorldOffsetY := WorldTransform.eDy;
+    end
+    else
+    if (ScaleXForm.eM22 = ScaleXForm.eM11) and
+       (ScaleXForm.eM21 = -ScaleXForm.eM12) then
+    begin // Rotate
+      FAngle := ArcSin(ScaleXForm.eM12) * c180divPI;
+      FWorldCos := ScaleXForm.eM11;
+      FWorldSin := ScaleXForm.eM12;
+    end
+    else
+    if (ScaleXForm.eM11 = 0) and
+       (ScaleXForm.eM22 = 0) and
+       ((ScaleXForm.eM12 <> 0) or
+       (ScaleXForm.eM21 <> 0)) then
+    begin //Shear
+
+    end
+    else
+    if ((ScaleXForm.eM11 < 0) or
+        (ScaleXForm.eM22 < 0)) and
+       (ScaleXForm.eM12 = 0) and
+       (ScaleXForm.eM21 = 0) then
+    begin //Reflection
+
+    end;
   end;
 end;
 
@@ -10423,7 +10492,7 @@ begin
 {$endif}
     Canvas.BeginText;
     if font.spec.angle<>0 then begin
-      a := font.spec.angle*(PI/180);
+      a := font.spec.angle*cPIdiv180;
       acos := cos(a);
       asin := sin(a);
       PosX := 0;
@@ -10431,7 +10500,25 @@ begin
       Canvas.SetTextMatrix(acos, asin, -asin, acos,
         Canvas.I2X(Posi.X-Round(W*acos+H*asin)),
         Canvas.I2Y(Posi.Y-Round(H*acos-W*asin)));
-    end else begin
+    end else
+    if (WorldTransform.eM11 = WorldTransform.eM22) and
+       (WorldTransform.eM12 = -WorldTransform.eM21) and
+       not SameValue(ArcCos(WorldTransform.eM11), 0, 0.0001) then
+    begin
+      PosX := 0;
+      PosY := 0;
+      if SameValue(ArcCos(WorldTransform.eM11), 0, 0.0001) or       //0deg
+         SameValue(ArcCos(WorldTransform.eM11), cPI, 0.0001) then   //180deg
+        Canvas.SetTextMatrix(WorldTransform.eM11, WorldTransform.eM12, WorldTransform.eM21, WorldTransform.eM22,
+          Canvas.I2X(posi.X * WorldTransform.eM11 + posi.Y * WorldTransform.eM21 + WorldTransform.eDx),
+          Canvas.I2y(posi.X * WorldTransform.eM12 + posi.Y * WorldTransform.eM22 + WorldTransform.eDy))
+      else
+        Canvas.SetTextMatrix(-WorldTransform.eM11, -WorldTransform.eM12, -WorldTransform.eM21, -WorldTransform.eM22,
+          Canvas.I2X(posi.X * WorldTransform.eM11 + posi.Y * WorldTransform.eM21 + WorldTransform.eDx),
+          Canvas.I2y(posi.X * WorldTransform.eM12 + posi.Y * WorldTransform.eM22 + WorldTransform.eDy));
+    end
+    else
+    begin
       acos := 0;
       asin := 0;
       if Canvas.fViewSize.cx>0 then
@@ -10598,7 +10685,7 @@ begin
       {$endif}
         SaveToStream(FWriter.fDestStream); // with CompressionQuality recompress
       end;
-    FWriter.fDestStreamPosition := FWriter.fDestStream.Seek(0,soFromCurrent);
+    FWriter.fDestStreamPosition := FWriter.fDestStream.Seek(0,soCurrent);
   end else begin
     if aImage.InheritsFrom(TBitmap) then
       B := TBitmap(aImage) else
@@ -10682,7 +10769,7 @@ begin
     jpeg.Read(b,1);
     case b of
       $C0..$C3: begin
-        jpeg.Seek(3,soFromCurrent);
+        jpeg.Seek(3,soCurrent);
         jpeg.Read(w,2);
         height := swap(w);
         jpeg.Read(w,2);
@@ -10695,12 +10782,12 @@ begin
       $FF:
         jpeg.Read(b,1);
       $D0..$D9, $01: begin
-        jpeg.Seek(1,soFromCurrent);
+        jpeg.Seek(1,soCurrent);
         jpeg.Read(b,1);
       end;
       else begin
         jpeg.Read(w,2);
-        jpeg.Seek(swap(w)-2, soFromCurrent);
+        jpeg.Seek(swap(w)-2, soCurrent);
         jpeg.Read(b,1);
       end;
     end;
@@ -10720,7 +10807,7 @@ begin
   FFilter := 'DCTDecode';
   FWriter.Save; // flush to allow direct access to fDestStream
   FWriter.Add(aJpegFile.Memory,Len);
-  FWriter.fDestStreamPosition := FWriter.fDestStream.Seek(0,soFromCurrent);
+  FWriter.fDestStreamPosition := FWriter.fDestStream.Seek(0,soCurrent);
   FAttributes.AddItem('Width',fPixelWidth);
   FAttributes.AddItem('Height',fPixelHeight);
   case BitDepth of
@@ -10745,7 +10832,7 @@ begin
   FResources.AddItem('ProcSet',TPdfArray.CreateNames(nil,['PDF','Text','ImageC']));
   FPage := TPdfPage.Create(nil);
   FCanvas := TPdfCanvas.Create(aDoc);
-  FCanvas.FPage:=FPage;
+  FCanvas.FPage := FPage;
   FCanvas.FPageFontList := FFontList;
   FCanvas.FContents := self;
   FCanvas.FFactor := 1;
@@ -10925,12 +11012,14 @@ procedure TPdfEncryptionRC4MD5.EncodeBuffer(const BufIn; var BufOut; Count: card
     fLastObjectNumber := fDoc.fCurrentObjectNumber;
     fLastGenerationNumber := fDoc.fCurrentGenerationNumber;
   end;
+var work: TRC4; // Encrypt() changes the RC4 state -> local copy for reuse
 begin
   if (fDoc.fCurrentObjectNumber<>fLastObjectNumber) or
      (fDoc.fCurrentGenerationNumber<>fLastGenerationNumber) then
     // a lot of string encodings have the same context
     ComputeNewRC4Key;
-  fLastRC4Key.Encrypt(BufIn,BufOut,Count); // RC4 allows in-place encryption :)
+  work := fLastRC4Key;
+  work.Encrypt(BufIn,BufOut,Count); // RC4 allows in-place encryption :)
 end;
 
 {$endif USE_PDFSECURITY}
