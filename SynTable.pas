@@ -6,7 +6,7 @@ unit SynTable;
 (*
     This file is part of Synopse framework.
 
-    Synopse framework. Copyright (C) 2021 Arnaud Bouchez
+    Synopse framework. Copyright (C) 2022 Arnaud Bouchez
       Synopse Informatique - https://synopse.info
 
   *** BEGIN LICENSE BLOCK *****
@@ -25,7 +25,7 @@ unit SynTable;
 
   The Initial Developer of the Original Code is Arnaud Bouchez.
 
-  Portions created by the Initial Developer are Copyright (C) 2021
+  Portions created by the Initial Developer are Copyright (C) 2022
   the Initial Developer. All Rights Reserved.
 
   Contributor(s):
@@ -3904,7 +3904,7 @@ type
     function SaveToBuffer: RawByteString;
     /// retrieve the time bias (in minutes) for a given date/time on a TzId
     function GetBiasForDateTime(const Value: TDateTime; const TzId: TTimeZoneID;
-      out Bias: integer; out HaveDaylight: boolean): boolean;
+      out Bias: integer; out HaveDaylight: boolean; DateIsUTC: boolean=false): boolean;
     /// retrieve the display text corresponding to a TzId
     // - returns '' if the supplied TzId is not recognized
     function GetDisplay(const TzId: TTimeZoneID): RawUTF8;
@@ -9139,6 +9139,14 @@ end;
 // adapted from https://github.com/simdjson/simdjson - Apache License 2.0
 function IsValidUtf8LenAvx2(source: PUtf8Char; sourcelen: PtrInt): boolean;
   {$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
+        test    source, source
+        jz      @ok
+        test    sourcelen, sourcelen
+        jle     @ok
+        {$ifdef win64} // this ABI doesn't consider rsi/rdi as volatile
+        push    rsi
+        push    rdi
+        {$endif}
         push    rbp
         mov     r8, source
         mov     rdx, sourcelen
@@ -9207,10 +9215,16 @@ function IsValidUtf8LenAvx2(source: PUtf8Char; sourcelen: PtrInt): boolean;
         test    eax, eax
         jne     @last
 @ended: vpor    ymm5, ymm5, ymm4
-        vptest  ymm5, ymm5
+@final: vptest  ymm5, ymm5
         sete    al
         vzeroupper
-        leave
+        leave      // mov rsp,rbp + pop rbp
+        {$ifdef win64}
+        pop     rdi
+        pop     rsi
+        {$endif}
+        ret
+@ok:    mov     al, 1
         ret
 @small: vpxor   xmm4, xmm4, xmm4
         xor     esi, esi
@@ -9322,11 +9336,7 @@ function IsValidUtf8LenAvx2(source: PUtf8Char; sourcelen: PtrInt): boolean;
         vpxor   ymm1, ymm1, ymm8
         vpor    ymm0, ymm0, ymm1
         vpor    ymm5, ymm0, ymm5
-        vptest  ymm5, ymm5
-        sete    al
-        vzeroupper
-        leave
-        ret
+        jmp     @final
         align 16
 @20:    dq 2020202020202020H
         dq 2020202020202020H
@@ -17512,7 +17522,8 @@ begin
 end;
 
 function TSynTimeZone.GetBiasForDateTime(const Value: TDateTime;
-  const TzId: TTimeZoneID; out Bias: integer; out HaveDaylight: boolean): boolean;
+  const TzId: TTimeZoneID; out Bias: integer; out HaveDaylight: boolean;
+  DateIsUTC: boolean): boolean;
 var ndx: integer;
     d: TSynSystemTime;
     tzi: PTimeZoneInfo;
@@ -17541,6 +17552,10 @@ begin
     HaveDaylight := true;
     std := tzi.change_time_std.EncodeForTimeChange(d.Year);
     dlt := tzi.change_time_dlt.EncodeForTimeChange(d.Year);
+    if DateIsUTC then begin // std shifts by the DST bias, dst by STD
+      std := ((std*MinsPerDay)+tzi.Bias+tzi.bias_dlt)/MinsPerDay;
+      dlt := ((dlt*MinsPerDay)+tzi.Bias+tzi.bias_std)/MinsPerDay;
+    end;
     if std<dlt then
       if (std<=Value) and (Value<dlt) then
         Bias := tzi.Bias+tzi.bias_std else
@@ -17559,7 +17574,7 @@ var Bias: integer;
 begin
   if (self=nil) or (TzId='') then
     result := UtcDateTime else begin
-    GetBiasForDateTime(UtcDateTime,TzId,Bias,HaveDaylight);
+    GetBiasForDateTime(UtcDateTime,TzId,Bias,HaveDaylight,{DateIsUTC=}true);
     result := ((UtcDateTime*MinsPerDay)-Bias)/MinsPerDay;
   end;
 end;

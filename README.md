@@ -1,13 +1,13 @@
 SynPDF
 ======
 
-Synopse PDF engine is a fully featured *Open Source* PDF document creation library for Delphi and FPC, embedded in one unit.
+Synopse PDF engine is a fully featured *Open Source* PDF document creation library for Delphi, embedded in one unit.
 
 It's used e.g. in our [*mORMot* framework](https://github.com/synopse/mORMot), for creating PDF files from generated reports. 
 But you can use it stand-alone, without our main ORM/SOA framework.
 
 If you download the whole *mORMot* source code, you do not need this separate package: ensure you get rid of any existing separated *SynPDF* installation, and use the PDF units as available in the main *mORMot* trunk.
-This *SynPDF* distribution/GitHub account targets only people needing PDF writing, without other *mORMot* features, under Delphi (some files may be missing for FPC).
+This *SynPDF* distribution/GitHub account targets only people needing PDF writing, without other *mORMot* features, under Delphi.
 
 If you plan using any part of the framework (e.g. *SynLog*, *SynDB* or the *ORM*/*SOA*), don't use this repository, but use the main [*mORMot* framework](https://github.com/synopse/mORMot). Having the two repositories on the same environement may be a source of unexpected version conflict. Just use and trust the main *mORMot* repository, which will be updated much more often.
 
@@ -15,8 +15,8 @@ Features
 --------
 
   * Pure Delphi code, with no external .dll, and adding very small code size to your executable;
-  * Targets Delphi 6 and up, including Unicode versions of Delphi, and latest version of FPC, for Win32 and Win64 platforms, with full source code provided;
-  * Includes most vectorial drawing commands, including text,lines or curves;
+  * Targets Delphi 6 and up, including Unicode versions of Delphi, for Win32 and Win64 platforms, with full source code provided;
+  * Includes most vectorial drawing commands, including text, lines or curves;
   * Renders bitmaps, and metafiles (even most .emf files with clipping and regioning);
   * Introduce metadata, bookmarks and outline information;
   * Produce very small .pdf files;
