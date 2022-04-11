@@ -112,8 +112,8 @@ unit SynPdf;
 { - if defined, the PDF engine will use the Windows Uniscribe API to
   render Ordering and Shaping of the text (useful for Hebrew, Arabic and
   some Asiatic languages)
-  - this feature need the TPdfDocument.UseUniscribe property to be forced to true
-  according to the language of the text you want to render
+  - this feature need the TPdfDocument.UseUniscribe property to be forced to
+  true according to the language of the text you want to render
   - can be undefined to safe some KB if you're sure you won't need it }
 {$ifdef NO_USE_UNISCRIBE}
   { this special conditional can be set globaly for an application which doesn't
@@ -7919,7 +7919,11 @@ function TPdfFontTrueType.FindOrAddUsedWideChar(aWideChar: WideChar): integer;
 var n, i: integer;
     aSymbolAnsiChar: AnsiChar;
 begin
-  self := WinAnsiFont;
+  if WinAnsiFont <> self then // WinAnsiFont.fUsedWide[] = glyphs for ShowText 
+  begin
+    result := WinAnsiFont.FindOrAddUsedWideChar(aWideChar);
+    exit;
+  end;
   result := fUsedWideChar.Add(ord(aWideChar));
   if result<0 then begin
     result := -(result+1); // this WideChar was already existing -> return index
@@ -8075,14 +8079,15 @@ begin
 end;
 
 function TPdfFontTrueType.GetWideCharWidth(aWideChar: WideChar): Integer;
+var ref: TPdfFontTrueType;
 begin
-  self := self.WinAnsiFont; // we need fUsedWide[] to be used glyphs
+  ref := WinAnsiFont; // WinAnsiFont.fUsedWide[] = glyphs used by ShowText
   result := WideCharToWinAnsi(ord(aWideChar));
   if result>=0 then
-    if (fWinAnsiWidth<>nil) and (result>=32) then
-      result := fWinAnsiWidth[AnsiChar(result)] else
-      result := fDefaultWidth else
-      result := fUsedWide[FindOrAddUsedWideChar(aWideChar)].Width;
+    if (ref.fWinAnsiWidth<>nil) and (result>=32) then
+      result := ref.fWinAnsiWidth[AnsiChar(result)] else
+      result := ref.fDefaultWidth else
+      result := ref.fUsedWide[ref.FindOrAddUsedWideChar(aWideChar)].Width;
 end;
 
 { font subset embedding using Windows XP CreateFontPackage() FontSub.dll
