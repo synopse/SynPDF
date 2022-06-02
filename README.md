@@ -11,6 +11,8 @@ This *SynPDF* distribution/GitHub account targets only people needing PDF writin
 
 If you plan using any part of the framework (e.g. *SynLog*, *SynDB* or the *ORM*/*SOA*), don't use this repository, but use the main [*mORMot* framework](https://github.com/synopse/mORMot). Having the two repositories on the same environement may be a source of unexpected version conflict. Just use and trust the main *mORMot* repository, which will be updated much more often.
 
+**For long-term support, and FPC compatibility, check the [*mORMot 2* mormot.ui.pdf.pas unit](https://github.com/synopse/mORMot2/blob/master/src/ui/mormot.ui.pdf.pas)
+
 Features
 --------
 
@@ -20,7 +22,7 @@ Features
   * Renders bitmaps, and metafiles (even most .emf files with clipping and regioning);
   * Introduce metadata, bookmarks and outline information;
   * Produce very small .pdf files;
-  * Optionally [encrypt and secure the .pdf content](http://blog.synopse.info/post/2013/06/19/SynPDF-now-implements-40-bit-and-128-bit-security) using 40 bit or 128 bit keys;
+  * Optionally [encrypt and secure the .pdf content](http://blog.synopse.info/post?2013/06/19/SynPDF-now-implements-40-bit-and-128-bit-security) using 40 bit or 128 bit keys;
   * Fast file generation with low memory overhead (tested with several thousands of pages);
   * Access a true VCL TCanvas instance to create the PDF content;
   * Optionally embed True Type fonts subsets;
@@ -35,7 +37,7 @@ Sample Code
 In fact, you have at least three ways of generating pdfs using the library:
   * [Directly call](https://synopse.info/forum/viewtopic.php?pid=370#p370) of a `TPdfCanvas` as published by a `TPdfDocument` instance - this is the most direct but also more difficult way of rendering;
   * [Use regular VCL `TCanvas` methods](https://synopse.info/forum/viewtopic.php?pid=1909#p1909) thanks to `TMetaFile` support - see `TPdfDocumentGDI.VCLCanvas` property and the `TPdfCanvas.RenderMetaFile` method - this is very easy if you want to use "regular" `TCanvas` methods to draw the page content, especially if you have some existing printing code;
-  * [Use `TGDIPages` of the supplied `mORMotReport.pas` unit](http://blog.synopse.info/post/2010/06/30/Making-report-from-code) (extracted from our *mORMot* ORM/SOA framework) to easily create the content from code, with some report-oriented methods (including complex rtf with `TGDIPages.AppendRichEdit`) - for basic reporting features, it is pretty much the solution.
+  * [Use `TGDIPages` of the supplied `mORMotReport.pas` unit](http://blog.synopse.info/post?2010/06/30/Making-report-from-code) (extracted from our *mORMot* ORM/SOA framework) to easily create the content from code, with some report-oriented methods (including complex rtf with `TGDIPages.AppendRichEdit`) - for basic reporting features, it is pretty much the solution.
 
 The 2nd and 3rd ways are preferred, for most applications.
 
