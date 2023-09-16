@@ -6,7 +6,7 @@ unit SynZip;
 {
     This file is part of Synopse framework.
 
-    Synopse framework. Copyright (C) 2022 Arnaud Bouchez
+    Synopse framework. Copyright (C) 2023 Arnaud Bouchez
       Synopse Informatique - https://synopse.info
 
   *** BEGIN LICENSE BLOCK *****
@@ -25,7 +25,7 @@ unit SynZip;
 
   The Initial Developer of the Original Code is Arnaud Bouchez.
 
-  Portions created by the Initial Developer are Copyright (C) 2022
+  Portions created by the Initial Developer are Copyright (C) 2023
   the Initial Developer. All Rights Reserved.
 
   Contributor(s):
@@ -208,11 +208,11 @@ type
 {$endif}
 {$ifdef FPC}
   ZipPtrUInt = PtrUInt;
-  ZipPtrInt = PtrInt;
+  ZipPtrInt  = PtrInt;
 {$else}
   /// as available in FPC
   ZipPtrUInt = {$ifdef CPU64}UInt64{$else}cardinal{$endif};
-  ZipPtrInt = {$ifdef CPU64}Int64{$else}integer{$endif};
+  ZipPtrInt  = {$ifdef CPU64}Int64{$else}integer{$endif};
 {$endif}
 
 /// ZLib INFLATE decompression from memory into a AnsiString (ZipString) variable
@@ -381,9 +381,30 @@ type
     function AlgoID: integer; // 1..15  (1=SynLZ e.g.) from flags
     procedure SetAlgoID(Algorithm: integer);
     function GetUTF8FileName: boolean;
+    function ExtraUnicodeFileNamePos: PAnsiChar;
     procedure SetUTF8FileName;
     procedure UnSetUTF8FileName;
   end;
+
+  TFileInfoExtra = packed record
+    id: word;
+    size: word;
+    // here is extra data of size `size`
+  end;
+  PFileInfoExtra = ^TFileInfoExtra;
+
+// See Info-ZIP Unicode Path Extra Field at https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT
+const
+  FileInfoExtra_UnicodePathId = $7075;
+type
+  TFileInfoExtraName = packed record
+    id: word; // UPath 0x7075
+    size: word;
+    version: byte; // version of this extra field, currently 1
+    nameCRC32: cardinal; // File Name Field CRC32 Checksum
+    utf8Name: AnsiChar; // UTF-8 version of the entry File Name of `size` bytes length
+  end;
+  PFileInfoExtraName = ^TFileInfoExtraName;
 
   /// directory file information structure, as used in .zip file format
   // - used at the end of the zip file to recap all entries
@@ -709,6 +730,8 @@ type
     // - those will be appended after the data blocks at the end of the .zip file
     Entry: array of record
       /// the file name, as stored in the .zip internal directory
+      // - the path delimiter is forced to '/' just before writing to disk,
+      // as requested by 4.4.17 of reference PKware appnote
       intName: ZipString;
       /// the corresponding file header
       fhr: TFileHeader;
@@ -761,7 +784,7 @@ type
     // add it to the zip file
     // - if Recursive is TRUE, would include files from nested sub-folders
     procedure AddFolder(const FolderName: TFileName; const Mask: TFileName=ZIP_FILES_ALL;
-      Recursive: boolean=true; CompressLevel: integer=6);
+      Recursive: boolean=true; CompressLevel: integer=6; ZipFolder: TFileName='');
     /// release associated memory, and close destination file
     destructor Destroy; override;
   end;
@@ -861,6 +884,8 @@ begin
 end;
 
 function TZipWriteAbstract.InternalAdd(const zipName: TFileName; Buf: pointer; Size: integer): cardinal;
+var
+  i: integer; // ZipPtrInt make a compilation error on Delphi Win64 :(
 begin
   with Entry[Count] do begin
     fHr.signature := ENTRY_SIGNATURE_INC; // +1 to avoid finding it in the exe
@@ -889,6 +914,9 @@ begin
     fhr.fileInfo.extraLen := 0; // source may have something here
     InternalWrite(fMagic,sizeof(fMagic));
     InternalWrite(fhr.fileInfo,sizeof(fhr.fileInfo));
+    for i := 1 to integer(fhr.fileInfo.nameLen) do
+      if intName[i]='\' then
+        intName[i] := '/'; // as stated by 4.4.17 of reference PKware appnote
     InternalWrite(pointer(intName)^,fhr.fileInfo.nameLen);
   end;
   if Buf<>nil then begin
@@ -999,7 +1027,7 @@ begin
 end;
 
 procedure TZipWrite.AddFolder(const FolderName: TFileName; const Mask: TFileName;
-  Recursive: boolean; CompressLevel: integer);
+  Recursive: boolean; CompressLevel: integer; ZipFolder: TFileName);
 procedure RecursiveAdd(const fileDir,zipDir: TFileName);
 var f: TSearchRec;
 begin
@@ -1027,11 +1055,13 @@ begin
   end;
 end;
 begin
-  RecursiveAdd(IncludeTrailingPathDelimiter(FolderName),'');
+  if ZipFolder<>'' then
+    ZipFolder := IncludeTrailingPathDelimiter(ZipFolder);
+  RecursiveAdd(IncludeTrailingPathDelimiter(FolderName),ZipFolder);
 end;
 
-procedure TZipWrite.AddDeflated(const aFileName: TFileName; RemovePath: boolean=true;
-  CompressLevel: integer=6; ZipName: TFileName='');
+procedure TZipWrite.AddDeflated(const aFileName: TFileName; RemovePath: boolean;
+  CompressLevel: integer; ZipName: TFileName);
 var {$ifdef MSWINDOWS}
     Time: TFileTime;
     FileTime: LongRec;
@@ -1048,14 +1078,14 @@ begin
     if ZipName='' then
       if RemovePath then
         ZipName := ExtractFileName(aFileName) else
-    {$ifdef MSWINDOWS}
+        {$ifdef MSWINDOWS}
         ZipName := aFileName;
-    GetFileTime(S.Handle,nil,nil,@Time);
-    FileTimeToLocalFileTime(Time,Time);
-    FileTimeToDosDateTime(Time,FileTime.Hi,FileTime.Lo);
-    {$else}
+        GetFileTime(S.Handle,nil,nil,@Time);
+        FileTimeToLocalFileTime(Time,Time);
+        FileTimeToDosDateTime(Time,FileTime.Hi,FileTime.Lo);
+        {$else}
         ZipName := StringReplace(aFileName,'/','\',[rfReplaceAll]);
-    {$endif}
+        {$endif}
     Size := S.Size;
     if Size64.Hi<>0 then
       raise ESynZipException.CreateFmt('%s file too big for .zip',[aFileName]);
@@ -1199,6 +1229,7 @@ var lhr: PLastHeader;
     i,j: integer;
     {$ifndef DELPHI5OROLDER}
     tmp: UTF8String;
+    P: PAnsiChar;
     {$else}
     tmp: ZipString;
     {$endif}
@@ -1243,9 +1274,16 @@ begin
         if storedName[j]='/' then // normalize path delimiter
           PAnsiChar(Pointer(tmp))[j] := '\';
       {$ifndef DELPHI5OROLDER} // Delphi 5 lacks UTF-8 functions -> 7 bit
+      P := infoLocal^.ExtraUnicodeFileNamePos;
       if infoLocal^.GetUTF8FileName then
         // decode UTF-8 file name into native string/TFileName type
-        zipName := TFileName(UTF8Decode(tmp)) else
+        zipName := TFileName(UTF8Decode(tmp))
+      else if P <> nil then begin
+        // use unicode path stored in extra
+        SetString(tmp, PAnsiChar(@PFileInfoExtraName(P).utf8Name),
+          PFileInfoExtraName(P).size - 5{version + nameCrc});
+        zipName := TFileName(UTF8Decode(tmp));
+      end else
       {$endif DELPHI5OROLDER}
       begin
         {$ifdef MSWINDOWS} // decode OEM/DOS file name into native encoding
@@ -5391,6 +5429,27 @@ end;
 function TFileInfo.GetUTF8FileName: boolean;
 begin // from PKware appnote, Bit 11: Language encoding flag (EFS)
   result := (flags and (1 shl 11))<>0;
+end;
+
+function TFileInfo.ExtraUnicodeFileNamePos: PAnsiChar;
+var
+  pExtraStart, P: PAnsiChar;
+begin
+  Result := nil;
+  if extraLen = 0 then
+    exit;
+  // points to beginning of the extra
+  pExtraStart := PAnsiChar(pointer(@Self)) + sizeof(Self) + NameLen;
+  P := pExtraStart;
+  repeat
+    if PFileInfoExtra(P).id = FileInfoExtra_UnicodePathId then begin
+      Result := P;
+      break;
+    end else if P + sizeof(word) * 2 + PFileInfoExtra(P).size - pExtraStart < extraLen then
+      inc(P, PFileInfoExtra(P).size + sizeof(word) * 2)
+    else
+      break; // no extra anymore
+  until false;
 end;
 
 procedure TFileInfo.SetUTF8FileName;

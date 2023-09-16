@@ -6,7 +6,7 @@ unit SynPdf;
 {
     This file is part of Synopse framework.
 
-    Synopse framework. Copyright (C) 2022 Arnaud Bouchez
+    Synopse framework. Copyright (C) 2023 Arnaud Bouchez
       Synopse Informatique - https://synopse.info
 
   *** BEGIN LICENSE BLOCK *****
@@ -25,7 +25,7 @@ unit SynPdf;
 
   The Initial Developer of the Original Code is Arnaud Bouchez.
 
-  Portions created by the Initial Developer are Copyright (C) 2022
+  Portions created by the Initial Developer are Copyright (C) 2023
   the Initial Developer. All Rights Reserved.
 
   Contributor(s):
@@ -10728,14 +10728,6 @@ begin
       end else
         Canvas.ShowText(pointer(tmp));
     Canvas.EndText;
-    case Positioning of
-    tpSetTextJustification:
-      if nspace>0 then
-        Canvas.SetWordSpace(0);
-    tpKerningFromAveragePosition:
-      if hscale<>100 then
-        Canvas.SetHorizontalScaling(100); //reset hor. scaling
-    end;
     // handle underline or strike out styles (direct draw PDF lines on canvas)
     if font.LogFont.lfUnderline<>0 then
       DrawLine(Posi, aSize / 8 / Canvas.GetWorldFactorX / Canvas.FDevScaleX);
@@ -10745,6 +10737,14 @@ begin
     if WithClip then begin
       Canvas.GRestore;
       fFillColor := -1; // force set drawing color
+    end;
+    case Positioning of // reset to be done after Canvas.GRestore
+    tpSetTextJustification:
+      if nspace>0 then
+        Canvas.SetWordSpace(0);
+    tpKerningFromAveragePosition:
+      if hscale<>100 then
+        Canvas.SetHorizontalScaling(100); 
     end;
     if not Canvas.FNewPath then begin
       if WithClip then
