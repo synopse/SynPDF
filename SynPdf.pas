@@ -6,7 +6,7 @@ unit SynPdf;
 {
     This file is part of Synopse framework.
 
-    Synopse framework. Copyright (C) 2023 Arnaud Bouchez
+    Synopse framework. Copyright (c) Arnaud Bouchez
       Synopse Informatique - https://synopse.info
 
   *** BEGIN LICENSE BLOCK *****
@@ -25,7 +25,7 @@ unit SynPdf;
 
   The Initial Developer of the Original Code is Arnaud Bouchez.
 
-  Portions created by the Initial Developer are Copyright (C) 2023
+  Portions created by the Initial Developer are Copyright (c)
   the Initial Developer. All Rights Reserved.
 
   Contributor(s):
@@ -2294,7 +2294,7 @@ type
     procedure CreateAssociatedUnicodeFont;
     // update font description from used chars
     procedure PrepareForSaving;
-    // low level adding of a glyph (returns the real glyph index found, 0 if none)
+    // low level adding of a glyph (returns the real glyph index found, aGlyph if none)
     function GetAndMarkGlyphAsUsed(aGlyph: word): word;
   public
     /// create the TrueType font object instance
@@ -8002,9 +8002,9 @@ begin
       if fUsedWide[i].Glyph=aGlyph then begin
         result := WinAnsiFont.fUsedWide[
           FindOrAddUsedWideChar(WideChar(fUsedWideChar.Values[i]))].Glyph;
-        exit; // result may be 0 if this glyph doesn't exist in the CMAP content
+        exit;
       end;
-  result := 0; // returns 0 if not found
+  // result may be aGlyph if this glyph doesn't exist in the CMAP content
 end;
 
 constructor TPdfFontTrueType.Create(ADoc: TPdfDocument; AFontIndex: integer;
