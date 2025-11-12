@@ -59317,6 +59317,7 @@ begin
     {$elseif defined(VER340)}'Delphi 10.4 Sydney'
     {$elseif defined(VER350)}'Delphi 11 Alexandria'
     {$elseif defined(VER360)}'Delphi 11.1 Next'
+    {$elseif defined(VER370)}'Delphi 13'
     {$ifend}
   {$endif CONDITIONALEXPRESSIONS}
 {$endif FPC}
