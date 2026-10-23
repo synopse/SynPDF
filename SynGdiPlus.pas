@@ -2401,6 +2401,19 @@ begin // GDI+ can't draw twisted rects -> normalize such values
   end;
 end;
 
+{$ifdef FPC}
+const
+  // not defined by SynFPCMetaFile
+  EMR_MODIFYWORLDTRANSFORM = 36;
+  EMR_EXTCREATEPEN = 95;
+
+// FPC declares CombineTransform(LPXFORM; var XFORM; var XFORM): match Delphi
+function CombineTransform(var dest: TXForm; const a, b: TXForm): BOOL;
+begin
+  result := Windows.CombineTransform(@dest, PXForm(@a)^, PXForm(@b)^);
+end;
+{$endif FPC}
+
 // var tempWC: PWideChar; // for debug
 
 /// EMF enumeration callback function, called from GDI
