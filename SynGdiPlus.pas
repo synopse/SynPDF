@@ -2281,7 +2281,7 @@ var i: integer;
 begin
   GetMem(PI,n*8);
   for i := 0 to n*2-1 do
-    PI^[i] := PW^[i];
+    PI^[i] := SmallInt(PW^[i]);
 end;
 
 
@@ -2309,6 +2309,7 @@ type
     fontColor, fontAlign: integer;
     fontSpec: TFontSpec;
     BkMode, BkColor: cardinal;
+    WorldTransform: TXForm;
   end;
 
   /// internal data used by EnumEMFFunc() callback function
@@ -2350,7 +2351,7 @@ type
     UseDrawString: boolean;
     procedure SaveDC;
     procedure RestoreDC;
-    procedure ScaleMatrix(matrixOrg: THandle);
+    procedure ScaleMatrix;
     procedure CreatePenObj(index: integer; Color, Width, Style: Cardinal);
     procedure DeleteObj(index: integer);
     procedure EnumerateEnd;
@@ -2400,14 +2401,27 @@ begin // GDI+ can't draw twisted rects -> normalize such values
   end;
 end;
 
+{$ifdef FPC}
+const
+  // not defined by SynFPCMetaFile
+  EMR_MODIFYWORLDTRANSFORM = 36;
+  EMR_EXTCREATEPEN = 95;
+
+// FPC declares CombineTransform(LPXFORM; var XFORM; var XFORM): match Delphi
+function CombineTransform(var dest: TXForm; const a, b: TXForm): BOOL;
+begin
+  result := Windows.CombineTransform(@dest, PXForm(@a)^, PXForm(@b)^);
+end;
+{$endif FPC}
+
 // var tempWC: PWideChar; // for debug
 
 /// EMF enumeration callback function, called from GDI
 // - draw most content with GDI+ functions
 function EnumEMFFunc(DC: HDC; var Table: THandleTable; Rec: PEnhMetaRecord;
    NumObjects: DWord; var Ref: TGDIPlusEnum): LongBool; stdcall;
-var X: TXForm;
-    matrixOrg, path: THandle;
+var X, XF: TXForm;
+    path: THandle;
     P32: PIntegerArray;
 begin
   result := true;
@@ -2436,10 +2450,28 @@ begin
   EMR_SETBKCOLOR:
     BkColor := PEMRSetBkColor(Rec)^.crColor;
   EMR_SETWORLDTRANSFORM: begin
-      with PEMRSetWorldTransform(Rec)^.xform do
-        Ref.gdip.CreateMatrix2(eM11,eM12,eM21,eM22,eDx,eDy,matrixOrg);
-      Ref.ScaleMatrix(matrixOrg);
-      Ref.gdip.DeleteMatrix(matrixOrg);
+      WorldTransform := PEMRSetWorldTransform(Rec)^.xform;
+      Ref.ScaleMatrix;
+    end;
+  EMR_MODIFYWORLDTRANSFORM: begin
+      with PEMRModifyWorldTransform(Rec)^ do
+      case iMode of
+      MWT_IDENTITY: begin
+        FillChar(WorldTransform,sizeof(WorldTransform),0);
+        WorldTransform.eM11 := 1;
+        WorldTransform.eM22 := 1;
+      end;
+      MWT_LEFTMULTIPLY: begin
+        CombineTransform(XF,xform,WorldTransform);
+        WorldTransform := XF;
+      end;
+      MWT_RIGHTMULTIPLY: begin
+        CombineTransform(XF,WorldTransform,xform);
+        WorldTransform := XF;
+      end;
+      else WorldTransform := xform; // MWT_SET
+      end;
+      Ref.ScaleMatrix;
     end;
   EMR_EXTCREATEFONTINDIRECTW:
     {$ifdef FPC}
@@ -2461,6 +2493,13 @@ begin
     with PEMRCreatePen(Rec)^ do begin
       Ref.DeleteObj(ihPen-1);
       Ref.CreatePenObj(ihPen-1, lopn.lopnColor,lopn.lopnWidth.X, lopn.lopnStyle);
+    end;
+  EMR_EXTCREATEPEN: // approximate: solid colour and width only
+    with PEMRExtCreatePen(Rec)^ do begin
+      Ref.DeleteObj(ihPen-1);
+      if elp.elpPenStyle and PS_TYPE_MASK=PS_COSMETIC then
+        Ref.CreatePenObj(ihPen-1,elp.elpColor,0,elp.elpPenStyle and PS_STYLE_MASK) else
+        Ref.CreatePenObj(ihPen-1,elp.elpColor,elp.elpWidth,elp.elpPenStyle and PS_STYLE_MASK);
     end;
   EMR_CREATEBRUSHINDIRECT:
     with PEMRCreateBrushIndirect(Rec)^ do begin
@@ -2635,7 +2674,7 @@ begin
   case Rec^.iType of
     EMR_HEADER, EMR_SETWINDOWEXTEX, EMR_SETWINDOWORGEX,
     EMR_SETVIEWPORTEXTEX, EMR_SETVIEWPORTORGEX:
-      Ref.ScaleMatrix(0);
+      Ref.ScaleMatrix;
   end;
 end;
 
@@ -2739,6 +2778,8 @@ begin
     with Ref.DC[0] do begin
       Int64(WinSize) := PInt64(@GR.Width)^;
       ViewSize := WinSize;
+      WorldTransform.eM11 := 1;
+      WorldTransform.eM22 := 1;
     end;
     Ref.gdip := self;
     Ref.destDC := CreateCompatibleDC(Dest);
@@ -3047,7 +3088,7 @@ begin
     gdip.DeleteRegion(ClipRegion);
   end;
   dec(nDC);
-  ScaleMatrix(0);
+  ScaleMatrix;
 //  with DC[nDC] do
 //    Gdip.SetWorldTransform(Graphics,destMatrix);
 end;
@@ -3063,9 +3104,9 @@ begin
   end;
 end;
 
-procedure TGDIPlusEnum.ScaleMatrix(matrixOrg: THandle);
+procedure TGDIPlusEnum.ScaleMatrix;
 var P: TPoint;
-    matrix: THandle;
+    matrix, matrixOrg: THandle;
 begin
   with DC[nDC] do begin
     P.X := MulDiv(ViewOrg.x, WinSize.cx, ViewSize.cx) - WinOrg.x;
@@ -3073,8 +3114,10 @@ begin
     Gdip.CreateMatrix2(ViewSize.cx/WinSize.cx,0,0,ViewSize.cy/WinSize.cy,
       P.X,P.Y,matrix);
     Gdip.MultiplyMatrix(matrix,destMatrix);
-    if matrixOrg<>0 then
-      Gdip.MultiplyMatrix(matrix,matrixOrg);
+    with WorldTransform do
+      Gdip.CreateMatrix2(eM11,eM12,eM21,eM22,eDx,eDy,matrixOrg);
+    Gdip.MultiplyMatrix(matrix,matrixOrg);
+    Gdip.DeleteMatrix(matrixOrg);
     Gdip.SetWorldTransform(Graphics,matrix);
     Gdip.DeleteMatrix(matrix);
   end;
