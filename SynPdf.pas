@@ -5855,6 +5855,12 @@ procedure TPdfDocument.FreeDoc;
 var i: integer;
 begin
   if FXObjectList<>nil then begin
+    if assigned(FCanvas) then
+    begin
+      FCanvas.FPage := nil;
+      FCanvas.FPageFontList := nil;
+      FCanvas.FContents := nil;
+    end;
     FreeAndNil(FXObjectList);
     for i := FFontList.Count-1 downto 0 do
       TObject(FFontList.List[i]).Free;
@@ -5864,6 +5870,7 @@ begin
     FreeAndNil(FObjectList);
     FreeAndNil(FXref);
     FreeAndNil(FTrailer);
+    fRawPages.Clear;
   end;
 end;
 
