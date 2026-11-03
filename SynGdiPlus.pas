@@ -2368,6 +2368,9 @@ type
 
 const
   GdipRectFNull: TGdipRectF = (X:0;Y:0;Width:0;Height:0);
+  // the order of GdipMultiplyMatrix: the second matrix on the left or right
+  MATRIX_ORDER_PREPEND = 0;
+  MATRIX_ORDER_APPEND = 1;
 
 function DXTextWidth(DX: PIntegerArray; n: Integer): integer;
 var i: integer;
@@ -3117,18 +3120,22 @@ begin
 end;
 
 procedure TGDIPlusEnum.ScaleMatrix;
-var P: TPoint;
+var sx, sy: single;
     matrix, matrixOrg: THandle;
 begin
   with DC[nDC] do begin
-    P.X := MulDiv(ViewOrg.x, WinSize.cx, ViewSize.cx) - WinOrg.x;
-    P.Y := MulDiv(ViewOrg.y, WinSize.cy, ViewSize.cy) - WinOrg.y;
-    Gdip.CreateMatrix2(ViewSize.cx/WinSize.cx,0,0,ViewSize.cy/WinSize.cy,
-      P.X,P.Y,matrix);
-    Gdip.MultiplyMatrix(matrix,destMatrix);
+    // a page point p is at (p-WinOrg)*View/Win+ViewOrg on the device,
+    // not rounded: the playback transform may scale it a lot
+    sx := ViewSize.cx/WinSize.cx;
+    sy := ViewSize.cy/WinSize.cy;
+    Gdip.CreateMatrix2(sx,0,0,sy,ViewOrg.x-WinOrg.x*sx,ViewOrg.y-WinOrg.y*sy,matrix);
+    // GDI+ multiplies row vectors: World x Map x Dest applies the world
+    // transform, then the mapping, then the playback transform of the target
+    // (EnumEnhMetaFile maps the frame of the metafile to its rectangle)
+    Gdip.MultiplyMatrix(matrix,destMatrix,MATRIX_ORDER_APPEND);
     with WorldTransform do
       Gdip.CreateMatrix2(eM11,eM12,eM21,eM22,eDx,eDy,matrixOrg);
-    Gdip.MultiplyMatrix(matrix,matrixOrg);
+    Gdip.MultiplyMatrix(matrix,matrixOrg,MATRIX_ORDER_PREPEND);
     Gdip.DeleteMatrix(matrixOrg);
     Gdip.SetWorldTransform(Graphics,matrix);
     Gdip.DeleteMatrix(matrix);
