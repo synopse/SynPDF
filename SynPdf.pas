@@ -6470,6 +6470,13 @@ begin
   FFactorY := FFactor;
   FDevScaleX := 1;
   FDevScaleY := 1;
+  // identity window/viewport/world mapping until a metafile is rendered
+  FWinSize.cx := 1;
+  FWinSize.cy := 1;
+  FViewSize.cx := 1;
+  FViewSize.cy := 1;
+  FWorldFactorX := 1;
+  FWorldFactorY := 1;
   FMappingMode := MM_TEXT;
   fUseMetaFileTextPositioning := tpSetTextJustification;
   fKerningHScaleBottom := 99.0;
